@@ -68,6 +68,44 @@ Those numbers are measured, not guessed. Replaying a slice of a real profile:
 | 3 attempts, 3s/9s, 700ms stagger | 7/8 |
 | 4 attempts, 5s/15s/30s, 1.2s stagger | 12/12 |
 
+### Per-link quality, read from the video
+
+Paste a single video link and the app probes it, then shows a panel with the
+title, thumbnail and **the quality tiers that video actually has** — 8K appears
+only when the video really offers it. Pick one and download; the choice applies
+to that job only, leaving the global default alone.
+
+Tiers come from yt-dlp's `format_note`, **not** from pixel height. An ultrawide
+8K stream is 7680x3200, so its height is 3200 — calling it "3200p" would be
+both wrong and unrecognisable, while the platform labels it `4320p`. Height is
+only the fallback when a format carries no note. Frame-rate variants ("1080p60"
+and "1080p") collapse into one entry, and audio-only formats are excluded.
+
+Probing is debounced and only runs for a single link — inspecting ten pasted
+URLs while someone is still typing would fire ten network requests. Multi-link
+pastes queue immediately at the global quality, as before.
+
+### Choosing quality
+
+The Downloads page has a **Quality** picker: Best available, 2160p, 1440p,
+1080p, 720p, 480p or 360p. The choice is saved next to the download folder and
+survives restarts.
+
+Every selector ends in a bare `b` fallback, so a video with nothing at the
+requested height still downloads at whatever it does have, rather than failing
+with "requested format is not available".
+
+Measured against a real YouTube video offering up to 1080p:
+
+| selection | with FFmpeg | without |
+|---|---|---|
+| Best   | 1080p | 360p |
+| ≤1080p | 1080p | 360p |
+| ≤720p  | 720p  | 360p |
+| ≤480p  | 480p  | 360p |
+
+That right-hand column is the point of the next section.
+
 ### YouTube quality needs FFmpeg
 
 Above 360p, YouTube serves video and audio as **separate streams**. Without a
@@ -95,10 +133,28 @@ YouTube intermittently answers its own media URLs with `HTTP 403` for anonymous
 clients. It is genuinely intermittent — the same video 403s and then downloads
 minutes later.
 
-The app handles it with a player-client fallback chain rather than giving up:
-yt-dlp's default client first (full format ladder), then `mweb` (which still
-serves, but only format 18 at 360p). Measured: `tv`, `ios` and `web_safari`
-offered no usable progressive format at all, so they are not in the chain.
+The app handles it with a player-client fallback chain rather than giving up.
+**The order is quality-critical**, measured by downloading and probing the
+result:
+
+| client | result |
+|---|---|
+| default | 1080p |
+| `tv_embedded` | 1080p |
+| `web_embedded` | 1080p |
+| `android_vr` | 1080p |
+| `mweb` | **360p only** |
+| `web`, `ios` | no usable format |
+
+`mweb` is tried last precisely because it serves only format 18. An earlier
+version of this chain put it second, so every 403 — which is common — silently
+downgraded the download to 360p no matter what quality was selected. Any client
+added here must be checked for the same trap: one that "works" while quietly
+capping quality is worse than one that fails outright.
+
+A real chain walk on one video: default → 403, `tv_embedded` → 403,
+`web_embedded` → 1080p. Refusals shift per video and over time, which is why
+the chain has depth.
 
 A 403 is classified separately from rate limiting, because waiting doesn't help
 — only asking as a different client does — so it retries immediately instead of

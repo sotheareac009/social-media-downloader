@@ -24,6 +24,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -31,11 +32,15 @@ use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use url::Url;
 
+use crate::download::quality::Quality;
 use crate::errors::{AppError, Result};
 
 /// Marker prefix for our machine-readable progress lines, chosen so it cannot
 /// collide with yt-dlp's ordinary human output.
 const PROGRESS_PREFIX: &str = "MDPROGRESS";
+
+/// Marker for the engine's report of where the finished file landed.
+const PATH_PREFIX: &str = "MDPATH ";
 
 /// Emitted for every progress line the engine prints.
 #[derive(Debug, Clone, Serialize)]
@@ -162,16 +167,33 @@ pub fn locate_ffmpeg() -> Option<PathBuf> {
 
 /// Player clients to try for YouTube, in order.
 ///
-/// `None` is yt-dlp's default, which offers the full format ladder up to 1080p
-/// and beyond. YouTube's anti-bot layer increasingly answers its media URLs
-/// with `HTTP 403`, and when it does, `mweb` still serves - but only format 18,
-/// which is 360p. So the order matters: best quality first, then the client
-/// that actually works.
+/// `None` is yt-dlp's default. YouTube's anti-bot layer intermittently answers
+/// its media URLs with `HTTP 403`, so a fallback chain is needed - but the
+/// order is quality-critical, and getting it wrong is not a subtle failure.
 ///
-/// Measured on one video: default → 1080p offered but 403 on fetch; `mweb` →
-/// 360p, downloaded fine. `tv`, `ios` and `web_safari` offered no usable
-/// progressive format at all.
-pub const YOUTUBE_CLIENTS: &[Option<&str>] = &[None, Some("mweb")];
+/// Measured on one video, downloading and probing the result:
+///
+/// | client         | result |
+/// |---|---|
+/// | default        | 1280p  |
+/// | `tv_embedded`  | 1280p  |
+/// | `web_embedded` | 1280p  |
+/// | `android_vr`   | 1280p  |
+/// | `mweb`         | 640p   |
+/// | `web`, `ios`   | no usable format |
+///
+/// `mweb` is last precisely because it serves only format 18. An earlier
+/// version of this chain put it second, so every 403 - which is common -
+/// silently downgraded the download to 360p no matter what quality the user
+/// had chosen. Anything added here must be checked for the same trap: a client
+/// that "works" while quietly capping quality is worse than one that fails.
+pub const YOUTUBE_CLIENTS: &[Option<&str>] = &[
+    None,
+    Some("tv_embedded"),
+    Some("web_embedded"),
+    Some("android_vr"),
+    Some("mweb"),
+];
 
 /// Apply a player-client override, if one is being tried.
 fn apply_client(cmd: &mut Command, client: Option<&str>) {
@@ -181,18 +203,7 @@ fn apply_client(cmd: &mut Command, client: Option<&str>) {
     }
 }
 
-/// The format selector to ask for, given whether a merger is available.
-///
-/// With FFmpeg: best video plus best audio, preferring mp4/m4a so the merge is
-/// a remux rather than a re-encode. Without it: the best *single* file, since
-/// a merge-only format would download in full and then fail at the last step.
-fn format_selector(has_ffmpeg: bool) -> &'static str {
-    if has_ffmpeg {
-        "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b[ext=mp4]/b"
-    } else {
-        "b[ext=mp4]/b[ext=mov]/b"
-    }
-}
+
 
 /// The engine's own version string, for the UI's diagnostics panel.
 pub async fn version() -> Result<String> {
@@ -250,13 +261,18 @@ pub async fn probe(url: &Url, client: Option<&str>) -> Result<MediaInfo> {
     let v: serde_json::Value =
         serde_json::from_slice(&out.stdout).map_err(|_| AppError::MalformedProviderResponse)?;
 
+    media_info_from(&v)
+}
+
+/// Shape a probe response into [`MediaInfo`].
+fn media_info_from(v: &serde_json::Value) -> Result<MediaInfo> {
     // A URL that resolves to a playlist still yields entries; take the first,
     // since `--no-playlist` means anything else is a shape we didn't ask for.
     let v = v
         .get("entries")
         .and_then(|e| e.get(0))
         .filter(|_| v.get("id").is_none())
-        .unwrap_or(&v);
+        .unwrap_or(v);
 
     let id = v.get("id").and_then(|x| x.as_str()).unwrap_or_default();
     if id.is_empty() {
@@ -372,15 +388,129 @@ pub async fn list_profile(url: &Url) -> Result<ProfileListing> {
     })
 }
 
+/// One quality tier a video actually offers.
+#[derive(Debug, Clone, Serialize)]
+pub struct VideoFormat {
+    /// The tier as the platform names it - "1080p", "4320p".
+    pub label: String,
+    /// The numeric tier, for matching against a [`Quality`] cap.
+    pub tier: u32,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+/// Metadata plus the quality tiers a specific link offers.
+#[derive(Debug, Clone, Serialize)]
+pub struct FormatReport {
+    pub info: MediaInfo,
+    /// Highest tier first.
+    pub formats: Vec<VideoFormat>,
+    pub best_label: Option<String>,
+}
+
+/// Read the tier a format belongs to.
+///
+/// `format_note` is the authority here, not `height`. An ultrawide 8K video is
+/// 7680x3200, so its height is 3200 and calling it "3200p" would be wrong -
+/// yt-dlp labels that same format `4320p`, which is what a person recognises.
+/// Height is only the fallback for formats with no note.
+fn format_tier(f: &serde_json::Value) -> Option<(u32, String)> {
+    // Skip audio-only entries; they have no quality tier to offer.
+    if f.get("vcodec").and_then(|v| v.as_str()) == Some("none") {
+        return None;
+    }
+
+    if let Some(note) = f.get("format_note").and_then(|v| v.as_str()) {
+        // "1080p60" and "1080p" are the same tier at different frame rates.
+        let digits: String = note.chars().take_while(char::is_ascii_digit).collect();
+        if let Ok(tier) = digits.parse::<u32>() {
+            if tier > 0 {
+                return Some((tier, format!("{tier}p")));
+            }
+        }
+    }
+
+    let height = f.get("height").and_then(|v| v.as_u64())? as u32;
+    (height > 0).then(|| (height, format!("{height}p")))
+}
+
+/// Probe a link for its metadata and the quality tiers it offers.
+///
+/// Tries each player client in turn: YouTube's anti-bot layer can refuse one
+/// client's metadata while another answers, exactly as it does for media.
+pub async fn inspect_formats(url: &Url, clients: &[Option<&str>]) -> Result<FormatReport> {
+    let mut last = AppError::NoMediaFound;
+
+    for client in clients {
+        match inspect_formats_once(url, *client).await {
+            Ok(report) => return Ok(report),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+async fn inspect_formats_once(url: &Url, client: Option<&str>) -> Result<FormatReport> {
+    let mut cmd = Command::new(engine_path()?);
+    hardened_base(&mut cmd);
+    apply_client(&mut cmd, client);
+    cmd.arg("--no-playlist")
+        .arg("--dump-single-json")
+        .arg("--no-warnings")
+        .arg(url.as_str())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let out = cmd.output().await.map_err(|_| AppError::EngineMissing)?;
+    if !out.status.success() {
+        return Err(classify_failure(&String::from_utf8_lossy(&out.stderr)));
+    }
+
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).map_err(|_| AppError::MalformedProviderResponse)?;
+
+    let mut seen: std::collections::BTreeMap<u32, VideoFormat> = Default::default();
+    for f in v.get("formats").and_then(|f| f.as_array()).into_iter().flatten() {
+        if let Some((tier, label)) = format_tier(f) {
+            seen.entry(tier).or_insert(VideoFormat {
+                label,
+                tier,
+                width: f.get("width").and_then(|w| w.as_u64()).map(|w| w as u32),
+                height: f.get("height").and_then(|h| h.as_u64()).map(|h| h as u32),
+            });
+        }
+    }
+
+    let formats: Vec<VideoFormat> = seen.into_values().rev().collect();
+    let best_label = formats.first().map(|f| f.label.clone());
+
+    Ok(FormatReport {
+        info: media_info_from(&v)?,
+        formats,
+        best_label,
+    })
+}
+
 /// A download in flight. Dropping this does not stop the child; call
 /// [`Running::kill`].
 pub struct Running {
     child: Child,
+    /// Filled by the stdout reader when the engine reports its final path.
+    output_path: Arc<Mutex<Option<String>>>,
 }
 
 impl Running {
     pub async fn kill(&mut self) {
         let _ = self.child.kill().await;
+    }
+
+    /// Where the finished file actually landed, as reported by the engine.
+    ///
+    /// Worth asking for rather than guessing: picking "the newest file in the
+    /// folder" mis-attributes whenever two downloads finish close together,
+    /// which is exactly what a queue of large videos does.
+    pub fn output_path(&self) -> Option<String> {
+        self.output_path.lock().ok().and_then(|p| p.clone())
     }
 }
 
@@ -393,6 +523,7 @@ pub fn start(
     dest_dir: &Path,
     tx: mpsc::UnboundedSender<Progress>,
     client: Option<&str>,
+    quality: Quality,
 ) -> Result<Running> {
     let template = format!(
         "{PROGRESS_PREFIX} %(progress.downloaded_bytes)s %(progress.total_bytes,progress.total_bytes_estimate)s %(progress.speed)s %(progress.eta)s"
@@ -404,7 +535,7 @@ pub fn start(
     apply_client(&mut cmd, client);
     cmd.arg("--no-playlist")
         .arg("-f")
-        .arg(format_selector(ffmpeg.is_some()))
+        .arg(quality.format_selector(ffmpeg.is_some()))
         .arg("-o")
         // Byte-truncated so a long caption cannot exceed the filesystem's
         // name limit; the id keeps two posts with the same title distinct.
@@ -413,6 +544,18 @@ pub fn start(
         .arg("--progress-template")
         .arg(&template)
         .arg("--no-warnings")
+        // Ask the engine to name its own output rather than inferring it.
+        //
+        // `--print` implies BOTH `--simulate` and `--quiet`. `--no-simulate`
+        // keeps the download; `--progress --no-quiet` keeps the progress
+        // stream, without which this whole command downloads in silence. That
+        // is not hypothetical - it shipped that way and killed every progress
+        // bar, which is why the two negations below are load-bearing.
+        .arg("--no-simulate")
+        .arg("--progress")
+        .arg("--no-quiet")
+        .arg("--print")
+        .arg(format!("after_move:{PATH_PREFIX}%(filepath)s"))
         .arg(url.as_str())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -432,9 +575,18 @@ pub fn start(
         .take()
         .ok_or_else(|| AppError::Internal("engine stdout unavailable".into()))?;
 
+    let output_path = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&output_path);
+
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(path) = line.trim().strip_prefix(PATH_PREFIX) {
+                if let Ok(mut slot) = sink.lock() {
+                    *slot = Some(path.to_string());
+                }
+                continue;
+            }
             if let Some(p) = parse_progress(&line) {
                 // A closed receiver means the job is gone; stop parsing.
                 if tx.send(p).is_err() {
@@ -444,7 +596,7 @@ pub fn start(
         }
     });
 
-    Ok(Running { child })
+    Ok(Running { child, output_path })
 }
 
 /// Await completion, mapping a non-zero exit to a specific error.
@@ -595,21 +747,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quality_depends_on_whether_a_merger_is_available() {
-        // Without FFmpeg the selector must never ask for `video+audio`: that
-        // format downloads in full and then fails at the merge step.
-        let without = format_selector(false);
-        assert!(!without.contains('+'), "{without}");
-
-        // With it, the merged form must be preferred over the progressive
-        // fallback, or YouTube silently caps at 360p.
-        let with = format_selector(true);
-        assert!(with.starts_with("bv*"), "{with}");
-        assert!(with.contains('+'), "{with}");
-        assert!(with.ends_with("/b"), "a single-file fallback must remain: {with}");
-    }
-
-    #[test]
     fn parses_a_complete_progress_line() {
         let p = parse_progress("MDPROGRESS 1048576 4194304 524288.0 6").unwrap();
         assert_eq!(p.downloaded_bytes, 1_048_576);
@@ -660,6 +797,57 @@ mod tests {
                 "{stderr}"
             );
         }
+    }
+
+    #[test]
+    fn a_tier_comes_from_the_note_not_the_pixel_height() {
+        // A real 8K ultrawide format: 7680x3200. Calling this "3200p" would be
+        // wrong and unrecognisable; yt-dlp itself labels it 4320p.
+        let f = serde_json::json!({
+            "vcodec": "vp9", "width": 7680, "height": 3200, "format_note": "4320p"
+        });
+        assert_eq!(format_tier(&f), Some((4320, "4320p".to_string())));
+    }
+
+    #[test]
+    fn frame_rate_does_not_split_a_tier() {
+        // "1080p60" and "1080p" are one entry in the picker, not two.
+        let sixty = serde_json::json!({"vcodec": "avc1", "height": 1080, "format_note": "1080p60"});
+        let plain = serde_json::json!({"vcodec": "avc1", "height": 1080, "format_note": "1080p"});
+        assert_eq!(format_tier(&sixty), format_tier(&plain));
+    }
+
+    #[test]
+    fn height_is_the_fallback_when_a_note_is_missing_or_unhelpful() {
+        let no_note = serde_json::json!({"vcodec": "avc1", "height": 720});
+        assert_eq!(format_tier(&no_note), Some((720, "720p".to_string())));
+
+        // Some formats carry a descriptive note rather than a resolution.
+        let worded = serde_json::json!({"vcodec": "avc1", "height": 480, "format_note": "tiny"});
+        assert_eq!(format_tier(&worded), Some((480, "480p".to_string())));
+    }
+
+    #[test]
+    fn audio_only_formats_are_not_quality_tiers() {
+        let audio = serde_json::json!({"vcodec": "none", "acodec": "mp4a", "format_note": "medium"});
+        assert_eq!(format_tier(&audio), None);
+    }
+
+    #[test]
+    fn the_quality_capping_client_is_the_last_resort() {
+        // `mweb` only ever serves 360p. If it moves up the chain, a routine
+        // 403 downgrades every download regardless of the quality setting -
+        // which is exactly the bug this ordering fixes.
+        let idx = YOUTUBE_CLIENTS
+            .iter()
+            .position(|c| *c == Some("mweb"))
+            .expect("mweb must stay in the chain as a last resort");
+        assert_eq!(
+            idx,
+            YOUTUBE_CLIENTS.len() - 1,
+            "mweb caps at 360p and must be tried last: {YOUTUBE_CLIENTS:?}"
+        );
+        assert_eq!(YOUTUBE_CLIENTS[0], None, "the default client offers the most");
     }
 
     #[test]

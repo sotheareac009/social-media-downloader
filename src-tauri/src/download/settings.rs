@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::download::quality::Quality;
+
 const FILE_NAME: &str = "downloader-settings.json";
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -20,6 +22,10 @@ pub struct Settings {
     /// deleted or unreadable file resolves to.
     #[serde(default)]
     pub destination: Option<PathBuf>,
+    /// Absent means "best available", which is also what an unreadable or
+    /// hand-edited value falls back to.
+    #[serde(default)]
+    pub quality: Quality,
 }
 
 impl Settings {
@@ -78,19 +84,36 @@ mod tests {
         let dir = scratch("roundtrip");
         let s = Settings {
             destination: Some(PathBuf::from("/tmp/somewhere")),
+            quality: Quality::P1080,
         };
         s.save(&dir).unwrap();
-        assert_eq!(
-            Settings::load(&dir).destination,
-            Some(PathBuf::from("/tmp/somewhere"))
-        );
+        let back = Settings::load(&dir);
+        assert_eq!(back.destination, Some(PathBuf::from("/tmp/somewhere")));
+        assert_eq!(back.quality, Quality::P1080);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_missing_file_is_defaults_not_an_error() {
         let dir = scratch("missing");
-        assert!(Settings::load(&dir).destination.is_none());
+        let s = Settings::load(&dir);
+        assert!(s.destination.is_none());
+        assert_eq!(s.quality, Quality::Best);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_settings_file_from_before_quality_existed_still_loads() {
+        // Upgrading must not reset someone's download folder.
+        let dir = scratch("legacy");
+        std::fs::write(
+            dir.join(FILE_NAME),
+            r#"{"destination":"/tmp/legacy-folder"}"#,
+        )
+        .unwrap();
+        let s = Settings::load(&dir);
+        assert_eq!(s.destination, Some(PathBuf::from("/tmp/legacy-folder")));
+        assert_eq!(s.quality, Quality::Best);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -108,6 +131,7 @@ mod tests {
         let default = PathBuf::from("/tmp/default-dl");
         let settings = Settings {
             destination: Some(PathBuf::from("/Volumes/UnpluggedDrive/Videos")),
+            ..Settings::default()
         };
         assert_eq!(resolve_destination(&settings, default.clone()), default);
     }
@@ -117,6 +141,7 @@ mod tests {
         let dir = scratch("still-there");
         let settings = Settings {
             destination: Some(dir.clone()),
+            ..Settings::default()
         };
         assert_eq!(
             resolve_destination(&settings, PathBuf::from("/tmp/default-dl")),

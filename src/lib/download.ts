@@ -95,6 +95,45 @@ export interface Submission {
   rejected: RejectedLink[];
 }
 
+export type Quality =
+  | "best"
+  | "4320p"
+  | "2160p"
+  | "1440p"
+  | "1080p"
+  | "720p"
+  | "480p"
+  | "360p";
+
+export interface QualityOption {
+  id: Quality;
+  label: string;
+  /** True when the option needs FFmpeg to mean anything on YouTube. */
+  needs_ffmpeg: boolean;
+}
+
+export interface QualitySettings {
+  selected: Quality;
+  options: QualityOption[];
+  has_ffmpeg: boolean;
+}
+
+/** One quality tier a specific video offers. */
+export interface VideoFormat {
+  /** The tier as the platform names it — "1080p", "4320p". */
+  label: string;
+  tier: number;
+  width: number | null;
+  height: number | null;
+}
+
+export interface FormatReport {
+  info: MediaInfo;
+  /** Highest tier first. */
+  formats: VideoFormat[];
+  best_label: string | null;
+}
+
 export interface EngineStatus {
   available: boolean;
   path: string | null;
@@ -124,16 +163,20 @@ export const downloadEngineStatus = () =>
 export const downloadInspect = (url: string) =>
   invoke<MediaInfo>("download_inspect", { url });
 
+/** Read a link's real quality tiers without downloading it. */
+export const downloadInspectFormats = (url: string) =>
+  invoke<FormatReport>("download_inspect_formats", { url });
+
 export const downloadStart = (url: string) =>
   invoke<JobView>("download_start", { url });
 
 /** Submit a whole paste — any mix of video links and profile links. */
-export const downloadSubmit = (urls: string[]) =>
-  invoke<Submission>("download_submit", { urls });
+export const downloadSubmit = (urls: string[], quality?: Quality) =>
+  invoke<Submission>("download_submit", { urls, quality: quality ?? null });
 
 /** Queue every video from a profile the user confirmed. */
-export const downloadStartMany = (urls: string[]) =>
-  invoke<JobView[]>("download_start_many", { urls });
+export const downloadStartMany = (urls: string[], quality?: Quality) =>
+  invoke<JobView[]>("download_start_many", { urls, quality: quality ?? null });
 
 export const downloadList = () => invoke<JobView[]>("download_list");
 
@@ -145,6 +188,12 @@ export const downloadRemove = (id: string) =>
 
 export const downloadClearFinished = () =>
   invoke<number>("download_clear_finished");
+
+export const downloadGetQuality = () =>
+  invoke<QualitySettings>("download_get_quality");
+
+export const downloadSetQuality = (quality: Quality) =>
+  invoke<Quality>("download_set_quality", { quality });
 
 export const downloadGetDestination = () =>
   invoke<Destination>("download_get_destination");

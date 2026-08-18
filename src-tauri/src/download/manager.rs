@@ -17,9 +17,12 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, Semaphore};
 
+use crate::download::quality::Quality;
 use crate::download::settings::Settings;
 use crate::download::url::{classify, classify_target, Source, TargetKind};
-use crate::download::ytdlp::{self, MediaInfo, Progress, ProfileListing, YOUTUBE_CLIENTS};
+use crate::download::ytdlp::{
+    self, FormatReport, MediaInfo, Progress, ProfileListing, YOUTUBE_CLIENTS,
+};
 use crate::errors::{AppError, Result};
 
 pub mod events {
@@ -123,6 +126,9 @@ pub struct ProgressEvent {
 
 struct Job {
     view: JobView,
+    /// Set when this job was queued at a quality other than the global
+    /// preference - a per-link choice made from the inspection panel.
+    quality: Option<Quality>,
 }
 
 /// State of the tooling on this machine, for the UI's setup notice.
@@ -154,6 +160,7 @@ pub struct DownloadManager {
     /// Insertion order, newest last - `HashMap` alone cannot render a list.
     order: Mutex<Vec<String>>,
     dest_dir: Mutex<PathBuf>,
+    quality: Mutex<Quality>,
     /// Where the app would save with no preference set.
     default_dir: PathBuf,
     /// Where `downloader-settings.json` lives.
@@ -172,6 +179,7 @@ impl DownloadManager {
             jobs: Mutex::new(HashMap::new()),
             order: Mutex::new(Vec::new()),
             dest_dir: Mutex::new(active),
+            quality: Mutex::new(saved.quality),
             default_dir,
             config_dir,
             slots: Arc::new(Semaphore::new(MAX_CONCURRENT)),
@@ -223,12 +231,34 @@ impl DownloadManager {
         Ok(self.destination_view())
     }
 
+    pub fn quality(&self) -> Quality {
+        *self.quality.lock().expect("quality lock")
+    }
+
+    /// Change the quality preference. Applies to jobs started from now on;
+    /// one already downloading keeps the format it negotiated.
+    pub fn set_quality(&self, quality: Quality) -> Result<Quality> {
+        *self.quality.lock().expect("quality lock") = quality;
+        self.persist(self.saved_destination())?;
+        Ok(quality)
+    }
+
+    /// The destination as it should be *stored* - `None` when it's the default,
+    /// so a later change to the default is picked up rather than frozen.
+    fn saved_destination(&self) -> Option<PathBuf> {
+        let current = self.destination();
+        (current != self.default_dir).then_some(current)
+    }
+
     /// A preference that cannot be written is reported rather than swallowed:
     /// silently forgetting the choice on every restart is worse than an error.
     fn persist(&self, destination: Option<PathBuf>) -> Result<()> {
-        Settings { destination }
-            .save(&self.config_dir)
-            .map_err(|e| AppError::DownloadPath(format!("could not save your choice: {e}")))
+        Settings {
+            destination,
+            quality: self.quality(),
+        }
+        .save(&self.config_dir)
+        .map_err(|e| AppError::DownloadPath(format!("could not save your choice: {e}")))
     }
 
     pub async fn engine_status(&self) -> EngineStatus {
@@ -255,6 +285,29 @@ impl DownloadManager {
     pub async fn inspect(&self, raw: &str) -> Result<MediaInfo> {
         let (_, url) = classify(raw)?;
         ytdlp::probe(&url, None).await
+    }
+
+    /// Read a link's metadata and the quality tiers it actually offers.
+    pub async fn inspect_formats(&self, raw: &str) -> Result<FormatReport> {
+        let (source, url, kind) = classify_target(raw)?;
+        if kind != TargetKind::Single {
+            return Err(AppError::UnsupportedUrl);
+        }
+        let clients: &[Option<&str>] = match source {
+            Source::YouTube => YOUTUBE_CLIENTS,
+            _ => &[None],
+        };
+        ytdlp::inspect_formats(&url, clients).await
+    }
+
+    /// The quality a job should download at: its own choice, or the default.
+    fn quality_for(&self, id: &str) -> Quality {
+        self.jobs
+            .lock()
+            .expect("jobs lock")
+            .get(id)
+            .and_then(|j| j.quality)
+            .unwrap_or_else(|| self.quality())
     }
 
     /// List a creator's videos without downloading any of them.
@@ -287,7 +340,7 @@ impl DownloadManager {
 
     /// Validate a link and queue it. Returns as soon as the job exists, so the
     /// UI can render a row immediately; the work happens on a spawned task.
-    pub fn enqueue(&self, app: &AppHandle, raw: &str) -> Result<JobView> {
+    pub fn enqueue(&self, app: &AppHandle, raw: &str, quality: Option<Quality>) -> Result<JobView> {
         let (source, url) = classify(raw)?;
 
         // Fail fast rather than queueing something that cannot possibly run.
@@ -320,7 +373,13 @@ impl DownloadManager {
 
         {
             let mut jobs = self.jobs.lock().expect("jobs lock");
-            jobs.insert(id.clone(), Job { view: view.clone() });
+            jobs.insert(
+                id.clone(),
+                Job {
+                    view: view.clone(),
+                    quality,
+                },
+            );
             self.order.lock().expect("order lock").push(id.clone());
         }
         let _ = app.emit(events::CREATED, view.clone());
@@ -387,11 +446,16 @@ impl DownloadManager {
     ///
     /// Returns only the jobs that were created: a single bad entry in a
     /// 133-video profile must not discard the other 132.
-    pub fn enqueue_all(&self, app: &AppHandle, urls: &[String]) -> (Vec<JobView>, usize) {
+    pub fn enqueue_all(
+        &self,
+        app: &AppHandle,
+        urls: &[String],
+        quality: Option<Quality>,
+    ) -> (Vec<JobView>, usize) {
         let mut queued = Vec::with_capacity(urls.len());
         let mut failed = 0usize;
         for url in urls {
-            match self.enqueue(app, url) {
+            match self.enqueue(app, url, quality) {
                 Ok(v) => queued.push(v),
                 Err(_) => failed += 1,
             }
@@ -561,7 +625,7 @@ async fn attempt_job(
     }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Progress>();
-    let mut running = match ytdlp::start(url, &dest, tx, client) {
+    let mut running = match ytdlp::start(url, &dest, tx, client, manager.quality_for(id)) {
         Ok(r) => r,
         Err(e) => return Outcome::from(e),
     };
@@ -572,15 +636,38 @@ async fn attempt_job(
         let app = app.clone();
         let id = id.to_string();
         tokio::spawn(async move {
+            // A merged download is two downloads: yt-dlp reports the video
+            // stream to completion, then restarts the counter at zero for the
+            // audio stream. Reported verbatim, the bar would jump backwards
+            // and the finished size would be the *audio* track alone - 1.1 MB
+            // for an 8 MB file. So finished streams are accumulated into a
+            // base that later streams are added to.
+            let mut base = 0u64;
+            let mut last = 0u64;
+
             while let Some(p) = rx.recv().await {
+                if p.downloaded_bytes < last {
+                    base += last;
+                }
+                last = p.downloaded_bytes;
+
+                let downloaded = base + p.downloaded_bytes;
+                // The total only covers streams seen so far, so it grows as
+                // each new one starts. Monotonic progress matters more here
+                // than a total that is exact before the end.
+                let total = p.total_bytes.map(|t| base + t);
+                let fraction = total
+                    .filter(|t| *t > 0)
+                    .map(|t| (downloaded as f64 / t as f64).clamp(0.0, 1.0));
+
                 let changed = manager.mutate(&id, |v| {
-                    v.downloaded_bytes = p.downloaded_bytes;
-                    if p.total_bytes.is_some() {
-                        v.total_bytes = p.total_bytes;
+                    v.downloaded_bytes = downloaded;
+                    if total.is_some() {
+                        v.total_bytes = total;
                     }
                     v.speed_bps = p.speed_bps;
                     v.eta_seconds = p.eta_seconds;
-                    v.fraction = p.fraction;
+                    v.fraction = fraction;
                 });
                 if changed.is_none() {
                     break; // cancelled or removed
@@ -589,11 +676,11 @@ async fn attempt_job(
                     events::PROGRESS,
                     ProgressEvent {
                         id: id.clone(),
-                        downloaded_bytes: p.downloaded_bytes,
-                        total_bytes: p.total_bytes,
+                        downloaded_bytes: downloaded,
+                        total_bytes: total,
                         speed_bps: p.speed_bps,
                         eta_seconds: p.eta_seconds,
-                        fraction: p.fraction,
+                        fraction,
                     },
                 );
             }
@@ -613,14 +700,34 @@ async fn attempt_job(
 
     match outcome {
         Ok(()) => {
-            let path = newest_file_in(&dest);
+            // The engine's own report, with the folder scan as a fallback for
+            // an older yt-dlp that doesn't print it.
+            let path = running.output_path().or_else(|| newest_file_in(&dest));
+            // The file on disk is the only honest answer for "how big is it".
+            // Summed stream counters miss container overhead, and a remux
+            // changes the size again - so measure rather than infer.
+            let actual = path
+                .as_deref()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .filter(|m| m.is_file())
+                .map(|m| m.len());
+
             if let Some(v) = manager.mutate(id, |v| {
                 v.status = JobStatus::Completed;
                 v.speed_bps = None;
                 v.eta_seconds = None;
                 v.fraction = Some(1.0);
-                if let Some(t) = v.total_bytes {
-                    v.downloaded_bytes = v.downloaded_bytes.max(t);
+                match actual {
+                    Some(size) => {
+                        v.downloaded_bytes = size;
+                        v.total_bytes = Some(size);
+                    }
+                    // No path reported: fall back to the counters we have.
+                    None => {
+                        if let Some(t) = v.total_bytes {
+                            v.downloaded_bytes = v.downloaded_bytes.max(t);
+                        }
+                    }
                 }
                 v.output_path = path.clone();
             }) {
@@ -660,8 +767,11 @@ fn finish_failed(manager: &Arc<DownloadManager>, app: &AppHandle, id: &str, e: A
     }
 }
 
-/// yt-dlp's final path is not reported on stdout in a form we parse, so the
-/// most recently written media file in the destination is used instead.
+/// Fallback for when the engine didn't report its output path: the most
+/// recently written media file in the destination.
+///
+/// Approximate by nature - with two downloads finishing together it can name
+/// the wrong one - which is why [`Running::output_path`] is preferred.
 fn newest_file_in(dir: &std::path::Path) -> Option<String> {
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {

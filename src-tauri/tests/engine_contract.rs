@@ -15,6 +15,7 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use media_downloader_lib::download::quality::Quality;
 use media_downloader_lib::download::ytdlp;
 use media_downloader_lib::errors::AppError;
 use tokio::sync::mpsc;
@@ -98,6 +99,33 @@ echo '{{"id":"abc123","title":"A public reel","uploader":"someone","duration":12
         "no credential may ever reach the engine; got:\n{argv}"
     );
 
+    // ---- 1b. the download command keeps its progress stream ----------------
+    // `--print` implies both `--simulate` and `--quiet`. Shipping it without
+    // both negations produced a silent download: no progress bar, and a
+    // finished size taken from a stale estimate. These flags look redundant
+    // and are not.
+    let dl_argv = dir.join("dl-argv.txt");
+    install_stub(
+        &dir,
+        "argv",
+        &format!(r#"printf '%s\n' "$@" > {}"#, dl_argv.display()),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut running = ytdlp::start(&url, &dir, tx, None, Quality::Best).unwrap();
+    let _ = ytdlp::wait(&mut running).await;
+
+    let argv = std::fs::read_to_string(&dl_argv).unwrap();
+    for required in ["--no-simulate", "--progress", "--no-quiet"] {
+        assert!(
+            argv.lines().any(|l| l == required),
+            "{required} must accompany --print or the download runs silent; got:\n{argv}"
+        );
+    }
+    assert!(
+        argv.lines().any(|l| l.starts_with("after_move:")),
+        "the engine must still be asked to report its output path:\n{argv}"
+    );
+
     // ---- 2. progress lines cross the pipe and parse ------------------------
     install_stub(
         &dir,
@@ -106,11 +134,12 @@ echo '{{"id":"abc123","title":"A public reel","uploader":"someone","duration":12
 echo "[download] Destination: video.mp4"
 echo "MDPROGRESS 2000 4000 500000.0 4"
 echo "MDPROGRESS 4000 4000 500000.0 0"
+echo "MDPATH /tmp/somewhere/A Video [abc123].mp4"
 exit 0"#,
     );
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut running = ytdlp::start(&url, &dir, tx, None).expect("spawn");
+    let mut running = ytdlp::start(&url, &dir, tx, None, Quality::Best).expect("spawn");
     ytdlp::wait(&mut running).await.expect("clean exit");
 
     let mut seen = Vec::new();
@@ -122,6 +151,12 @@ exit 0"#,
     assert_eq!(seen[1].fraction, Some(0.5));
     assert_eq!(seen[2].fraction, Some(1.0));
     assert_eq!(seen[2].eta_seconds, Some(0));
+    // The engine names its own output; a path with spaces must survive intact.
+    assert_eq!(
+        running.output_path().as_deref(),
+        Some("/tmp/somewhere/A Video [abc123].mp4"),
+        "the reported path must be used rather than guessed"
+    );
 
     // ---- 3. a login wall becomes MediaNotPublic, not a generic failure -----
     install_stub(
@@ -131,7 +166,7 @@ exit 0"#,
 exit 1"#,
     );
     let (tx, _rx) = mpsc::unbounded_channel();
-    let mut running = ytdlp::start(&url, &dir, tx, None).unwrap();
+    let mut running = ytdlp::start(&url, &dir, tx, None, Quality::Best).unwrap();
     match ytdlp::wait(&mut running).await {
         Err(AppError::MediaNotPublic) => {}
         other => panic!("expected MediaNotPublic, got {other:?}"),
@@ -140,7 +175,7 @@ exit 1"#,
     // ---- 4. cancellation actually kills the child --------------------------
     install_stub(&dir, "hang", r#"sleep 30"#);
     let (tx, _rx) = mpsc::unbounded_channel();
-    let mut running = ytdlp::start(&url, &dir, tx, None).unwrap();
+    let mut running = ytdlp::start(&url, &dir, tx, None, Quality::Best).unwrap();
     running.kill().await;
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),

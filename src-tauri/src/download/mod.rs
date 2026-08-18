@@ -18,6 +18,7 @@
 //! in, because the engine is never handed a cookie or a token.
 
 pub mod manager;
+pub mod quality;
 pub mod settings;
 pub mod url;
 pub mod ytdlp;

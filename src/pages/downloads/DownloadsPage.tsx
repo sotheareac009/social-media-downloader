@@ -4,6 +4,9 @@ import {
   downloadClearFinished,
   downloadEngineStatus,
   downloadGetDestination,
+  downloadGetQuality,
+  downloadInspectFormats,
+  downloadSetQuality,
   downloadList,
   downloadRemove,
   downloadReveal,
@@ -18,13 +21,18 @@ import {
   type Destination,
   type EngineStatus,
   type JobView,
+  type FormatReport,
   type ProfileListing,
+  type Quality,
+  type QualitySettings,
 } from "@/lib/download";
 import { toAuthError } from "@/lib/auth";
 import { DestinationBar } from "@/components/downloads/DestinationBar";
 import { EngineNotice } from "@/components/downloads/EngineNotice";
 import { JobCard } from "@/components/downloads/JobCard";
 import { ProfileCard } from "@/components/downloads/ProfileCard";
+import { QualityPicker } from "@/components/downloads/QualityPicker";
+import { FormatPanel } from "@/components/downloads/FormatPanel";
 import {
   countJobs,
   QueueSummary,
@@ -49,10 +57,19 @@ export function DownloadsPage() {
   // A folder the user has browsed to but not yet committed.
   const [pendingDest, setPendingDest] = useState<string | null>(null);
   const [destBusy, setDestBusy] = useState(false);
+  const [quality, setQuality] = useState<QualitySettings | null>(null);
+  const [qualityBusy, setQualityBusy] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   // Profiles found in a paste, waiting for the user to confirm the count.
   const [profiles, setProfiles] = useState<ProfileListing[]>([]);
   const [confirming, setConfirming] = useState<string | null>(null);
+  // A single pasted link, inspected so its real quality tiers can be offered.
+  const [report, setReport] = useState<FormatReport | null>(null);
+  const [reportFor, setReportFor] = useState<string | null>(null);
+  const [pickedQuality, setPickedQuality] = useState<Quality>("best");
+  // Held in a ref because the debounce has to be cancelled from the *next*
+  // keystroke, not by a React cleanup — the caller ignores our return value.
+  const inspectTimer = useRef<number | null>(null);
   const [filter, setFilter] = useState<QueueFilter>("all");
   const [retrying, setRetrying] = useState(false);
   // Armed by "Retry when finished": fires once nothing is in progress.
@@ -92,15 +109,17 @@ export function DownloadsPage() {
   useEffect(() => {
     void (async () => {
       try {
-        const [status, list, destination] = await Promise.all([
+        const [status, list, destination, q] = await Promise.all([
           downloadEngineStatus(),
           downloadList(),
           downloadGetDestination(),
+          downloadGetQuality(),
         ]);
         if (!mounted.current) return;
         setEngine(status);
         setJobs(list);
         setDest(destination);
+        setQuality(q);
       } catch {
         if (mounted.current) {
           setEngine({
@@ -317,6 +336,77 @@ export function DownloadsPage() {
     }
   }, [toast]);
 
+  const changeQuality = useCallback(
+    async (next: Quality) => {
+      setQualityBusy(true);
+      try {
+        await downloadSetQuality(next);
+        setQuality((prev) => (prev ? { ...prev, selected: next } : prev));
+      } catch (e) {
+        toast("error", toAuthError(e).message);
+      } finally {
+        if (mounted.current) setQualityBusy(false);
+      }
+    },
+    [toast],
+  );
+
+  /**
+   * Inspect a single pasted link after a pause in typing.
+   *
+   * Only for one link at a time: probing ten pasted URLs would fire ten
+   * network requests while someone is still editing. Failures are swallowed —
+   * this is an enhancement, and the paste box must keep working without it.
+   */
+  const onDraftChange = useCallback(
+    (urls: string[]) => {
+      if (inspectTimer.current !== null) {
+        window.clearTimeout(inspectTimer.current);
+        inspectTimer.current = null;
+      }
+
+      if (urls.length !== 1) {
+        setReport(null);
+        setReportFor(null);
+        return;
+      }
+      const url = urls[0];
+      if (url === reportFor) return;
+      setReportFor(url);
+      setReport(null);
+      if (!/^https?:\/\//i.test(url)) return;
+
+      inspectTimer.current = window.setTimeout(() => {
+        downloadInspectFormats(url)
+          .then((r) => {
+            // A slow probe can land after the box moved on; only apply it if
+            // this is still the link being looked at.
+            if (!mounted.current) return;
+            setReport(r);
+            setPickedQuality(quality?.selected ?? "best");
+          })
+          .catch(() => {});
+      }, 700);
+    },
+    [reportFor, quality],
+  );
+
+  const downloadInspected = useCallback(async () => {
+    if (!reportFor) return;
+    setSubmitting(true);
+    try {
+      const result = await downloadSubmit([reportFor], pickedQuality);
+      result.queued.forEach(upsert);
+      setReport(null);
+      setReportFor(null);
+    } catch (e) {
+      const err = toAuthError(e);
+      toast("error", downloadMessage(err.code, err.message));
+    } finally {
+      if (mounted.current) setSubmitting(false);
+    }
+  }, [reportFor, pickedQuality, upsert, toast]);
+
   const clearFinished = useCallback(async () => {
     await downloadClearFinished();
     setJobs((prev) => prev.filter((j) => !isTerminal(j.status)));
@@ -354,6 +444,9 @@ export function DownloadsPage() {
     setRechecking(true);
     try {
       const status = await refreshEngine();
+      downloadGetQuality()
+        .then((q) => mounted.current && setQuality(q))
+        .catch(() => {});
       toast(
         status.available ? "success" : "info",
         status.available
@@ -429,11 +522,20 @@ export function DownloadsPage() {
 
       <div className="rise" style={{ animationDelay: "60ms" }}>
         <UrlBar
+          onDraftChange={onDraftChange}
           onSubmit={(urls) => void start(urls)}
           busy={submitting}
           disabled={!engineReady}
         />
       </div>
+
+      {quality && (
+        <QualityPicker
+          settings={quality}
+          busy={qualityBusy}
+          onChange={(q) => void changeQuality(q)}
+        />
+      )}
 
       {dest && (
         <DestinationBar
@@ -446,6 +548,23 @@ export function DownloadsPage() {
           onReset={() => void resetFolder()}
           onOpen={() => void reveal(dest.path)}
         />
+      )}
+
+      {report && (
+        <div className="rise" style={{ marginTop: 14 }}>
+          <FormatPanel
+            report={report}
+            chosen={pickedQuality}
+            busy={submitting}
+            hasFfmpeg={engine?.has_ffmpeg ?? false}
+            onChoose={setPickedQuality}
+            onDownload={() => void downloadInspected()}
+            onDismiss={() => {
+              setReport(null);
+              setReportFor(null);
+            }}
+          />
+        </div>
       )}
 
       {profiles.length > 0 && (

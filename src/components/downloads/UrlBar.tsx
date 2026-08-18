@@ -1,4 +1,11 @@
-import { useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+} from "react";
 import { Button } from "@/components/ui/Button";
 import { DownloadIcon, LinkIcon } from "@/components/ui/icons";
 
@@ -15,10 +22,13 @@ import { DownloadIcon, LinkIcon } from "@/components/ui/icons";
  */
 export function UrlBar({
   onSubmit,
+  onDraftChange,
   busy,
   disabled,
 }: {
   onSubmit: (urls: string[]) => void;
+  /** Fired as the box is edited, so the page can inspect a single link. */
+  onDraftChange?: (urls: string[]) => void;
   busy: boolean;
   disabled: boolean;
 }) {
@@ -35,6 +45,13 @@ export function UrlBar({
   }, [value]);
 
   const urls = splitUrls(value);
+
+  useEffect(() => {
+    onDraftChange?.(splitUrls(value));
+    // `onDraftChange` is memoised by the caller; re-running on identity would
+    // fire this on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
 
   const submit = (e?: FormEvent) => {
     e?.preventDefault();

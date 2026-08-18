@@ -9,8 +9,9 @@ use std::sync::Arc;
 use tauri::{AppHandle, State};
 
 use crate::download::manager::{run_job, Destination, DownloadManager, EngineStatus, JobView};
+use crate::download::quality::Quality;
 use crate::download::url::{classify_target, TargetKind};
-use crate::download::ytdlp::{MediaInfo, ProfileListing};
+use crate::download::ytdlp::{FormatReport, MediaInfo, ProfileListing};
 use crate::errors::{AppError, Result};
 
 /// Whether yt-dlp is installed, and which one we found. Drives the setup
@@ -32,6 +33,18 @@ pub async fn download_inspect(
     manager.inspect(&url).await
 }
 
+/// Read a link's metadata and the quality tiers it offers, without downloading.
+///
+/// Powers the inspection panel: a video that has 8K should offer 8K, and one
+/// that tops out at 720p should not pretend otherwise.
+#[tauri::command]
+pub async fn download_inspect_formats(
+    manager: State<'_, Arc<DownloadManager>>,
+    url: String,
+) -> Result<FormatReport> {
+    manager.inspect_formats(&url).await
+}
+
 /// Queue a link. Returns immediately with the new job; progress arrives on the
 /// `download://*` event stream.
 #[tauri::command]
@@ -39,8 +52,9 @@ pub async fn download_start(
     app: AppHandle,
     manager: State<'_, Arc<DownloadManager>>,
     url: String,
+    quality: Option<Quality>,
 ) -> Result<JobView> {
-    let view = manager.enqueue(&app, &url)?;
+    let view = manager.enqueue(&app, &url, quality)?;
     let manager = Arc::clone(&manager);
     let id = view.id.clone();
     tokio::spawn(run_job(manager, app, id));
@@ -74,6 +88,7 @@ pub async fn download_submit(
     app: AppHandle,
     manager: State<'_, Arc<DownloadManager>>,
     urls: Vec<String>,
+    quality: Option<Quality>,
 ) -> Result<Submission> {
     let mut queued = Vec::new();
     let mut profiles = Vec::new();
@@ -94,7 +109,7 @@ pub async fn download_submit(
                     message: e.to_string(),
                 }),
             },
-            Ok((_, _, TargetKind::Single)) => match manager.enqueue(&app, &raw) {
+            Ok((_, _, TargetKind::Single)) => match manager.enqueue(&app, &raw, quality) {
                 Ok(view) => {
                     let id = view.id.clone();
                     queued.push(view);
@@ -122,8 +137,9 @@ pub async fn download_start_many(
     app: AppHandle,
     manager: State<'_, Arc<DownloadManager>>,
     urls: Vec<String>,
+    quality: Option<Quality>,
 ) -> Result<Vec<JobView>> {
-    let (queued, _failed) = manager.enqueue_all(&app, &urls);
+    let (queued, _failed) = manager.enqueue_all(&app, &urls, quality);
     for view in &queued {
         tokio::spawn(run_job(Arc::clone(&manager), app.clone(), view.id.clone()));
     }
@@ -172,6 +188,54 @@ pub async fn download_set_destination(
     path: String,
 ) -> Result<Destination> {
     manager.set_destination(std::path::PathBuf::from(path))
+}
+
+/// One quality option as the picker renders it.
+#[derive(serde::Serialize)]
+pub struct QualityOption {
+    pub id: Quality,
+    pub label: String,
+    /// True when this option needs FFmpeg to mean anything - every capped
+    /// option above 360p does, because YouTube serves those as split streams.
+    pub needs_ffmpeg: bool,
+}
+
+/// The quality menu plus the current choice.
+#[derive(serde::Serialize)]
+pub struct QualitySettings {
+    pub selected: Quality,
+    pub options: Vec<QualityOption>,
+    /// Repeated here so the picker can warn without a second round trip.
+    pub has_ffmpeg: bool,
+}
+
+#[tauri::command]
+pub async fn download_get_quality(
+    manager: State<'_, Arc<DownloadManager>>,
+) -> Result<QualitySettings> {
+    let has_ffmpeg = crate::download::ytdlp::locate_ffmpeg().is_some();
+    Ok(QualitySettings {
+        selected: manager.quality(),
+        has_ffmpeg,
+        options: Quality::ALL
+            .iter()
+            .map(|q| QualityOption {
+                id: *q,
+                label: q.label().to_string(),
+                // 360p is reachable as a single progressive file; anything
+                // above it needs a merge on YouTube.
+                needs_ffmpeg: q.max_height().map_or(true, |h| h > 360),
+            })
+            .collect(),
+    })
+}
+
+#[tauri::command]
+pub async fn download_set_quality(
+    manager: State<'_, Arc<DownloadManager>>,
+    quality: Quality,
+) -> Result<Quality> {
+    manager.set_quality(quality)
 }
 
 #[tauri::command]
