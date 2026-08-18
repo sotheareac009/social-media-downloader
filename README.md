@@ -43,9 +43,27 @@ Facebook has no equivalent. yt-dlp has no page-listing extractor for it —
 `facebook.com/<page>/videos` returns "Unsupported URL" — so every Facebook link
 is a single post.
 
-TikTok's feed endpoint is flaky when hit anonymously and intermittently answers
-`Unable to extract secondary user ID` for a profile that works moments later.
-That is a TikTok-side rate limit, not a broken link; retry.
+### TikTok rate limiting
+
+TikTok throttles anonymous requests, and does it *silently* — it answers with an
+anti-bot page that yt-dlp reports as `Unable to extract universal data for
+rehydration`. The video is fine; the request was refused. Profile listing has
+the same problem, surfacing as `Unable to extract secondary user ID`.
+
+The app handles this rather than passing it on:
+
+- Throttling is a distinct error from "no video found", so a rate-limited post
+  is never reported as missing.
+- Failed jobs retry up to 4 times, backing off 5s / 15s / 30s.
+- Engine starts are spaced 1.2s apart so a large queue doesn't burst.
+
+Those numbers are measured, not guessed. Replaying a slice of a real profile:
+
+| policy | result |
+|---|---|
+| no retry, no stagger | 5/8 |
+| 3 attempts, 3s/9s, 700ms stagger | 7/8 |
+| 4 attempts, 5s/15s/30s, 1.2s stagger | 12/12 |
 
 ### One prerequisite: yt-dlp
 

@@ -154,10 +154,17 @@ function ProgressRow({ job, pct }: { job: JobView; pct: number | null }) {
         <span className="job__phase">
           {job.status === "queued" && (
             <>
-              <ClockIcon size={12} /> Queued
+              <ClockIcon size={12} />
+              {/* A backoff is a wait, not a hang — say which attempt we're on. */}
+              {job.attempt > 1
+                ? `Rate-limited, retrying ${job.attempt} of ${job.max_attempts}…`
+                : "Queued"}
             </>
           )}
-          {job.status === "probing" && "Reading link…"}
+          {job.status === "probing" &&
+            (job.attempt > 1
+              ? `Retrying ${job.attempt} of ${job.max_attempts}…`
+              : "Reading link…")}
           {job.status === "downloading" &&
             (pct === null ? "Starting…" : `${pct}%`)}
         </span>

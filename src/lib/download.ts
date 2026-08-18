@@ -36,6 +36,9 @@ export interface JobView {
   /** 0–1, only once a total is known. */
   fraction: number | null;
   output_path: string | null;
+  /** 1-based; equals 1 unless the platform throttled us and we backed off. */
+  attempt: number;
+  max_attempts: number;
   error_code: string | null;
   error_message: string | null;
   created_at: number;
@@ -205,6 +208,8 @@ export function downloadMessage(code: string | null, fallback: string): string {
       return "This post isn't public, so it can't be downloaded. Signing in wouldn't change that — this app only fetches posts anyone can already view.";
     case "no_media_found":
       return "No video was found at that link.";
+    case "temporarily_unavailable":
+      return "The platform rate-limited us after several requests. This usually works on a retry — paste the link again in a moment.";
     case "network":
       return "Couldn't reach the site. Check your connection.";
     case "download_path":

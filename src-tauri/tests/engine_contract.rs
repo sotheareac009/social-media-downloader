@@ -20,12 +20,18 @@ use media_downloader_lib::errors::AppError;
 use tokio::sync::mpsc;
 
 /// Write an executable stub that behaves like yt-dlp for the flags we pass.
-fn install_stub(dir: &Path, body: &str) -> PathBuf {
-    let path = dir.join("yt-dlp");
+///
+/// Each stub gets its own filename rather than overwriting one path: a
+/// previous stub's child may still be running (step 4 deliberately leaves a
+/// `sleep` behind), and rewriting a script the kernel is executing is a race
+/// that surfaces as an intermittent "text file busy" or a half-read script.
+fn install_stub(dir: &Path, tag: &str, body: &str) -> PathBuf {
+    let path = dir.join(format!("yt-dlp-{tag}"));
     let mut f = std::fs::File::create(&path).unwrap();
     write!(f, "#!/bin/sh\n{body}\n").unwrap();
     drop(f);
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::env::set_var("MEDIA_DOWNLOADER_YTDLP", &path);
     path
 }
 
@@ -48,13 +54,13 @@ async fn engine_contract_holds_against_a_stub() {
     let argv_log = dir.join("argv.txt");
     install_stub(
         &dir,
+        "probe",
         &format!(
             r#"printf '%s\n' "$@" > {log}
 echo '{{"id":"abc123","title":"A public reel","uploader":"someone","duration":12.5,"ext":"mp4","filesize_approx":1048576}}'"#,
             log = argv_log.display()
         ),
     );
-    std::env::set_var("MEDIA_DOWNLOADER_YTDLP", dir.join("yt-dlp"));
 
     let url = url::Url::parse("https://www.tiktok.com/@u/video/7300000000000000000").unwrap();
     let info = ytdlp::probe(&url).await.expect("probe should succeed");
@@ -95,6 +101,7 @@ echo '{{"id":"abc123","title":"A public reel","uploader":"someone","duration":12
     // ---- 2. progress lines cross the pipe and parse ------------------------
     install_stub(
         &dir,
+        "progress",
         r#"echo "MDPROGRESS 0 4000 NA NA"
 echo "[download] Destination: video.mp4"
 echo "MDPROGRESS 2000 4000 500000.0 4"
@@ -119,6 +126,7 @@ exit 0"#,
     // ---- 3. a login wall becomes MediaNotPublic, not a generic failure -----
     install_stub(
         &dir,
+        "loginwall",
         r#"echo "ERROR: [facebook] 123: Login required to view this video" >&2
 exit 1"#,
     );
@@ -130,7 +138,7 @@ exit 1"#,
     }
 
     // ---- 4. cancellation actually kills the child --------------------------
-    install_stub(&dir, r#"sleep 30"#);
+    install_stub(&dir, "hang", r#"sleep 30"#);
     let (tx, _rx) = mpsc::unbounded_channel();
     let mut running = ytdlp::start(&url, &dir, tx).unwrap();
     running.kill().await;
@@ -146,6 +154,7 @@ exit 1"#,
     // `entries` array whose items carry a full video URL and no thumbnail.
     install_stub(
         &dir,
+        "profile",
         r#"printf '%s' '{"id":"MS4wLjABAAAA","title":"raimqqq","_type":"playlist","entries":[{"id":"7674870647071296789","url":"https://www.tiktok.com/@raimqqq/video/7674870647071296789","title":"Watch out","duration":9},{"id":"7674870647071296790","url":"https://www.tiktok.com/@raimqqq/video/7674870647071296790","title":"Second","duration":null},{"id":"nourl","title":"skipped"}]}'"#,
     );
     let profile_url = url::Url::parse("https://www.tiktok.com/@raimqqq").unwrap();
@@ -163,7 +172,7 @@ exit 1"#,
     assert_eq!(listing.entries[1].duration_seconds, None);
 
     // ---- 6. an empty feed is "no media", not a listing of nothing ---------
-    install_stub(&dir, r#"printf '%s' '{"title":"empty","entries":[]}'"#);
+    install_stub(&dir, "emptyfeed", r#"printf '%s' '{"title":"empty","entries":[]}'"#);
     match ytdlp::list_profile(&profile_url).await {
         Err(AppError::NoMediaFound) => {}
         other => panic!("expected NoMediaFound, got {other:?}"),

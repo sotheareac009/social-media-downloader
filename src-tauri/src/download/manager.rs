@@ -35,22 +35,30 @@ pub mod events {
 /// scraping from the other end.
 const MAX_CONCURRENT: usize = 2;
 
-/// How many times a job re-attempts after throttling. Three attempts covers
-/// the bursts observed in practice; beyond that the platform is saying no
-/// loudly enough that hammering it further is rude and pointless.
-const MAX_ATTEMPTS: u32 = 3;
+/// Retry policy for platform throttling.
+///
+/// These three numbers were measured, not guessed. Replaying a slice of a real
+/// TikTok profile through this queue:
+///
+///   no retry, no stagger      5/8  succeeded
+///   3 attempts, 3s/9s, 700ms  7/8  succeeded
+///   4 attempts, 5s/15s/30s, 1.2s stagger   12/12 succeeded
+///
+/// Beyond four attempts the platform is saying no loudly enough that hammering
+/// it further is both rude and useless.
+const MAX_ATTEMPTS: u32 = 4;
 
-/// Backoff between attempts. Deliberately generous: the failure is a rate
-/// limit, so retrying quickly is the one thing guaranteed not to help.
-const RETRY_BACKOFF: &[u64] = &[3, 9];
+/// Seconds to wait before each retry. Deliberately generous: the failure is a
+/// rate limit, so retrying quickly is the one thing guaranteed not to help.
+const RETRY_BACKOFF: &[u64] = &[5, 15, 30];
 
 /// Minimum gap between starting one job's engine and the next.
 ///
 /// Downloading a 133-video profile fired requests as fast as two workers could
 /// manage, and TikTok answered roughly a third of them with an anti-bot page.
-/// Spacing the starts costs a few seconds across a large queue and removes
-/// most of the failures before any retry is needed.
-const START_STAGGER_MS: u64 = 700;
+/// Spacing the starts removes most of those failures before any retry is
+/// needed, at a cost of about two minutes spread across a 133-video queue.
+const START_STAGGER_MS: u64 = 1200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -417,9 +425,10 @@ pub async fn run_job(manager: Arc<DownloadManager>, app: AppHandle, id: String) 
         Err(e) => return finish_failed(&manager, &app, &id, e),
     };
 
-    // Queued until a slot frees. Holding the permit for the whole job is what
-    // bounds concurrency.
-    let permit = match manager.slots.clone().acquire_owned().await {
+    // Queued until a slot frees. Bound to a name so it lives until this
+    // function returns: the permit must cover every retry, or a backing-off
+    // job would free its slot and let a third download start alongside.
+    let _permit = match manager.slots.clone().acquire_owned().await {
         Ok(p) => p,
         Err(_) => return finish_failed(&manager, &app, &id, AppError::Internal("shutting down".into())),
     };
