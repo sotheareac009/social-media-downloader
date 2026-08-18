@@ -25,9 +25,20 @@ import { DestinationBar } from "@/components/downloads/DestinationBar";
 import { EngineNotice } from "@/components/downloads/EngineNotice";
 import { JobCard } from "@/components/downloads/JobCard";
 import { ProfileCard } from "@/components/downloads/ProfileCard";
+import {
+  countJobs,
+  QueueSummary,
+  type QueueFilter,
+} from "@/components/downloads/QueueSummary";
 import { UrlBar } from "@/components/downloads/UrlBar";
 import { useToast } from "@/components/ui/Toast";
 import { DownloadIcon, GlobeIcon, ShieldIcon } from "@/components/ui/icons";
+
+/**
+ * Above this many jobs, per-job toasts are suppressed and the summary panel
+ * reports the batch instead.
+ */
+const BATCH_TOAST_LIMIT = 5;
 
 export function DownloadsPage() {
   const toast = useToast();
@@ -42,6 +53,10 @@ export function DownloadsPage() {
   // Profiles found in a paste, waiting for the user to confirm the count.
   const [profiles, setProfiles] = useState<ProfileListing[]>([]);
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [filter, setFilter] = useState<QueueFilter>("all");
+  const [retrying, setRetrying] = useState(false);
+  // Armed by "Retry when finished": fires once nothing is in progress.
+  const [retryWhenIdle, setRetryWhenIdle] = useState(false);
 
   const mounted = useRef(true);
   useEffect(() => {
@@ -50,6 +65,12 @@ export function DownloadsPage() {
       mounted.current = false;
     };
   }, []);
+
+  // Read inside event handlers, which close over their first render.
+  const jobCount = useRef(0);
+  useEffect(() => {
+    jobCount.current = jobs.length;
+  }, [jobs.length]);
 
   /** Replace one job in place, or prepend it if it's new. */
   const upsert = useCallback((job: JobView) => {
@@ -94,16 +115,22 @@ export function DownloadsPage() {
     const pending = subscribeToDownloadEvents({
       onCreated: upsert,
       onUpdated: upsert,
+      // One toast per job is right for a single paste and unbearable for a
+      // 133-video profile, so past a handful the summary panel is the report.
       onFinished: (job) => {
         upsert(job);
-        toast("success", `${job.title ?? "Video"} saved.`);
+        if (jobCount.current <= BATCH_TOAST_LIMIT) {
+          toast("success", `${job.title ?? "Video"} saved.`);
+        }
       },
       onFailed: (job) => {
         upsert(job);
-        toast(
-          "error",
-          downloadMessage(job.error_code, job.error_message ?? "Download failed."),
-        );
+        if (jobCount.current <= BATCH_TOAST_LIMIT) {
+          toast(
+            "error",
+            downloadMessage(job.error_code, job.error_message ?? "Download failed."),
+          );
+        }
       },
       onProgress: (p) =>
         setJobs((prev) =>
@@ -287,7 +314,35 @@ export function DownloadsPage() {
   const clearFinished = useCallback(async () => {
     await downloadClearFinished();
     setJobs((prev) => prev.filter((j) => !isTerminal(j.status)));
+    setFilter("all");
   }, []);
+
+  /**
+   * Re-queue everything that failed.
+   *
+   * The old rows are dropped first so the retry doesn't sit next to the
+   * failure it replaces — one row per video, showing its latest attempt.
+   */
+  const retryFailed = useCallback(async () => {
+    const failed = jobs.filter((j) => j.status === "failed");
+    if (failed.length === 0) return;
+    setRetryWhenIdle(false);
+    setRetrying(true);
+    try {
+      const created = await downloadStartMany(failed.map((j) => j.url));
+      await Promise.all(failed.map((j) => downloadRemove(j.id).catch(() => {})));
+      setJobs((prev) => {
+        const gone = new Set(failed.map((j) => j.id));
+        return [...created, ...prev.filter((j) => !gone.has(j.id))];
+      });
+      setFilter("all");
+      toast("info", `Retrying ${created.length} failed downloads.`);
+    } catch (e) {
+      toast("error", toAuthError(e).message);
+    } finally {
+      if (mounted.current) setRetrying(false);
+    }
+  }, [jobs, toast]);
 
   const recheck = useCallback(async () => {
     setRechecking(true);
@@ -304,8 +359,39 @@ export function DownloadsPage() {
     }
   }, [refreshEngine, toast]);
 
+  /**
+   * Retrying while other downloads are still running would put the retries
+   * straight back into the contention that failed them, so the button arms
+   * instead and this fires when the queue drains.
+   */
+  const requestRetry = useCallback(() => {
+    const active = jobs.some((j) => !isTerminal(j.status));
+    if (active) setRetryWhenIdle(true);
+    else void retryFailed();
+  }, [jobs, retryFailed]);
+
+  useEffect(() => {
+    if (!retryWhenIdle) return;
+    const active = jobs.some((j) => !isTerminal(j.status));
+    const failed = jobs.some((j) => j.status === "failed");
+    if (active) return;
+    // Nothing left to retry - disarm quietly rather than firing on an empty set.
+    if (!failed) {
+      setRetryWhenIdle(false);
+      return;
+    }
+    void retryFailed();
+  }, [retryWhenIdle, jobs, retryFailed]);
+
   const finishedCount = jobs.filter((j) => isTerminal(j.status)).length;
   const engineReady = engine?.available === true;
+  const counts = countJobs(jobs);
+  const visibleJobs = jobs.filter((j) => {
+    if (filter === "all") return true;
+    if (filter === "active") return !isTerminal(j.status);
+    if (filter === "completed") return j.status === "completed";
+    return j.status === "failed";
+  });
 
   return (
     <div className="page">
@@ -388,11 +474,25 @@ export function DownloadsPage() {
           )}
         </div>
 
+        {jobs.length > 1 && (
+          <QueueSummary
+            counts={counts}
+            filter={filter}
+            onFilter={setFilter}
+            onRetryFailed={requestRetry}
+            retrying={retrying}
+            armed={retryWhenIdle}
+            onDisarm={() => setRetryWhenIdle(false)}
+          />
+        )}
+
         {jobs.length === 0 ? (
           <EmptyQueue engineReady={engineReady} />
+        ) : visibleJobs.length === 0 ? (
+          <p className="queue__none">Nothing matches that filter.</p>
         ) : (
           <div className="stack">
-            {jobs.map((job, i) => (
+            {visibleJobs.map((job, i) => (
               <div
                 key={job.id}
                 className="rise"
