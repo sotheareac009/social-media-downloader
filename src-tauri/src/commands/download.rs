@@ -9,7 +9,8 @@ use std::sync::Arc;
 use tauri::{AppHandle, State};
 
 use crate::download::manager::{run_job, Destination, DownloadManager, EngineStatus, JobView};
-use crate::download::ytdlp::MediaInfo;
+use crate::download::url::{classify_target, TargetKind};
+use crate::download::ytdlp::{MediaInfo, ProfileListing};
 use crate::errors::{AppError, Result};
 
 /// Whether yt-dlp is installed, and which one we found. Drives the setup
@@ -44,6 +45,89 @@ pub async fn download_start(
     let id = view.id.clone();
     tokio::spawn(run_job(manager, app, id));
     Ok(view)
+}
+
+/// A link that couldn't be used, and why - kept alongside the successes so a
+/// mixed paste reports precisely instead of failing as a whole.
+#[derive(serde::Serialize)]
+pub struct RejectedLink {
+    pub url: String,
+    pub code: String,
+    pub message: String,
+}
+
+/// The result of submitting a paste.
+///
+/// Single videos are queued straight away. Profiles are *not*: enumerating one
+/// can turn a single line into 133 downloads, so the listing comes back for
+/// the user to confirm. Deciding that on their behalf is not this layer's call.
+#[derive(serde::Serialize)]
+pub struct Submission {
+    pub queued: Vec<JobView>,
+    pub profiles: Vec<ProfileListing>,
+    pub rejected: Vec<RejectedLink>,
+}
+
+/// Handle a whole paste: any mix of video links and profile links.
+#[tauri::command]
+pub async fn download_submit(
+    app: AppHandle,
+    manager: State<'_, Arc<DownloadManager>>,
+    urls: Vec<String>,
+) -> Result<Submission> {
+    let mut queued = Vec::new();
+    let mut profiles = Vec::new();
+    let mut rejected = Vec::new();
+
+    for raw in urls {
+        match classify_target(&raw) {
+            Err(e) => rejected.push(RejectedLink {
+                url: raw,
+                code: e.code().to_string(),
+                message: e.to_string(),
+            }),
+            Ok((_, _, TargetKind::Profile)) => match manager.inspect_profile(&raw).await {
+                Ok(listing) => profiles.push(listing),
+                Err(e) => rejected.push(RejectedLink {
+                    url: raw,
+                    code: e.code().to_string(),
+                    message: e.to_string(),
+                }),
+            },
+            Ok((_, _, TargetKind::Single)) => match manager.enqueue(&app, &raw) {
+                Ok(view) => {
+                    let id = view.id.clone();
+                    queued.push(view);
+                    tokio::spawn(run_job(Arc::clone(&manager), app.clone(), id));
+                }
+                Err(e) => rejected.push(RejectedLink {
+                    url: raw,
+                    code: e.code().to_string(),
+                    message: e.to_string(),
+                }),
+            },
+        }
+    }
+
+    Ok(Submission {
+        queued,
+        profiles,
+        rejected,
+    })
+}
+
+/// Queue every video from a profile the user has confirmed.
+#[tauri::command]
+pub async fn download_start_many(
+    app: AppHandle,
+    manager: State<'_, Arc<DownloadManager>>,
+    urls: Vec<String>,
+) -> Result<Vec<JobView>> {
+    let (queued, _failed) = manager.enqueue_all(&app, &urls);
+    for view in &queued {
+        tokio::spawn(run_job(Arc::clone(&manager), app.clone(), view.id.clone()));
+    }
+    Ok(queued)
 }
 
 #[tauri::command]

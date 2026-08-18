@@ -59,6 +59,39 @@ export interface Destination {
   default_path: string;
 }
 
+/** One video in a creator's feed, listed without opening its page. */
+export interface ProfileEntry {
+  id: string;
+  url: string;
+  title: string | null;
+  duration_seconds: number | null;
+}
+
+export interface ProfileListing {
+  uploader: string;
+  profile_url: string;
+  /** How many videos were found — the number shown before confirming. */
+  count: number;
+  entries: ProfileEntry[];
+}
+
+export interface RejectedLink {
+  url: string;
+  code: string;
+  message: string;
+}
+
+/**
+ * What a paste produced. Single videos are queued immediately; profiles come
+ * back as listings awaiting confirmation, because one line can mean a hundred
+ * downloads.
+ */
+export interface Submission {
+  queued: JobView[];
+  profiles: ProfileListing[];
+  rejected: RejectedLink[];
+}
+
 export interface EngineStatus {
   available: boolean;
   path: string | null;
@@ -87,6 +120,14 @@ export const downloadInspect = (url: string) =>
 
 export const downloadStart = (url: string) =>
   invoke<JobView>("download_start", { url });
+
+/** Submit a whole paste — any mix of video links and profile links. */
+export const downloadSubmit = (urls: string[]) =>
+  invoke<Submission>("download_submit", { urls });
+
+/** Queue every video from a profile the user confirmed. */
+export const downloadStartMany = (urls: string[]) =>
+  invoke<JobView[]>("download_start_many", { urls });
 
 export const downloadList = () => invoke<JobView[]>("download_list");
 

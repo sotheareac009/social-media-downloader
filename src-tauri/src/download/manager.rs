@@ -18,8 +18,8 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, Semaphore};
 
 use crate::download::settings::Settings;
-use crate::download::url::{classify, Source};
-use crate::download::ytdlp::{self, MediaInfo, Progress};
+use crate::download::url::{classify, classify_target, Source, TargetKind};
+use crate::download::ytdlp::{self, MediaInfo, Progress, ProfileListing};
 use crate::errors::{AppError, Result};
 
 pub mod events {
@@ -34,6 +34,23 @@ pub mod events {
 /// uplink: more parallelism mostly makes every job slower and looks like
 /// scraping from the other end.
 const MAX_CONCURRENT: usize = 2;
+
+/// How many times a job re-attempts after throttling. Three attempts covers
+/// the bursts observed in practice; beyond that the platform is saying no
+/// loudly enough that hammering it further is rude and pointless.
+const MAX_ATTEMPTS: u32 = 3;
+
+/// Backoff between attempts. Deliberately generous: the failure is a rate
+/// limit, so retrying quickly is the one thing guaranteed not to help.
+const RETRY_BACKOFF: &[u64] = &[3, 9];
+
+/// Minimum gap between starting one job's engine and the next.
+///
+/// Downloading a 133-video profile fired requests as fast as two workers could
+/// manage, and TikTok answered roughly a third of them with an anti-bot page.
+/// Spacing the starts costs a few seconds across a large queue and removes
+/// most of the failures before any retry is needed.
+const START_STAGGER_MS: u64 = 700;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -74,6 +91,10 @@ pub struct JobView {
     pub fraction: Option<f64>,
     /// Set once the file lands. Absolute path, for "Show in folder".
     pub output_path: Option<String>,
+    /// 1-based, so the UI can say "Retrying 2 of 3" instead of going quiet
+    /// during a backoff that looks like a hang.
+    pub attempt: u32,
+    pub max_attempts: u32,
     /// Present only in `Failed`; a user-facing sentence, never raw stderr.
     pub error_code: Option<String>,
     pub error_message: Option<String>,
@@ -218,6 +239,15 @@ impl DownloadManager {
         ytdlp::probe(&url).await
     }
 
+    /// List a creator's videos without downloading any of them.
+    pub async fn inspect_profile(&self, raw: &str) -> Result<ProfileListing> {
+        let (_, url, kind) = classify_target(raw)?;
+        if kind != TargetKind::Profile {
+            return Err(AppError::UnsupportedUrl);
+        }
+        ytdlp::list_profile(&url).await
+    }
+
     pub fn list(&self) -> Vec<JobView> {
         let jobs = self.jobs.lock().expect("jobs lock");
         let order = self.order.lock().expect("order lock");
@@ -263,6 +293,8 @@ impl DownloadManager {
             eta_seconds: None,
             fraction: None,
             output_path: None,
+            attempt: 1,
+            max_attempts: MAX_ATTEMPTS,
             error_code: None,
             error_message: None,
             created_at: crate::auth::now_unix(),
@@ -333,6 +365,22 @@ impl DownloadManager {
         doomed.len()
     }
 
+    /// Queue a batch of already-validated links.
+    ///
+    /// Returns only the jobs that were created: a single bad entry in a
+    /// 133-video profile must not discard the other 132.
+    pub fn enqueue_all(&self, app: &AppHandle, urls: &[String]) -> (Vec<JobView>, usize) {
+        let mut queued = Vec::with_capacity(urls.len());
+        let mut failed = 0usize;
+        for url in urls {
+            match self.enqueue(app, url) {
+                Ok(v) => queued.push(v),
+                Err(_) => failed += 1,
+            }
+        }
+        (queued, failed)
+    }
+
     // ------------------------------------------------------------- internals
 
     fn mutate<F: FnOnce(&mut JobView)>(&self, id: &str, f: F) -> Option<JobView> {
@@ -379,19 +427,79 @@ pub async fn run_job(manager: Arc<DownloadManager>, app: AppHandle, id: String) 
         return;
     }
 
-    if let Some(v) = manager.mutate(&id, |v| v.status = JobStatus::Probing) {
+    // Space out engine starts so a large queue doesn't look like a scraper.
+    tokio::time::sleep(std::time::Duration::from_millis(START_STAGGER_MS)).await;
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        if manager.is_cancelled(&id) {
+            return;
+        }
+        match attempt_job(&manager, &app, &id, &url, attempt).await {
+            Outcome::Done | Outcome::Cancelled => return,
+            Outcome::Failed(e) => return finish_failed(&manager, &app, &id, e),
+            Outcome::Throttled(e) => {
+                // Out of attempts: report the throttling honestly rather than
+                // as some other kind of failure.
+                let Some(wait) = RETRY_BACKOFF.get((attempt - 1) as usize) else {
+                    return finish_failed(&manager, &app, &id, e);
+                };
+                if let Some(v) = manager.mutate(&id, |v| {
+                    v.status = JobStatus::Queued;
+                    v.attempt = attempt + 1;
+                    v.speed_bps = None;
+                    v.eta_seconds = None;
+                }) {
+                    let _ = app.emit(events::UPDATED, v);
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(*wait)).await;
+            }
+        }
+    }
+}
+
+/// What one attempt concluded.
+enum Outcome {
+    Done,
+    Cancelled,
+    /// Worth another attempt - the platform throttled us.
+    Throttled(AppError),
+    /// Not worth retrying: private, missing, or genuinely broken.
+    Failed(AppError),
+}
+
+impl Outcome {
+    fn from(e: AppError) -> Self {
+        match e {
+            AppError::TemporarilyUnavailable => Outcome::Throttled(e),
+            other => Outcome::Failed(other),
+        }
+    }
+}
+
+/// One probe-and-download pass. Called up to [`MAX_ATTEMPTS`] times.
+async fn attempt_job(
+    manager: &Arc<DownloadManager>,
+    app: &AppHandle,
+    id: &str,
+    url: &url::Url,
+    attempt: u32,
+) -> Outcome {
+    if let Some(v) = manager.mutate(id, |v| {
+        v.status = JobStatus::Probing;
+        v.attempt = attempt;
+    }) {
         let _ = app.emit(events::UPDATED, v);
     }
 
-    let info = match ytdlp::probe(&url).await {
+    let info = match ytdlp::probe(url).await {
         Ok(i) => i,
-        Err(e) => return finish_failed(&manager, &app, &id, e),
+        Err(e) => return Outcome::from(e),
     };
-    if manager.is_cancelled(&id) {
-        return;
+    if manager.is_cancelled(id) {
+        return Outcome::Cancelled;
     }
 
-    if let Some(v) = manager.mutate(&id, |v| {
+    if let Some(v) = manager.mutate(id, |v| {
         v.title = Some(info.title.clone());
         v.uploader = info.uploader.clone();
         v.duration_seconds = info.duration_seconds;
@@ -404,20 +512,20 @@ pub async fn run_job(manager: Arc<DownloadManager>, app: AppHandle, id: String) 
 
     let dest = manager.destination();
     if let Err(e) = std::fs::create_dir_all(&dest) {
-        return finish_failed(&manager, &app, &id, AppError::DownloadPath(e.to_string()));
+        return Outcome::Failed(AppError::DownloadPath(e.to_string()));
     }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Progress>();
-    let mut running = match ytdlp::start(&url, &dest, tx) {
+    let mut running = match ytdlp::start(url, &dest, tx) {
         Ok(r) => r,
-        Err(e) => return finish_failed(&manager, &app, &id, e),
+        Err(e) => return Outcome::from(e),
     };
 
     // Relay progress to the UI while the engine works.
     let relay = {
         let manager = manager.clone();
         let app = app.clone();
-        let id = id.clone();
+        let id = id.to_string();
         tokio::spawn(async move {
             while let Some(p) = rx.recv().await {
                 let changed = manager.mutate(&id, |v| {
@@ -449,21 +557,19 @@ pub async fn run_job(manager: Arc<DownloadManager>, app: AppHandle, id: String) 
 
     let outcome = tokio::select! {
         res = ytdlp::wait(&mut running) => res,
-        _ = wait_for_cancel(&manager, &id) => {
+        _ = wait_for_cancel(manager, id) => {
             running.kill().await;
             relay.abort();
-            drop(permit);
-            return;
+            return Outcome::Cancelled;
         }
     };
 
     relay.abort();
-    drop(permit);
 
     match outcome {
         Ok(()) => {
             let path = newest_file_in(&dest);
-            if let Some(v) = manager.mutate(&id, |v| {
+            if let Some(v) = manager.mutate(id, |v| {
                 v.status = JobStatus::Completed;
                 v.speed_bps = None;
                 v.eta_seconds = None;
@@ -475,8 +581,9 @@ pub async fn run_job(manager: Arc<DownloadManager>, app: AppHandle, id: String) 
             }) {
                 let _ = app.emit(events::FINISHED, v);
             }
+            Outcome::Done
         }
-        Err(e) => finish_failed(&manager, &app, &id, e),
+        Err(e) => Outcome::from(e),
     }
 }
 

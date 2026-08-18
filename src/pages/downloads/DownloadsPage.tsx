@@ -7,7 +7,8 @@ import {
   downloadList,
   downloadRemove,
   downloadReveal,
-  downloadStart,
+  downloadStartMany,
+  downloadSubmit,
   downloadMessage,
   downloadBrowseDestination,
   downloadResetDestination,
@@ -17,11 +18,13 @@ import {
   type Destination,
   type EngineStatus,
   type JobView,
+  type ProfileListing,
 } from "@/lib/download";
 import { toAuthError } from "@/lib/auth";
 import { DestinationBar } from "@/components/downloads/DestinationBar";
 import { EngineNotice } from "@/components/downloads/EngineNotice";
 import { JobCard } from "@/components/downloads/JobCard";
+import { ProfileCard } from "@/components/downloads/ProfileCard";
 import { UrlBar } from "@/components/downloads/UrlBar";
 import { useToast } from "@/components/ui/Toast";
 import { DownloadIcon, GlobeIcon, ShieldIcon } from "@/components/ui/icons";
@@ -36,6 +39,9 @@ export function DownloadsPage() {
   const [pendingDest, setPendingDest] = useState<string | null>(null);
   const [destBusy, setDestBusy] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  // Profiles found in a paste, waiting for the user to confirm the count.
+  const [profiles, setProfiles] = useState<ProfileListing[]>([]);
+  const [confirming, setConfirming] = useState<string | null>(null);
 
   const mounted = useRef(true);
   useEffect(() => {
@@ -121,47 +127,74 @@ export function DownloadsPage() {
   }, [upsert, toast]);
 
   /**
-   * Queue a whole paste.
+   * Submit a whole paste — any mix of video links and profile links.
    *
-   * One bad link must not discard the good ones, so each is enqueued
-   * independently and the failures are summarised in a single toast rather
-   * than firing one per URL.
+   * Videos queue immediately. Profiles come back as listings the user has to
+   * confirm, since one line can expand into a hundred downloads. One bad link
+   * never discards the good ones.
    */
   const start = useCallback(
     async (urls: string[]) => {
       setSubmitting(true);
-      const failures: string[] = [];
       try {
-        for (const url of urls) {
-          try {
-            upsert(await downloadStart(url));
-          } catch (e) {
-            const err = toAuthError(e);
-            failures.push(downloadMessage(err.code, err.message));
-            // An engine that vanished mid-session should flip the panel back,
-            // and there's no point trying the rest of the list without it.
-            if (err.code === "engine_missing") {
-              void refreshEngine();
-              break;
-            }
-          }
+        const result = await downloadSubmit(urls);
+        result.queued.forEach(upsert);
+        if (result.profiles.length > 0) {
+          // Replace any earlier listing for the same profile rather than
+          // stacking duplicates when someone pastes it twice.
+          setProfiles((prev) => [
+            ...result.profiles,
+            ...prev.filter(
+              (p) => !result.profiles.some((n) => n.profile_url === p.profile_url),
+            ),
+          ]);
         }
+        if (result.rejected.length > 0) {
+          if (result.rejected.some((r) => r.code === "engine_missing")) {
+            void refreshEngine();
+          }
+          // Identical reasons collapse: ten non-Facebook links are one complaint.
+          const unique = [
+            ...new Set(
+              result.rejected.map((r) => downloadMessage(r.code, r.message)),
+            ),
+          ];
+          const ok = result.queued.length + result.profiles.length;
+          toast(
+            "error",
+            ok > 0
+              ? `${ok} accepted, ${result.rejected.length} skipped — ${unique.join(" ")}`
+              : unique.join(" "),
+          );
+        }
+      } catch (e) {
+        const err = toAuthError(e);
+        toast("error", downloadMessage(err.code, err.message));
       } finally {
         if (mounted.current) setSubmitting(false);
       }
-
-      if (failures.length === 0) return;
-      const queued = urls.length - failures.length;
-      // Identical errors collapse: ten non-Facebook links are one complaint.
-      const unique = [...new Set(failures)];
-      toast(
-        "error",
-        queued > 0
-          ? `${queued} queued, ${failures.length} skipped — ${unique.join(" ")}`
-          : unique.join(" "),
-      );
     },
     [upsert, toast, refreshEngine],
+  );
+
+  /** Queue every video from a confirmed profile. */
+  const confirmProfile = useCallback(
+    async (listing: ProfileListing) => {
+      setConfirming(listing.profile_url);
+      try {
+        const created = await downloadStartMany(listing.entries.map((e) => e.url));
+        created.forEach(upsert);
+        setProfiles((prev) =>
+          prev.filter((p) => p.profile_url !== listing.profile_url),
+        );
+        toast("success", `Queued ${created.length} videos from @${listing.uploader}.`);
+      } catch (e) {
+        toast("error", toAuthError(e).message);
+      } finally {
+        if (mounted.current) setConfirming(null);
+      }
+    },
+    [upsert, toast],
   );
 
   const cancel = useCallback(
@@ -284,7 +317,8 @@ export function DownloadsPage() {
         <h1 className="page__title">Download public videos</h1>
         <p className="page__lede">
           Paste a link — or a whole list, one per line — to public Facebook or
-          TikTok videos and reels. No account needed: these are posts anyone
+          TikTok videos and reels. A TikTok profile link downloads everything
+          that creator has posted. No account needed: these are posts anyone
           can already open in a browser.
         </p>
       </header>
@@ -318,6 +352,24 @@ export function DownloadsPage() {
           onReset={() => void resetFolder()}
           onOpen={() => void reveal(dest.path)}
         />
+      )}
+
+      {profiles.length > 0 && (
+        <div className="stack" style={{ marginTop: 16 }}>
+          {profiles.map((listing) => (
+            <ProfileCard
+              key={listing.profile_url}
+              listing={listing}
+              busy={confirming === listing.profile_url}
+              onConfirm={() => void confirmProfile(listing)}
+              onDismiss={() =>
+                setProfiles((prev) =>
+                  prev.filter((p) => p.profile_url !== listing.profile_url),
+                )
+              }
+            />
+          ))}
+        </div>
       )}
 
       <div className="queue">
@@ -374,7 +426,7 @@ function EmptyQueue({ engineReady }: { engineReady: boolean }) {
       </div>
       <p className="empty__text">
         {engineReady
-          ? "Paste a link above — or several at once, one per line. Facebook watch pages, reels and share links, TikTok videos and short links all work."
+          ? "Paste a link above — or several at once, one per line. Facebook watch pages, reels and share links, plus TikTok videos. Paste a TikTok profile like tiktok.com/@name to grab everything they've posted."
           : "Once the engine is installed, paste a link above and it'll appear here."}
       </p>
     </div>

@@ -22,10 +22,30 @@ Paste a link on the Downloads page. Supported hosts:
 
 - `facebook.com/watch`, `facebook.com/reel/…`, `fb.watch/…`, `m.facebook.com/…`
 - `tiktok.com/@user/video/…`, `vm.tiktok.com/…`, `vt.tiktok.com/…`
+- `tiktok.com/@user` — a whole profile (see below)
 
 Anything else is refused. The host allowlist lives in
 `src-tauri/src/download/url.rs` and is matched exactly, not by substring, so
 `tiktok.com.example.test` does not pass.
+
+### Whole TikTok profiles
+
+Paste `https://www.tiktok.com/@name` and the app lists the creator's feed with
+`--flat-playlist`, which reads the listing without resolving each post — 133
+videos enumerate in seconds rather than minutes.
+
+The count is shown for confirmation *before* anything is queued: one pasted line
+can mean a hundred files, and deciding that silently is how you fill a disk.
+Press **Download all N** to queue them; two run at a time and each can be
+cancelled individually.
+
+Facebook has no equivalent. yt-dlp has no page-listing extractor for it —
+`facebook.com/<page>/videos` returns "Unsupported URL" — so every Facebook link
+is a single post.
+
+TikTok's feed endpoint is flaky when hit anonymously and intermittently answers
+`Unable to extract secondary user ID` for a profile that works moments later.
+That is a TikTok-side rate limit, not a broken link; retry.
 
 ### One prerequisite: yt-dlp
 

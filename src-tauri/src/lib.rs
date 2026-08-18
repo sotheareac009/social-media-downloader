@@ -67,6 +67,8 @@ pub fn run() {
             commands::download::download_engine_status,
             commands::download::download_inspect,
             commands::download::download_start,
+            commands::download::download_submit,
+            commands::download::download_start_many,
             commands::download::download_list,
             commands::download::download_cancel,
             commands::download::download_remove,

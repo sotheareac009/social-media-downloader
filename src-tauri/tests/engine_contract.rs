@@ -76,6 +76,10 @@ echo '{{"id":"abc123","title":"A public reel","uploader":"someone","duration":12
             "{required} must be passed on every invocation; got:\n{argv}"
         );
     }
+    assert!(
+        argv.lines().any(|l| l == "--no-playlist"),
+        "a single-video probe must not expand a playlist; got:\n{argv}"
+    );
     // `--netrc` is opt-in, so its absence is what keeps a `.netrc` unread.
     // Asserting the absence also guards against re-adding `--no-netrc`, which
     // yt-dlp does not accept and which aborted every download when it was.
@@ -137,6 +141,34 @@ exit 1"#,
     .await;
     assert!(outcome.is_ok(), "a killed child must not leave wait() hanging");
 
+    // ---- 5. a profile listing is parsed into queueable entries ------------
+    // JSON shaped exactly like a real `--flat-playlist` response: a nested
+    // `entries` array whose items carry a full video URL and no thumbnail.
+    install_stub(
+        &dir,
+        r#"printf '%s' '{"id":"MS4wLjABAAAA","title":"raimqqq","_type":"playlist","entries":[{"id":"7674870647071296789","url":"https://www.tiktok.com/@raimqqq/video/7674870647071296789","title":"Watch out","duration":9},{"id":"7674870647071296790","url":"https://www.tiktok.com/@raimqqq/video/7674870647071296790","title":"Second","duration":null},{"id":"nourl","title":"skipped"}]}'"#,
+    );
+    let profile_url = url::Url::parse("https://www.tiktok.com/@raimqqq").unwrap();
+    let listing = ytdlp::list_profile(&profile_url).await.expect("listing");
+
+    assert_eq!(listing.uploader, "raimqqq");
+    // The third entry has no URL, so there is nothing to queue for it.
+    assert_eq!(listing.count, 2, "entries without a URL must be skipped");
+    assert_eq!(listing.entries.len(), listing.count, "count must match entries");
+    assert_eq!(
+        listing.entries[0].url,
+        "https://www.tiktok.com/@raimqqq/video/7674870647071296789"
+    );
+    assert_eq!(listing.entries[0].duration_seconds, Some(9.0));
+    assert_eq!(listing.entries[1].duration_seconds, None);
+
+    // ---- 6. an empty feed is "no media", not a listing of nothing ---------
+    install_stub(&dir, r#"printf '%s' '{"title":"empty","entries":[]}'"#);
+    match ytdlp::list_profile(&profile_url).await {
+        Err(AppError::NoMediaFound) => {}
+        other => panic!("expected NoMediaFound, got {other:?}"),
+    }
+
     // No "missing engine" case here: `locate()` deliberately falls back to
     // /opt/homebrew/bin and friends, so it cannot be starved by clearing PATH
     // on a machine that genuinely has yt-dlp installed - and clearing PATH
@@ -165,6 +197,9 @@ async fn every_flag_we_pass_is_accepted_by_the_real_engine() {
 
     let out = tokio::process::Command::new(&engine)
         .args(ytdlp::HARDENED_FLAGS)
+        .arg("--no-playlist")
+        .arg("--yes-playlist")
+        .arg("--flat-playlist")
         .arg("--newline")
         .arg("--no-warnings")
         .arg("--socket-timeout")

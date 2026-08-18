@@ -42,6 +42,18 @@ impl Source {
     }
 }
 
+/// What a link points at: one video, or a creator's whole feed.
+///
+/// Only TikTok has a `Profile` form. yt-dlp has no Facebook page-listing
+/// extractor - `facebook.com/<page>/videos` is answered with "Unsupported URL"
+/// - so every accepted Facebook link is a single post.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TargetKind {
+    Single,
+    Profile,
+}
+
 /// Hosts accepted for each source, compared exactly after stripping a leading
 /// `www.` / `m.` / `web.` prefix.
 const FACEBOOK_HOSTS: &[&str] = &["facebook.com", "fb.watch", "fb.com", "facebook.net"];
@@ -58,6 +70,36 @@ fn normalise_host(host: &str) -> &str {
         }
     }
     host
+}
+
+/// Classify a pasted link and say whether it names a video or a whole profile.
+pub fn classify_target(raw: &str) -> Result<(Source, Url, TargetKind)> {
+    let (source, url) = classify(raw)?;
+    let kind = match source {
+        Source::TikTok if is_tiktok_profile(&url) => TargetKind::Profile,
+        _ => TargetKind::Single,
+    };
+    Ok((source, url, kind))
+}
+
+/// A TikTok profile is `/@handle` and nothing more.
+///
+/// `/@handle/video/123` is one post, and `/@handle/live` is a stream rather
+/// than a feed, so both stay `Single`. Matching on the *shape* of the path
+/// rather than on the absence of "video" keeps future TikTok sub-pages out by
+/// default instead of letting them fall through as profiles.
+fn is_tiktok_profile(url: &Url) -> bool {
+    let mut segments = url
+        .path_segments()
+        .map(|s| s.filter(|p| !p.is_empty()))
+        .into_iter()
+        .flatten();
+
+    let Some(first) = segments.next() else {
+        return false;
+    };
+    // A handle is at least one character after the `@`.
+    first.starts_with('@') && first.len() > 1 && segments.next().is_none()
 }
 
 /// Classify a pasted link, or explain why it was refused.
@@ -153,6 +195,39 @@ mod tests {
         ] {
             assert!(classify(raw).is_err(), "should have refused {raw}");
         }
+    }
+
+    #[test]
+    fn a_bare_handle_is_a_profile_and_a_post_is_not() {
+        let profile = [
+            "https://www.tiktok.com/@raimqqq",
+            "https://www.tiktok.com/@raimqqq/",
+            "https://tiktok.com/@khaby.lame",
+        ];
+        for raw in profile {
+            let (_, _, kind) = classify_target(raw).unwrap();
+            assert_eq!(kind, TargetKind::Profile, "{raw}");
+        }
+
+        let single = [
+            "https://www.tiktok.com/@raimqqq/video/7674870647071296789",
+            "https://www.tiktok.com/@raimqqq/live",
+            "https://vm.tiktok.com/ZMabcdef/",
+            // Facebook has no profile form at all - yt-dlp cannot list a page.
+            "https://www.facebook.com/nasa/videos",
+            "https://www.facebook.com/share/r/199xesnx3h/",
+        ];
+        for raw in single {
+            let (_, _, kind) = classify_target(raw).unwrap();
+            assert_eq!(kind, TargetKind::Single, "{raw}");
+        }
+    }
+
+    #[test]
+    fn an_empty_handle_is_not_a_profile() {
+        // `tiktok.com/@` would otherwise enumerate nothing, slowly.
+        let (_, _, kind) = classify_target("https://www.tiktok.com/@").unwrap();
+        assert_eq!(kind, TargetKind::Single);
     }
 
     #[test]

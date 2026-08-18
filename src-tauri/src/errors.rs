@@ -86,6 +86,13 @@ pub enum AppError {
     #[error("no downloadable video was found at that link")]
     NoMediaFound,
 
+    /// The platform refused this request but the post is fine - anti-bot
+    /// throttling, which is what TikTok does when asked for many videos in a
+    /// row. Distinct from `NoMediaFound` because it is worth retrying and
+    /// because telling someone their video doesn't exist would be a lie.
+    #[error("the platform is rate-limiting us; this usually succeeds on a retry")]
+    TemporarilyUnavailable,
+
     #[error("no download job with that id")]
     JobNotFound,
 
@@ -121,6 +128,7 @@ impl AppError {
             Self::EngineFailed(_) => "engine_failed",
             Self::MediaNotPublic => "media_not_public",
             Self::NoMediaFound => "no_media_found",
+            Self::TemporarilyUnavailable => "temporarily_unavailable",
             Self::JobNotFound => "job_not_found",
             Self::DownloadPath(_) => "download_path",
             Self::Internal(_) => "internal",

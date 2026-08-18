@@ -140,7 +140,6 @@ pub const HARDENED_FLAGS: &[&str] = &[
     "--ignore-config",
     "--no-cookies",
     "--no-cookies-from-browser",
-    "--no-playlist",
 ];
 
 fn hardened_base(cmd: &mut Command) {
@@ -158,7 +157,8 @@ fn hardened_base(cmd: &mut Command) {
 pub async fn probe(url: &Url) -> Result<MediaInfo> {
     let mut cmd = Command::new(engine_path()?);
     hardened_base(&mut cmd);
-    cmd.arg("--dump-single-json")
+    cmd.arg("--no-playlist")
+        .arg("--dump-single-json")
         .arg("--no-warnings")
         .arg(url.as_str())
         .stdout(Stdio::piped())
@@ -212,6 +212,89 @@ fn str_field(v: &serde_json::Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// One video in a creator's feed, as listed without visiting its page.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProfileEntry {
+    pub id: String,
+    pub url: String,
+    pub title: Option<String>,
+    pub duration_seconds: Option<f64>,
+}
+
+/// A creator's feed: who they are, and every post found.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProfileListing {
+    /// The handle as the platform spells it.
+    pub uploader: String,
+    pub profile_url: String,
+    pub count: usize,
+    pub entries: Vec<ProfileEntry>,
+}
+
+/// List every video on a profile, without downloading or even opening any.
+///
+/// `--flat-playlist` is what makes this affordable: yt-dlp reads the feed
+/// listing and stops, rather than resolving each post's formats. Enumerating
+/// 133 videos takes a few seconds instead of several minutes.
+///
+/// TikTok's feed endpoint is genuinely flaky when hit anonymously and
+/// intermittently answers with "Unable to extract secondary user ID" - the
+/// same profile succeeds moments later - so this retries a little harder than
+/// a single-video probe does.
+pub async fn list_profile(url: &Url) -> Result<ProfileListing> {
+    let mut cmd = Command::new(engine_path()?);
+    hardened_base(&mut cmd);
+    cmd.arg("--yes-playlist")
+        .arg("--flat-playlist")
+        .arg("--dump-single-json")
+        .arg("--no-warnings")
+        .arg(url.as_str())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let out = cmd.output().await.map_err(|_| AppError::EngineMissing)?;
+    if !out.status.success() {
+        return Err(classify_failure(&String::from_utf8_lossy(&out.stderr)));
+    }
+
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).map_err(|_| AppError::MalformedProviderResponse)?;
+
+    let entries: Vec<ProfileEntry> = v
+        .get("entries")
+        .and_then(|e| e.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    // Without a URL there is nothing to queue, so an entry
+                    // missing one is skipped rather than failing the listing.
+                    let url = str_field(e, "url").or_else(|| str_field(e, "webpage_url"))?;
+                    Some(ProfileEntry {
+                        id: str_field(e, "id").unwrap_or_default(),
+                        url,
+                        title: str_field(e, "title"),
+                        duration_seconds: e.get("duration").and_then(|d| d.as_f64()),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if entries.is_empty() {
+        return Err(AppError::NoMediaFound);
+    }
+
+    Ok(ProfileListing {
+        uploader: str_field(&v, "title")
+            .or_else(|| str_field(&v, "uploader"))
+            .or_else(|| str_field(&v, "channel"))
+            .unwrap_or_else(|| "this profile".to_string()),
+        profile_url: url.to_string(),
+        count: entries.len(),
+        entries,
+    })
+}
+
 /// A download in flight. Dropping this does not stop the child; call
 /// [`Running::kill`].
 pub struct Running {
@@ -235,7 +318,7 @@ pub fn start(url: &Url, dest_dir: &Path, tx: mpsc::UnboundedSender<Progress>) ->
 
     let mut cmd = Command::new(engine_path()?);
     hardened_base(&mut cmd);
-    cmd
+    cmd.arg("--no-playlist")
         // Prefer a single progressive file. Merging separate video and audio
         // streams would require FFmpeg, which this build does not ship, so a
         // merge-only format would fail at the last step after a full download.
@@ -359,6 +442,25 @@ fn classify_failure(stderr: &str) -> AppError {
         return AppError::MediaNotPublic;
     }
 
+    // Checked BEFORE the missing-media markers, because the strings overlap:
+    // "unable to extract universal data for rehydration" is TikTok throttling
+    // a perfectly good video, and matching it as "no video found" both lies to
+    // the user and skips the retry that would have worked.
+    const RETRYABLE_MARKERS: &[&str] = &[
+        "universal data for rehydration",
+        "webpage video data",
+        "rate limit",
+        "rate-limit",
+        "too many requests",
+        "429",
+        "temporarily unavailable",
+        "try again later",
+        "unable to download webpage: http error 5",
+    ];
+    if RETRYABLE_MARKERS.iter().any(|m| lower.contains(m)) {
+        return AppError::TemporarilyUnavailable;
+    }
+
     const MISSING_MARKERS: &[&str] = &[
         "unsupported url",
         "no video",
@@ -444,6 +546,23 @@ mod tests {
         ] {
             assert!(
                 matches!(classify_failure(stderr), AppError::MediaNotPublic),
+                "{stderr}"
+            );
+        }
+    }
+
+    #[test]
+    fn throttling_is_not_reported_as_a_missing_video() {
+        // The exact string TikTok returns when asked for many videos quickly.
+        // It was previously classified as "no video found", which told users
+        // their video didn't exist when a retry would have fetched it.
+        for stderr in [
+            "ERROR: [TikTok] 7668241190671764757: Unable to extract universal data for rehydration; please report this issue",
+            "ERROR: [TikTok] 123: Unable to extract webpage video data",
+            "ERROR: HTTP Error 429: Too Many Requests",
+        ] {
+            assert!(
+                matches!(classify_failure(stderr), AppError::TemporarilyUnavailable),
                 "{stderr}"
             );
         }

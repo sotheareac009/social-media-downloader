@@ -61,7 +61,7 @@ export function UrlBar({
         rows={1}
         autoComplete="off"
         spellCheck={false}
-        placeholder="Paste one or more Facebook or TikTok links — one per line"
+        placeholder="Paste Facebook or TikTok links, or a TikTok profile — one per line"
         aria-label="Video links"
         value={value}
         disabled={disabled}
