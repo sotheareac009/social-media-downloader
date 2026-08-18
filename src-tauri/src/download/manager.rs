@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, Semaphore};
 
 use crate::download::settings::Settings;
 use crate::download::url::{classify, classify_target, Source, TargetKind};
-use crate::download::ytdlp::{self, MediaInfo, Progress, ProfileListing};
+use crate::download::ytdlp::{self, MediaInfo, Progress, ProfileListing, YOUTUBE_CLIENTS};
 use crate::errors::{AppError, Result};
 
 pub mod events {
@@ -125,12 +125,17 @@ struct Job {
     view: JobView,
 }
 
-/// State of the engine on this machine, for the UI's setup notice.
+/// State of the tooling on this machine, for the UI's setup notice.
 #[derive(Debug, Clone, Serialize)]
 pub struct EngineStatus {
     pub available: bool,
     pub path: Option<String>,
     pub version: Option<String>,
+    /// FFmpeg is optional but decides YouTube quality: without it the best
+    /// single file YouTube offers is 360p, because anything better is served
+    /// as separate video and audio streams that need merging.
+    pub has_ffmpeg: bool,
+    pub ffmpeg_path: Option<String>,
 }
 
 /// The destination as the UI needs to describe it.
@@ -227,16 +232,21 @@ impl DownloadManager {
     }
 
     pub async fn engine_status(&self) -> EngineStatus {
+        let ffmpeg = ytdlp::locate_ffmpeg();
         match ytdlp::locate() {
             None => EngineStatus {
                 available: false,
                 path: None,
                 version: None,
+                has_ffmpeg: ffmpeg.is_some(),
+                ffmpeg_path: ffmpeg.map(|p| p.display().to_string()),
             },
             Some(path) => EngineStatus {
                 available: true,
                 path: Some(path.display().to_string()),
                 version: ytdlp::version().await.ok().filter(|v| !v.is_empty()),
+                has_ffmpeg: ffmpeg.is_some(),
+                ffmpeg_path: ffmpeg.map(|p| p.display().to_string()),
             },
         }
     }
@@ -244,7 +254,7 @@ impl DownloadManager {
     /// Check a link without committing to a download. Powers the paste preview.
     pub async fn inspect(&self, raw: &str) -> Result<MediaInfo> {
         let (_, url) = classify(raw)?;
-        ytdlp::probe(&url).await
+        ytdlp::probe(&url, None).await
     }
 
     /// List a creator's videos without downloading any of them.
@@ -416,7 +426,7 @@ impl DownloadManager {
 /// Drive one job to completion. Spawned by the command layer, which owns the
 /// `Arc` this needs.
 pub async fn run_job(manager: Arc<DownloadManager>, app: AppHandle, id: String) {
-    let (raw_url, _source) = match manager.get(&id) {
+    let (raw_url, source) = match manager.get(&id) {
         Ok(v) => (v.url, v.source),
         Err(_) => return,
     };
@@ -439,13 +449,35 @@ pub async fn run_job(manager: Arc<DownloadManager>, app: AppHandle, id: String) 
     // Space out engine starts so a large queue doesn't look like a scraper.
     tokio::time::sleep(std::time::Duration::from_millis(START_STAGGER_MS)).await;
 
+    // Only YouTube has alternative player clients; everything else has one way
+    // of asking, so a refusal there is simply a failure.
+    let clients: &[Option<&str>] = match source {
+        Source::YouTube => YOUTUBE_CLIENTS,
+        _ => &[None],
+    };
+    let mut client_idx = 0usize;
+
     for attempt in 1..=MAX_ATTEMPTS {
         if manager.is_cancelled(&id) {
             return;
         }
-        match attempt_job(&manager, &app, &id, &url, attempt).await {
+        match attempt_job(&manager, &app, &id, &url, attempt, clients[client_idx]).await {
             Outcome::Done | Outcome::Cancelled => return,
             Outcome::Failed(e) => return finish_failed(&manager, &app, &id, e),
+            Outcome::Refused(e) => {
+                // Waiting won't help - ask again as a different client. When
+                // there isn't one left, report it rather than spinning.
+                client_idx += 1;
+                if client_idx >= clients.len() {
+                    return finish_failed(&manager, &app, &id, e);
+                }
+                if let Some(v) = manager.mutate(&id, |v| {
+                    v.status = JobStatus::Queued;
+                    v.attempt = attempt + 1;
+                }) {
+                    let _ = app.emit(events::UPDATED, v);
+                }
+            }
             Outcome::Throttled(e) => {
                 // Out of attempts: report the throttling honestly rather than
                 // as some other kind of failure.
@@ -472,6 +504,8 @@ enum Outcome {
     Cancelled,
     /// Worth another attempt - the platform throttled us.
     Throttled(AppError),
+    /// Worth another attempt, but only as a different player client.
+    Refused(AppError),
     /// Not worth retrying: private, missing, or genuinely broken.
     Failed(AppError),
 }
@@ -480,6 +514,7 @@ impl Outcome {
     fn from(e: AppError) -> Self {
         match e {
             AppError::TemporarilyUnavailable => Outcome::Throttled(e),
+            AppError::ClientRefused => Outcome::Refused(e),
             other => Outcome::Failed(other),
         }
     }
@@ -492,6 +527,7 @@ async fn attempt_job(
     id: &str,
     url: &url::Url,
     attempt: u32,
+    client: Option<&str>,
 ) -> Outcome {
     if let Some(v) = manager.mutate(id, |v| {
         v.status = JobStatus::Probing;
@@ -500,7 +536,7 @@ async fn attempt_job(
         let _ = app.emit(events::UPDATED, v);
     }
 
-    let info = match ytdlp::probe(url).await {
+    let info = match ytdlp::probe(url, client).await {
         Ok(i) => i,
         Err(e) => return Outcome::from(e),
     };
@@ -525,7 +561,7 @@ async fn attempt_job(
     }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Progress>();
-    let mut running = match ytdlp::start(url, &dest, tx) {
+    let mut running = match ytdlp::start(url, &dest, tx, client) {
         Ok(r) => r,
         Err(e) => return Outcome::from(e),
     };

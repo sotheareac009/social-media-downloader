@@ -24,6 +24,7 @@ use crate::errors::{AppError, Result};
 pub enum Source {
     Facebook,
     TikTok,
+    YouTube,
 }
 
 impl Source {
@@ -31,6 +32,7 @@ impl Source {
         match self {
             Source::Facebook => "facebook",
             Source::TikTok => "tiktok",
+            Source::YouTube => "youtube",
         }
     }
 
@@ -38,15 +40,16 @@ impl Source {
         match self {
             Source::Facebook => "Facebook",
             Source::TikTok => "TikTok",
+            Source::YouTube => "YouTube",
         }
     }
 }
 
 /// What a link points at: one video, or a creator's whole feed.
 ///
-/// Only TikTok has a `Profile` form. yt-dlp has no Facebook page-listing
-/// extractor - `facebook.com/<page>/videos` is answered with "Unsupported URL"
-/// - so every accepted Facebook link is a single post.
+/// Facebook has no `Profile` form: yt-dlp has no page-listing extractor for it
+/// - `facebook.com/<page>/videos` is answered with "Unsupported URL" - so every
+/// accepted Facebook link is a single post.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TargetKind {
@@ -58,6 +61,7 @@ pub enum TargetKind {
 /// `www.` / `m.` / `web.` prefix.
 const FACEBOOK_HOSTS: &[&str] = &["facebook.com", "fb.watch", "fb.com", "facebook.net"];
 const TIKTOK_HOSTS: &[&str] = &["tiktok.com", "vm.tiktok.com", "vt.tiktok.com"];
+const YOUTUBE_HOSTS: &[&str] = &["youtube.com", "youtu.be", "youtube-nocookie.com"];
 
 /// Strip the subdomains that are merely presentational, so `m.facebook.com`
 /// and `web.facebook.com` resolve to the same allowlist entry. Anything else
@@ -75,11 +79,53 @@ fn normalise_host(host: &str) -> &str {
 /// Classify a pasted link and say whether it names a video or a whole profile.
 pub fn classify_target(raw: &str) -> Result<(Source, Url, TargetKind)> {
     let (source, url) = classify(raw)?;
-    let kind = match source {
-        Source::TikTok if is_tiktok_profile(&url) => TargetKind::Profile,
-        _ => TargetKind::Single,
-    };
-    Ok((source, url, kind))
+    match source {
+        Source::TikTok if is_tiktok_profile(&url) => Ok((source, url, TargetKind::Profile)),
+        Source::YouTube => Ok(classify_youtube(url)),
+        _ => Ok((source, url, TargetKind::Single)),
+    }
+}
+
+/// YouTube needs its own pass, because a channel URL is not directly listable.
+///
+/// Asking yt-dlp for `youtube.com/@NASA` returns the channel's *tabs* -
+/// "NASA - Videos", "NASA - Live" - as entries with no URL, which is not a
+/// list of videos and cannot be queued. Appending `/videos` is what turns it
+/// into the uploads feed, so that normalisation happens here rather than
+/// surfacing as an empty listing.
+fn classify_youtube(mut url: Url) -> (Source, Url, TargetKind) {
+    let segments: Vec<String> = url
+        .path_segments()
+        .map(|s| s.filter(|p| !p.is_empty()).map(str::to_string).collect())
+        .unwrap_or_default();
+
+    let first = segments.first().map(String::as_str).unwrap_or("");
+
+    // A playlist is already a listing; nothing to normalise.
+    if first == "playlist" {
+        return (Source::YouTube, url, TargetKind::Profile);
+    }
+
+    let is_channel_root = (first.starts_with('@') && first.len() > 1)
+        || ((first == "channel" || first == "c" || first == "user") && segments.len() == 2);
+
+    if is_channel_root {
+        // `@handle/videos` and `@handle/shorts` are already feeds; a bare
+        // handle is the channel home and needs the uploads tab.
+        if segments.len() == 1 || (first.starts_with('@') && segments.len() == 1) {
+            url.set_path(&format!("/{first}/videos"));
+        }
+        return (Source::YouTube, url, TargetKind::Profile);
+    }
+
+    // A channel tab that already names a feed.
+    if first.starts_with('@') && matches!(segments.get(1).map(String::as_str), Some("videos" | "shorts" | "streams")) {
+        return (Source::YouTube, url, TargetKind::Profile);
+    }
+
+    // Everything else - /watch?v=, /shorts/ID, youtu.be/ID, /live/ID - is one
+    // video.
+    (Source::YouTube, url, TargetKind::Single)
 }
 
 /// A TikTok profile is `/@handle` and nothing more.
@@ -129,6 +175,8 @@ pub fn classify(raw: &str) -> Result<(Source, Url)> {
         Ok((Source::Facebook, parsed))
     } else if TIKTOK_HOSTS.contains(&host) {
         Ok((Source::TikTok, parsed))
+    } else if YOUTUBE_HOSTS.contains(&host) {
+        Ok((Source::YouTube, parsed))
     } else {
         Err(AppError::UnsupportedUrl)
     }
@@ -181,7 +229,7 @@ mod tests {
     #[test]
     fn other_supported_sites_are_still_out_of_scope() {
         // yt-dlp could fetch these; this build deliberately will not.
-        for raw in ["https://www.youtube.com/watch?v=abc", "https://vimeo.com/1"] {
+        for raw in ["https://vimeo.com/1", "https://www.dailymotion.com/video/x1"] {
             assert!(classify(raw).is_err(), "should have refused {raw}");
         }
     }
@@ -221,6 +269,44 @@ mod tests {
             let (_, _, kind) = classify_target(raw).unwrap();
             assert_eq!(kind, TargetKind::Single, "{raw}");
         }
+    }
+
+    #[test]
+    fn youtube_videos_and_shorts_are_single() {
+        for raw in [
+            "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+            "https://youtu.be/jNQXAC9IVRw",
+            "https://www.youtube.com/shorts/abc123XYZ",
+            "https://m.youtube.com/watch?v=jNQXAC9IVRw",
+            "https://www.youtube.com/live/abc123",
+        ] {
+            let (source, _, kind) = classify_target(raw).unwrap();
+            assert_eq!(source, Source::YouTube, "{raw}");
+            assert_eq!(kind, TargetKind::Single, "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_bare_youtube_channel_is_normalised_to_its_uploads_feed() {
+        // Without this, yt-dlp lists the channel's *tabs* - entries with no
+        // URL - and the profile card would show nothing to download.
+        let (_, url, kind) = classify_target("https://www.youtube.com/@NASA").unwrap();
+        assert_eq!(kind, TargetKind::Profile);
+        assert_eq!(url.path(), "/@NASA/videos");
+    }
+
+    #[test]
+    fn youtube_feeds_that_are_already_specific_are_left_alone() {
+        for (raw, want_path) in [
+            ("https://www.youtube.com/@NASA/videos", "/@NASA/videos"),
+            ("https://www.youtube.com/@NASA/shorts", "/@NASA/shorts"),
+        ] {
+            let (_, url, kind) = classify_target(raw).unwrap();
+            assert_eq!(kind, TargetKind::Profile, "{raw}");
+            assert_eq!(url.path(), want_path, "{raw}");
+        }
+        let (_, _, kind) = classify_target("https://www.youtube.com/playlist?list=PL123").unwrap();
+        assert_eq!(kind, TargetKind::Profile);
     }
 
     #[test]

@@ -1519,3 +1519,22 @@
 .summary__cancel:hover {
   color: var(--text-primary);
 }
+
+/* A quality caveat, not a blocker — softer than the missing-engine notice. */
+.engine--hint {
+  margin-top: 10px;
+  border-color: var(--border-default);
+  background: var(--surface-2);
+}
+
+.engine--hint .engine__icon {
+  color: var(--text-tertiary);
+}
+
+.logo--youtube {
+  background: #ff0033;
+}
+
+.job--youtube .job__badge {
+  background: rgba(255, 0, 51, 0.85);
+}

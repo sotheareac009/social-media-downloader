@@ -20,6 +20,9 @@ downloadable exactly when it is already public.
 
 Paste a link on the Downloads page. Supported hosts:
 
+- `youtube.com/watch?v=…`, `youtu.be/…`, `youtube.com/shorts/…`
+- `youtube.com/@channel`, `youtube.com/playlist?list=…` (whole feeds)
+
 - `facebook.com/watch`, `facebook.com/reel/…`, `fb.watch/…`, `m.facebook.com/…`
 - `tiktok.com/@user/video/…`, `vm.tiktok.com/…`, `vt.tiktok.com/…`
 - `tiktok.com/@user` — a whole profile (see below)
@@ -64,6 +67,42 @@ Those numbers are measured, not guessed. Replaying a slice of a real profile:
 | no retry, no stagger | 5/8 |
 | 3 attempts, 3s/9s, 700ms stagger | 7/8 |
 | 4 attempts, 5s/15s/30s, 1.2s stagger | 12/12 |
+
+### YouTube quality needs FFmpeg
+
+Above 360p, YouTube serves video and audio as **separate streams**. Without a
+merger the best single file available is 360p; measured on one video, 360p
+progressive versus 1080p merged. Facebook and TikTok serve progressive files and
+are unaffected.
+
+So FFmpeg is optional but strongly recommended:
+
+```bash
+brew install ffmpeg                 # macOS
+winget install Gyan.FFmpeg          # Windows
+sudo apt install ffmpeg             # Linux
+```
+
+The app detects it and switches format selection automatically — with FFmpeg it
+asks for `bv*+ba` and remuxes to mp4; without, it asks only for single files, so
+a download can never succeed for ten minutes and then fail at a merge step. The
+Downloads page says which mode you're in. Override detection with
+`MEDIA_DOWNLOADER_FFMPEG=/full/path/to/ffmpeg`.
+
+### YouTube anti-bot refusals
+
+YouTube intermittently answers its own media URLs with `HTTP 403` for anonymous
+clients. It is genuinely intermittent — the same video 403s and then downloads
+minutes later.
+
+The app handles it with a player-client fallback chain rather than giving up:
+yt-dlp's default client first (full format ladder), then `mweb` (which still
+serves, but only format 18 at 360p). Measured: `tv`, `ios` and `web_safari`
+offered no usable progressive format at all, so they are not in the chain.
+
+A 403 is classified separately from rate limiting, because waiting doesn't help
+— only asking as a different client does — so it retries immediately instead of
+backing off.
 
 ### One prerequisite: yt-dlp
 

@@ -93,6 +93,12 @@ pub enum AppError {
     #[error("the platform is rate-limiting us; this usually succeeds on a retry")]
     TemporarilyUnavailable,
 
+    /// The media CDN refused the request outright - YouTube's anti-bot layer
+    /// answering a client it doesn't like. Distinct from throttling because
+    /// waiting does not help; only asking as a different client does.
+    #[error("the platform refused this request; trying a different client")]
+    ClientRefused,
+
     #[error("no download job with that id")]
     JobNotFound,
 
@@ -129,6 +135,7 @@ impl AppError {
             Self::MediaNotPublic => "media_not_public",
             Self::NoMediaFound => "no_media_found",
             Self::TemporarilyUnavailable => "temporarily_unavailable",
+            Self::ClientRefused => "client_refused",
             Self::JobNotFound => "job_not_found",
             Self::DownloadPath(_) => "download_path",
             Self::Internal(_) => "internal",

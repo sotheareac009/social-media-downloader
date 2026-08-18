@@ -20,6 +20,7 @@ import {
 const SOURCE_LABEL: Record<JobView["source"], string> = {
   facebook: "Facebook",
   tiktok: "TikTok",
+  youtube: "YouTube",
 };
 
 export function JobCard({
@@ -37,7 +38,7 @@ export function JobCard({
   const pct = job.fraction === null ? null : Math.round(job.fraction * 100);
 
   return (
-    <article className={`job job--${job.status}`}>
+    <article className={`job job--${job.status} job--${job.source}`}>
       <div className="job__thumb">
         {job.thumbnail_url ? (
           // Remote https images are permitted by the CSP; a broken one falls

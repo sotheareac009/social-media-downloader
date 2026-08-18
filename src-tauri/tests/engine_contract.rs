@@ -63,7 +63,7 @@ echo '{{"id":"abc123","title":"A public reel","uploader":"someone","duration":12
     );
 
     let url = url::Url::parse("https://www.tiktok.com/@u/video/7300000000000000000").unwrap();
-    let info = ytdlp::probe(&url).await.expect("probe should succeed");
+    let info = ytdlp::probe(&url, None).await.expect("probe should succeed");
 
     assert_eq!(info.id, "abc123");
     assert_eq!(info.title, "A public reel");
@@ -110,7 +110,7 @@ exit 0"#,
     );
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut running = ytdlp::start(&url, &dir, tx).expect("spawn");
+    let mut running = ytdlp::start(&url, &dir, tx, None).expect("spawn");
     ytdlp::wait(&mut running).await.expect("clean exit");
 
     let mut seen = Vec::new();
@@ -131,7 +131,7 @@ exit 0"#,
 exit 1"#,
     );
     let (tx, _rx) = mpsc::unbounded_channel();
-    let mut running = ytdlp::start(&url, &dir, tx).unwrap();
+    let mut running = ytdlp::start(&url, &dir, tx, None).unwrap();
     match ytdlp::wait(&mut running).await {
         Err(AppError::MediaNotPublic) => {}
         other => panic!("expected MediaNotPublic, got {other:?}"),
@@ -140,7 +140,7 @@ exit 1"#,
     // ---- 4. cancellation actually kills the child --------------------------
     install_stub(&dir, "hang", r#"sleep 30"#);
     let (tx, _rx) = mpsc::unbounded_channel();
-    let mut running = ytdlp::start(&url, &dir, tx).unwrap();
+    let mut running = ytdlp::start(&url, &dir, tx, None).unwrap();
     running.kill().await;
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),

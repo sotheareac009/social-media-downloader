@@ -91,6 +91,7 @@ pub fn read(key: &str) -> Option<String> {
         // Not an OAuth value: an explicit path to the yt-dlp binary, for the
         // common case where a GUI app doesn't inherit the shell's PATH.
         "MEDIA_DOWNLOADER_YTDLP" => option_env!("MEDIA_DOWNLOADER_YTDLP"),
+        "MEDIA_DOWNLOADER_FFMPEG" => option_env!("MEDIA_DOWNLOADER_FFMPEG"),
         _ => None,
     }
     .map(str::to_string)

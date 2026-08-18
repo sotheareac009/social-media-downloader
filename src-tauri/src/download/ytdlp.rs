@@ -118,6 +118,82 @@ pub fn engine_path() -> Result<PathBuf> {
     locate().ok_or(AppError::EngineMissing)
 }
 
+/// Find FFmpeg, using the same search strategy as [`locate`].
+///
+/// Optional, but it decides how good a YouTube download can be. YouTube serves
+/// video and audio as separate streams above 360p, so without a merger the
+/// best *single* file available is 360p. Measured on one video: 360p
+/// progressive versus 1080p merged. Facebook and TikTok serve progressive
+/// files, so they are unaffected either way.
+pub fn locate_ffmpeg() -> Option<PathBuf> {
+    if let Some(explicit) = crate::config::read("MEDIA_DOWNLOADER_FFMPEG") {
+        let p = PathBuf::from(explicit);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+
+    let exe = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join(exe);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    if !cfg!(windows) {
+        for candidate in [
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/usr/bin/ffmpeg",
+            "/snap/bin/ffmpeg",
+        ] {
+            let p = PathBuf::from(candidate);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Player clients to try for YouTube, in order.
+///
+/// `None` is yt-dlp's default, which offers the full format ladder up to 1080p
+/// and beyond. YouTube's anti-bot layer increasingly answers its media URLs
+/// with `HTTP 403`, and when it does, `mweb` still serves - but only format 18,
+/// which is 360p. So the order matters: best quality first, then the client
+/// that actually works.
+///
+/// Measured on one video: default → 1080p offered but 403 on fetch; `mweb` →
+/// 360p, downloaded fine. `tv`, `ios` and `web_safari` offered no usable
+/// progressive format at all.
+pub const YOUTUBE_CLIENTS: &[Option<&str>] = &[None, Some("mweb")];
+
+/// Apply a player-client override, if one is being tried.
+fn apply_client(cmd: &mut Command, client: Option<&str>) {
+    if let Some(c) = client {
+        cmd.arg("--extractor-args")
+            .arg(format!("youtube:player_client={c}"));
+    }
+}
+
+/// The format selector to ask for, given whether a merger is available.
+///
+/// With FFmpeg: best video plus best audio, preferring mp4/m4a so the merge is
+/// a remux rather than a re-encode. Without it: the best *single* file, since
+/// a merge-only format would download in full and then fail at the last step.
+fn format_selector(has_ffmpeg: bool) -> &'static str {
+    if has_ffmpeg {
+        "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b[ext=mp4]/b"
+    } else {
+        "b[ext=mp4]/b[ext=mov]/b"
+    }
+}
+
 /// The engine's own version string, for the UI's diagnostics panel.
 pub async fn version() -> Result<String> {
     let out = Command::new(engine_path()?)
@@ -154,9 +230,10 @@ fn hardened_base(cmd: &mut Command) {
 }
 
 /// Read metadata without downloading. Cheap enough to run on paste.
-pub async fn probe(url: &Url) -> Result<MediaInfo> {
+pub async fn probe(url: &Url, client: Option<&str>) -> Result<MediaInfo> {
     let mut cmd = Command::new(engine_path()?);
     hardened_base(&mut cmd);
+    apply_client(&mut cmd, client);
     cmd.arg("--no-playlist")
         .arg("--dump-single-json")
         .arg("--no-warnings")
@@ -311,19 +388,23 @@ impl Running {
 ///
 /// Returns once the process has been spawned; the caller awaits
 /// [`wait`] for the outcome.
-pub fn start(url: &Url, dest_dir: &Path, tx: mpsc::UnboundedSender<Progress>) -> Result<Running> {
+pub fn start(
+    url: &Url,
+    dest_dir: &Path,
+    tx: mpsc::UnboundedSender<Progress>,
+    client: Option<&str>,
+) -> Result<Running> {
     let template = format!(
         "{PROGRESS_PREFIX} %(progress.downloaded_bytes)s %(progress.total_bytes,progress.total_bytes_estimate)s %(progress.speed)s %(progress.eta)s"
     );
 
     let mut cmd = Command::new(engine_path()?);
     hardened_base(&mut cmd);
+    let ffmpeg = locate_ffmpeg();
+    apply_client(&mut cmd, client);
     cmd.arg("--no-playlist")
-        // Prefer a single progressive file. Merging separate video and audio
-        // streams would require FFmpeg, which this build does not ship, so a
-        // merge-only format would fail at the last step after a full download.
         .arg("-f")
-        .arg("b[ext=mp4]/b[ext=mov]/b")
+        .arg(format_selector(ffmpeg.is_some()))
         .arg("-o")
         // Byte-truncated so a long caption cannot exceed the filesystem's
         // name limit; the id keeps two posts with the same title distinct.
@@ -335,6 +416,14 @@ pub fn start(url: &Url, dest_dir: &Path, tx: mpsc::UnboundedSender<Progress>) ->
         .arg(url.as_str())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    // Point the engine at the exact binary we found, so it doesn't depend on
+    // the PATH a GUI process inherited, and ask for an mp4 container so a
+    // merged file plays everywhere.
+    if let Some(ffmpeg) = &ffmpeg {
+        cmd.arg("--ffmpeg-location").arg(ffmpeg);
+        cmd.arg("--merge-output-format").arg("mp4");
+    }
 
     let mut child = cmd.spawn().map_err(|_| AppError::EngineMissing)?;
 
@@ -446,6 +535,13 @@ fn classify_failure(stderr: &str) -> AppError {
     // "unable to extract universal data for rehydration" is TikTok throttling
     // a perfectly good video, and matching it as "no video found" both lies to
     // the user and skips the retry that would have worked.
+    // A refusal from the media CDN. Waiting changes nothing; the caller
+    // responds by asking again as a different player client.
+    const REFUSAL_MARKERS: &[&str] = &["http error 403", "403: forbidden"];
+    if REFUSAL_MARKERS.iter().any(|m| lower.contains(m)) {
+        return AppError::ClientRefused;
+    }
+
     const RETRYABLE_MARKERS: &[&str] = &[
         "universal data for rehydration",
         "webpage video data",
@@ -499,6 +595,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn quality_depends_on_whether_a_merger_is_available() {
+        // Without FFmpeg the selector must never ask for `video+audio`: that
+        // format downloads in full and then fails at the merge step.
+        let without = format_selector(false);
+        assert!(!without.contains('+'), "{without}");
+
+        // With it, the merged form must be preferred over the progressive
+        // fallback, or YouTube silently caps at 360p.
+        let with = format_selector(true);
+        assert!(with.starts_with("bv*"), "{with}");
+        assert!(with.contains('+'), "{with}");
+        assert!(with.ends_with("/b"), "a single-file fallback must remain: {with}");
+    }
+
+    #[test]
     fn parses_a_complete_progress_line() {
         let p = parse_progress("MDPROGRESS 1048576 4194304 524288.0 6").unwrap();
         assert_eq!(p.downloaded_bytes, 1_048_576);
@@ -546,6 +657,21 @@ mod tests {
         ] {
             assert!(
                 matches!(classify_failure(stderr), AppError::MediaNotPublic),
+                "{stderr}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cdn_refusal_asks_for_a_different_client() {
+        // YouTube's anti-bot layer. The video exists and the metadata parsed;
+        // only the media fetch was refused.
+        for stderr in [
+            "ERROR: unable to download video data: HTTP Error 403: Forbidden",
+            "ERROR: [youtube] abc: HTTP Error 403: Forbidden",
+        ] {
+            assert!(
+                matches!(classify_failure(stderr), AppError::ClientRefused),
                 "{stderr}"
             );
         }

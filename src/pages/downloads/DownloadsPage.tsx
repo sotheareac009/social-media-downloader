@@ -103,7 +103,13 @@ export function DownloadsPage() {
         setDest(destination);
       } catch {
         if (mounted.current) {
-          setEngine({ available: false, path: null, version: null });
+          setEngine({
+            available: false,
+            path: null,
+            version: null,
+            has_ffmpeg: false,
+            ffmpeg_path: null,
+          });
         }
       }
     })();
@@ -371,7 +377,9 @@ export function DownloadsPage() {
   }, [jobs, retryFailed]);
 
   useEffect(() => {
-    if (!retryWhenIdle) return;
+    // `retrying` guards the window between firing and the new jobs appearing,
+    // when the queue still looks idle and would fire a second time.
+    if (!retryWhenIdle || retrying) return;
     const active = jobs.some((j) => !isTerminal(j.status));
     const failed = jobs.some((j) => j.status === "failed");
     if (active) return;
@@ -381,7 +389,7 @@ export function DownloadsPage() {
       return;
     }
     void retryFailed();
-  }, [retryWhenIdle, jobs, retryFailed]);
+  }, [retryWhenIdle, retrying, jobs, retryFailed]);
 
   const finishedCount = jobs.filter((j) => isTerminal(j.status)).length;
   const engineReady = engine?.available === true;
@@ -402,10 +410,10 @@ export function DownloadsPage() {
         </span>
         <h1 className="page__title">Download public videos</h1>
         <p className="page__lede">
-          Paste a link — or a whole list, one per line — to public Facebook or
-          TikTok videos and reels. A TikTok profile link downloads everything
-          that creator has posted. No account needed: these are posts anyone
-          can already open in a browser.
+          Paste a link — or a whole list, one per line — for public YouTube,
+          Facebook and TikTok videos, Shorts and reels. A TikTok profile or
+          YouTube channel link grabs everything they've posted. No account
+          needed: these are posts anyone can already open in a browser.
         </p>
       </header>
 
@@ -526,7 +534,7 @@ function EmptyQueue({ engineReady }: { engineReady: boolean }) {
       </div>
       <p className="empty__text">
         {engineReady
-          ? "Paste a link above — or several at once, one per line. Facebook watch pages, reels and share links, plus TikTok videos. Paste a TikTok profile like tiktok.com/@name to grab everything they've posted."
+          ? "Paste a link above — or several at once, one per line. YouTube videos and Shorts, Facebook watch pages, reels and share links, and TikTok videos. A channel or profile link grabs everything they've posted."
           : "Once the engine is installed, paste a link above and it'll appear here."}
       </p>
     </div>

@@ -10,7 +10,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 /** Platforms this build will fetch public media from. */
-export type Source = "facebook" | "tiktok";
+export type Source = "facebook" | "tiktok" | "youtube";
 
 export type JobStatus =
   | "queued"
@@ -99,6 +99,9 @@ export interface EngineStatus {
   available: boolean;
   path: string | null;
   version: string | null;
+  /** Optional, but decides YouTube quality: without it, 360p is the ceiling. */
+  has_ffmpeg: boolean;
+  ffmpeg_path: string | null;
 }
 
 export interface ProgressEvent {
@@ -201,13 +204,15 @@ export async function subscribeToDownloadEvents(
 export function downloadMessage(code: string | null, fallback: string): string {
   switch (code) {
     case "unsupported_url":
-      return "That isn't a Facebook or TikTok video link.";
+      return "That isn't a YouTube, Facebook or TikTok link.";
     case "engine_missing":
       return "The download engine (yt-dlp) isn't installed yet.";
     case "media_not_public":
       return "This post isn't public, so it can't be downloaded. Signing in wouldn't change that — this app only fetches posts anyone can already view.";
     case "no_media_found":
       return "No video was found at that link.";
+    case "client_refused":
+      return "YouTube refused every way we asked for this video. That's usually temporary — try again in a few minutes.";
     case "temporarily_unavailable":
       return "The platform rate-limited us after several requests. This usually works on a retry — paste the link again in a moment.";
     case "network":
