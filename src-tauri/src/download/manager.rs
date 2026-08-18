@@ -100,6 +100,10 @@ pub struct JobView {
     pub speed_bps: Option<f64>,
     pub eta_seconds: Option<u64>,
     pub fraction: Option<f64>,
+    /// True when the post had no video stream - a TikTok photo/slideshow, so
+    /// the saved file is audio only. Surfaced so it reads as "this post has no
+    /// video" rather than "the downloader dropped the video".
+    pub audio_only: bool,
     /// Set once the file lands. Absolute path, for "Show in folder".
     pub output_path: Option<String>,
     /// 1-based, so the UI can say "Retrying 2 of 3" instead of going quiet
@@ -363,6 +367,7 @@ impl DownloadManager {
             speed_bps: None,
             eta_seconds: None,
             fraction: None,
+            audio_only: false,
             output_path: None,
             attempt: 1,
             max_attempts: MAX_ATTEMPTS,
@@ -614,6 +619,7 @@ async fn attempt_job(
         v.duration_seconds = info.duration_seconds;
         v.thumbnail_url = info.thumbnail_url.clone();
         v.total_bytes = info.estimated_bytes;
+        v.audio_only = !info.has_video;
         v.status = JobStatus::Downloading;
     }) {
         let _ = app.emit(events::UPDATED, v);

@@ -8,3 +8,9 @@ src-tauri/gen/schemas
 .env.local
 # ...but the documented template is meant to be committed
 !.env.example
+
+# Container build output and the mounted download folder.
+/dist-docker/*
+!/dist-docker/.gitkeep
+/downloads/*
+!/downloads/.gitkeep

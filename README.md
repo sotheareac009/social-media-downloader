@@ -452,3 +452,57 @@ every non-exact match, redaction of tokens in `Debug`, the authorize URL being
 HTTPS and scope-minimal, the callback page never echoing parameters, and a
 guard test asserting the `accounts` table has no column capable of holding a
 secret.
+
+---
+
+## Running in Docker
+
+**Read this first: Media Downloader draws a native desktop window.** A container
+has no display, so "one command and it runs" is only literally true on a Linux
+host, where the X11 socket can be shared in. On macOS and Windows you would need
+an X server (XQuartz / VcXsrv), and the result is worse than just running
+`npm run tauri dev`.
+
+What the image *is* genuinely good for, on any host:
+
+- **A reproducible build** — Linux binaries and bundles without installing Rust,
+  Node, or the GTK/WebKit development headers.
+- **Bundled dependencies** — yt-dlp and FFmpeg are baked in, so the download
+  engine and 1080p+ merging work with nothing to install.
+
+### Build the app (works everywhere)
+
+```bash
+docker compose run --rm build
+```
+
+Artefacts land in `./dist-docker` — the `media-downloader` binary plus whatever
+bundles Tauri produced (`.deb`, `.AppImage`).
+
+### Run the app (Linux host)
+
+```bash
+xhost +local:docker          # let the container talk to your X server
+docker compose up app
+```
+
+Downloads are written to `./downloads` on the host, so they survive the
+container. `./.env` is mounted read-only if present — it is never copied into
+the image, so no client ID is ever baked into a layer.
+
+### Two honest limitations
+
+**Signing in does not work in a bare container.** Credentials go to the OS
+secure store, which on Linux means the Secret Service. The image installs
+`gnome-keyring` and `dbus-x11`, but nothing starts a keyring daemon, so the
+Accounts page will fail to save. **Downloading is unaffected** — it uses no
+credentials at all by design, which is the whole point of the split described
+above.
+
+**yt-dlp is fetched at image build time, not pinned.** It has to track platform
+changes continuously; a version pinned into an image would rot. Rebuild the
+image to update it:
+
+```bash
+docker compose build --no-cache app
+```

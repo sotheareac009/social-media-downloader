@@ -65,6 +65,13 @@ pub struct MediaInfo {
     /// Best guess at the finished size; often absent before download starts.
     pub estimated_bytes: Option<u64>,
     pub extension: Option<String>,
+    /// False when the post carries no video stream at all.
+    ///
+    /// TikTok photo/slideshow posts are the common case: images plus a music
+    /// track, presented in the app exactly like a video, but exposing a single
+    /// audio-only format. There is no video to fetch, so the download is an
+    /// mp3 - which looks like a bug unless the app says what happened.
+    pub has_video: bool,
 }
 
 /// Absolute path to a usable yt-dlp, resolved once per call.
@@ -295,7 +302,25 @@ fn media_info_from(v: &serde_json::Value) -> Result<MediaInfo> {
             .and_then(|x| x.as_u64())
             .or_else(|| v.get("filesize_approx").and_then(|x| x.as_u64())),
         extension: str_field(v, "ext"),
+        has_video: has_video_stream(v),
     })
+}
+
+/// Whether any format in the response carries a video track.
+fn has_video_stream(v: &serde_json::Value) -> bool {
+    let usable = |val: &serde_json::Value| {
+        matches!(val.get("vcodec").and_then(|c| c.as_str()), Some(c) if c != "none")
+    };
+
+    if usable(v) {
+        return true;
+    }
+    v.get("formats")
+        .and_then(|f| f.as_array())
+        .map(|arr| arr.iter().any(usable))
+        // No format list and no top-level vcodec: assume video rather than
+        // mislabelling an ordinary post as a slideshow.
+        .unwrap_or(true)
 }
 
 fn str_field(v: &serde_json::Value, key: &str) -> Option<String> {
@@ -797,6 +822,33 @@ mod tests {
                 "{stderr}"
             );
         }
+    }
+
+    #[test]
+    fn a_photo_post_is_recognised_as_having_no_video() {
+        // Exactly the shape TikTok returns for a slideshow: one audio format.
+        let slideshow = serde_json::json!({
+            "id": "7664982070095056149",
+            "ext": "mp3",
+            "vcodec": "none",
+            "acodec": "mp3",
+            "formats": [{"format_id": "audio", "vcodec": "none", "acodec": "mp3"}]
+        });
+        assert!(!has_video_stream(&slideshow));
+
+        let ordinary = serde_json::json!({
+            "id": "1", "vcodec": "h264",
+            "formats": [{"vcodec": "none", "acodec": "mp4a"}, {"vcodec": "h264"}]
+        });
+        assert!(has_video_stream(&ordinary));
+    }
+
+    #[test]
+    fn an_absent_format_list_is_assumed_to_be_video() {
+        // Mislabelling a normal post as a slideshow would be worse than the
+        // occasional missed one.
+        let sparse = serde_json::json!({"id": "1", "title": "x"});
+        assert!(has_video_stream(&sparse));
     }
 
     #[test]

@@ -73,9 +73,23 @@ export function JobCard({
         {running && <ProgressRow job={job} pct={pct} />}
 
         {job.status === "completed" && (
-          <div className="job__status job__status--ok">
+          <div
+            className={`job__status ${
+              job.audio_only ? "job__status--note" : "job__status--ok"
+            }`}
+          >
             <CheckIcon size={13} />
-            Saved · {formatBytes(job.downloaded_bytes || job.total_bytes)}
+            {job.audio_only ? (
+              <span>
+                Saved audio only · {formatBytes(job.downloaded_bytes || job.total_bytes)}
+                <span className="job__why">
+                  {" "}
+                  — this post is a photo slideshow, so it has no video track
+                </span>
+              </span>
+            ) : (
+              <>Saved · {formatBytes(job.downloaded_bytes || job.total_bytes)}</>
+            )}
           </div>
         )}
 

@@ -1,0 +1,19 @@
+# Build outputs and dependencies — reinstalled inside the image.
+node_modules
+dist
+src-tauri/target
+
+# Never bake secrets into an image layer. The app reads .env at runtime, so
+# it is mounted by docker-compose instead of copied in.
+.env
+.env.*
+!.env.example
+
+.git
+.gitignore
+*.log
+.DS_Store
+README.md
+Dockerfile
+docker-compose.yml
+.dockerignore

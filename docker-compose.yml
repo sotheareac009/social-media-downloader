@@ -1,0 +1,45 @@
+# Media Downloader — container entry points.
+#
+#   docker compose run --rm build     Build Linux binaries into ./dist-docker
+#   docker compose up app             Run the app (Linux host with X11 only)
+#
+# Read the note in the Dockerfile first: this is a native desktop app, so the
+# `app` service needs a display shared in from the host.
+
+services:
+  # Produces the Linux bundles and copies them out to ./dist-docker.
+  # This is the service that works everywhere, including macOS and Windows.
+  build:
+    build:
+      context: .
+      target: build
+    volumes:
+      - ./dist-docker:/out
+    command: >
+      sh -c "mkdir -p /out &&
+             cp -r src-tauri/target/release/bundle/. /out/ 2>/dev/null || true &&
+             cp src-tauri/target/release/media-downloader /out/ &&
+             echo 'Built artefacts are in ./dist-docker'"
+
+  # Runs the app itself. Linux hosts only, unless you have an X server.
+  app:
+    build:
+      context: .
+      target: runtime
+    environment:
+      # Inherited from the host so the window can find your display.
+      - DISPLAY=${DISPLAY:-:0}
+      # Optional: point the engine at specific binaries. The image already has
+      # both on PATH, so these are only for overriding.
+      - MEDIA_DOWNLOADER_YTDLP=/usr/local/bin/yt-dlp
+      - MEDIA_DOWNLOADER_FFMPEG=/usr/bin/ffmpeg
+    volumes:
+      # The X11 socket. Without this there is no window, only a failed start.
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # Downloads land on the host rather than vanishing with the container.
+      - ./downloads:/home/app/Downloads
+      # OAuth client IDs, if you have them. Read-only, and never baked into the
+      # image — see .dockerignore.
+      - ./.env:/home/app/.env:ro
+    # A GUI toolkit needs more than the default 64MB of shared memory.
+    shm_size: "1gb"

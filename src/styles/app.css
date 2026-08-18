@@ -1708,3 +1708,13 @@
   justify-content: flex-end;
   margin-top: 12px;
 }
+
+/* An audio-only result is not a failure and not a clean success — it needs a
+   third tone, plus the reason inline so nobody files it as a bug. */
+.job__status--note {
+  color: var(--warning);
+}
+
+.job__why {
+  color: var(--text-tertiary);
+}

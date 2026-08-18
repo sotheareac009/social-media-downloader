@@ -35,6 +35,8 @@ export interface JobView {
   eta_seconds: number | null;
   /** 0–1, only once a total is known. */
   fraction: number | null;
+  /** True when the post had no video stream — a TikTok photo/slideshow. */
+  audio_only: boolean;
   output_path: string | null;
   /** 1-based; equals 1 unless the platform throttled us and we backed off. */
   attempt: number;
@@ -52,6 +54,8 @@ export interface MediaInfo {
   thumbnail_url: string | null;
   estimated_bytes: number | null;
   extension: string | null;
+  /** False for posts with no video stream at all. */
+  has_video: boolean;
 }
 
 /** Where files are saved, plus what the UI needs to offer a reset. */
