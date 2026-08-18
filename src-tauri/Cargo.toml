@@ -1,0 +1,50 @@
+[package]
+name = "media-downloader"
+version = "0.1.0"
+description = "Media Downloader"
+authors = ["you"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "media_downloader_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+thiserror = "2"
+async-trait = "0.1"
+# `process` drives the yt-dlp child; `io-util` reads its progress lines.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "process"] }
+
+# OAuth / crypto primitives
+rand = "0.8"
+sha2 = "0.10"
+base64 = "0.22"
+url = "2"
+
+# HTTP client for token exchange + userinfo
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# OS secure credential storage
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+
+# Non-sensitive account metadata
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+dotenvy = "0.15"
+
+time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+uuid = { version = "1", features = ["v4"] }
+tauri-plugin-dialog = "2.7.2"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
