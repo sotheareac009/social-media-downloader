@@ -111,6 +111,7 @@ pub fn run() {
             commands::telegram::telegram_save_session,
             commands::telegram::telegram_set_display_name,
             commands::telegram::telegram_clear_session,
+            commands::net::net_ping,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

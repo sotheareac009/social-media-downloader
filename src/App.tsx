@@ -7,10 +7,12 @@ import { SettingsPage } from "@/pages/settings/SettingsPage";
 import { FacebookPage } from "@/pages/facebook/FacebookPage";
 import { UploadPage } from "@/pages/upload/UploadPage";
 import { authGetAccounts, subscribeToAuthEvents } from "@/lib/auth";
+import { netPing, type NetStatus } from "@/lib/net";
 import { ToastProvider } from "@/components/ui/Toast";
 import {
   BoltIcon,
   DownloadIcon,
+  GlobeIcon,
   HomeIcon,
   MoonIcon,
   SlidersIcon,
@@ -172,6 +174,8 @@ function Sidebar({
         </button>
       </nav>
 
+      <NetIndicator />
+
       <div className="sidebar__footer">
         <span className="sidebar__phase">v0.1.0</span>
         <button
@@ -185,5 +189,62 @@ function Sidebar({
         </button>
       </div>
     </aside>
+  );
+}
+
+/** Live internet status + ping, polled from the Rust backend. */
+function NetIndicator() {
+  const [net, setNet] = useState<NetStatus | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  const probe = () => {
+    setChecking(true);
+    netPing()
+      .then(setNet)
+      .catch(() => setNet({ online: false, ms: null, host: null }))
+      .finally(() => setChecking(false));
+  };
+
+  useEffect(() => {
+    probe();
+    // Re-probe on a timer, and immediately when the OS reports a change.
+    const id = window.setInterval(probe, 15_000);
+    const onChange = () => probe();
+    window.addEventListener("online", onChange);
+    window.addEventListener("offline", onChange);
+    return () => {
+      window.clearInterval(id);
+      window.removeEventListener("online", onChange);
+      window.removeEventListener("offline", onChange);
+    };
+  }, []);
+
+  const online = net?.online === true;
+  const ms = net?.ms ?? null;
+  const quality = ms === null ? "" : ms < 80 ? "good" : ms < 200 ? "ok" : "slow";
+
+  return (
+    <button
+      className={`netstat ${online ? "netstat--on" : "netstat--off"} ${checking ? "netstat--checking" : ""}`.trim()}
+      type="button"
+      onClick={probe}
+      title={
+        net === null
+          ? "Checking connection…"
+          : online
+            ? `Online via ${net.host ?? "internet"} · ${ms} ms — click to re-check`
+            : "No internet connection — click to re-check"
+      }
+    >
+      <span className={`netstat__dot ${quality ? `netstat__dot--${quality}` : ""}`.trim()} />
+      <GlobeIcon size={13} />
+      <span className="netstat__text">
+        {net === null
+          ? "Checking…"
+          : online
+            ? `Online${ms !== null ? ` · ${ms} ms` : ""}`
+            : "Offline"}
+      </span>
+    </button>
   );
 }
