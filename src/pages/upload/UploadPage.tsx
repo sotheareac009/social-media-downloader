@@ -322,7 +322,7 @@ export function UploadPage() {
                     <div className="up-tg">
                       <button
                         type="button"
-                        className="up-tg__trigger"
+                        className={`up-tg__trigger ${openMenu === "telegram" ? "up-tg__trigger--open" : ""}`.trim()}
                         onClick={(e) => {
                           e.stopPropagation();
                           setOpenMenu((m) => (m === "telegram" ? null : "telegram"));
@@ -524,8 +524,12 @@ export function UploadPage() {
           <p className="up-empty">No files added yet. Click “Add files” to choose one or more.</p>
         ) : (
           <ul className="up-list">
-            {items.map((item) => (
-              <li key={item.path} className={`up-item up-item--${item.status}`}>
+            {items.map((item, i) => (
+              <li
+                key={item.path}
+                className={`up-item up-item--${item.status}`}
+                style={{ ["--i" as string]: i }}
+              >
                 <button
                   type="button"
                   className="up-item__thumb"

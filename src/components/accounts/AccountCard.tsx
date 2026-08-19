@@ -4,7 +4,7 @@ import {
   type AccountView,
   type ProviderDescriptor,
 } from "@/lib/auth";
-import { AlertIcon, CheckIcon } from "@/components/ui/icons";
+import { AlertIcon, CheckIcon, ChevronRightIcon } from "@/components/ui/icons";
 import { BRAND_COLOR, ProviderLogo } from "./ProviderLogo";
 import { ConnectButton } from "./ConnectButton";
 
@@ -37,6 +37,11 @@ interface Props {
   downloadBusy?: boolean;
   onConnect: () => void;
   onDisconnect: () => void;
+  /**
+   * When provided and the account is connected, the whole card becomes a
+   * button that opens a dedicated detail page for this provider.
+   */
+  onOpenDetail?: () => void;
 }
 
 export function AccountCard({
@@ -54,13 +59,29 @@ export function AccountCard({
   downloadBusy = false,
   onConnect,
   onDisconnect,
+  onOpenDetail,
 }: Props) {
   const connected = account.connected;
+  const clickable = connected && !!onOpenDetail;
 
   return (
     <article
-      className={`card ${connected ? "card--connected" : ""}`.trim()}
+      className={`card ${connected ? "card--connected" : ""} ${clickable ? "card--clickable" : ""}`.trim()}
       style={{ ["--brand" as string]: BRAND_COLOR[descriptor.id] }}
+      onClick={clickable ? onOpenDetail : undefined}
+      role={clickable ? "button" : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onKeyDown={
+        clickable
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onOpenDetail!();
+              }
+            }
+          : undefined
+      }
+      title={clickable ? `View ${descriptor.display_name} details` : undefined}
     >
       <span className="card__edge" />
 
@@ -88,7 +109,12 @@ export function AccountCard({
           </p>
         </div>
 
-        <div className="card__actions">
+        <div className="card__actions" onClick={(e) => e.stopPropagation()}>
+          {clickable && (
+            <span className="card__detailhint">
+              Details <ChevronRightIcon size={14} />
+            </span>
+          )}
           <ConnectButton
             descriptor={descriptor}
             account={account}

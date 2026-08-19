@@ -22,13 +22,13 @@ import {
   type SessionStatus,
 } from "@/lib/download";
 import { useToast } from "@/components/ui/Toast";
-import { AlertIcon, CheckIcon, ShieldIcon, TelegramIcon, UsersIcon } from "@/components/ui/icons";
+import { AlertIcon, CheckIcon, ChevronRightIcon, ShieldIcon, TelegramIcon, UsersIcon } from "@/components/ui/icons";
 import { telegramStatus as fetchTelegramStatus, type TelegramStatus } from "@/lib/telegram";
 
 export function AccountsPage({
   onNavigate,
 }: {
-  onNavigate?: (r: "telegram") => void;
+  onNavigate?: (r: "telegram" | "facebook") => void;
 }) {
   const toast = useToast();
   const [providers, setProviders] = useState<ProviderDescriptor[] | null>(null);
@@ -296,6 +296,11 @@ export function AccountsPage({
                     onDisconnect={() =>
                       void disconnect(descriptor.id, descriptor.display_name)
                     }
+                    onOpenDetail={
+                      descriptor.id === "facebook"
+                        ? () => onNavigate?.("facebook")
+                        : undefined
+                    }
                   />
                 </div>
               );
@@ -367,8 +372,22 @@ function TelegramAccountCard({
   const connected = status?.connected === true;
   return (
     <article
-      className={`card ${connected ? "card--connected" : ""}`.trim()}
+      className={`card ${connected ? "card--connected" : ""} ${connected ? "card--clickable" : ""}`.trim()}
       style={{ ["--brand" as string]: "#229ED9", marginTop: 12 }}
+      onClick={connected ? onOpen : undefined}
+      role={connected ? "button" : undefined}
+      tabIndex={connected ? 0 : undefined}
+      onKeyDown={
+        connected
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onOpen();
+              }
+            }
+          : undefined
+      }
+      title={connected ? "View Telegram details" : undefined}
     >
       <span className="card__edge" />
       <div className="card__body">
@@ -392,7 +411,12 @@ function TelegramAccountCard({
               : "Sign in with your phone number"}
           </p>
         </div>
-        <div className="card__actions">
+        <div className="card__actions" onClick={(e) => e.stopPropagation()}>
+          {connected && (
+            <span className="card__detailhint">
+              Details <ChevronRightIcon size={14} />
+            </span>
+          )}
           <button className="btn btn--ghost" type="button" onClick={onOpen}>
             {connected ? "Manage" : "Connect"}
           </button>

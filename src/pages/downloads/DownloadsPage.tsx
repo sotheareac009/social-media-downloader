@@ -6,9 +6,6 @@ import {
   downloadGetDestination,
   downloadGetQuality,
   downloadInspectFormats,
-  instagramConnect,
-  instagramDisconnect,
-  instagramStatus,
   downloadSetCompatible,
   downloadSetQuality,
   downloadList,
@@ -29,12 +26,10 @@ import {
   type ProfileListing,
   type Quality,
   type QualitySettings,
-  type SessionStatus,
 } from "@/lib/download";
 import { toAuthError } from "@/lib/auth";
 import { DestinationBar } from "@/components/downloads/DestinationBar";
 import { EngineNotice } from "@/components/downloads/EngineNotice";
-import { InstagramSessionCard } from "@/components/downloads/InstagramSession";
 import { JobCard } from "@/components/downloads/JobCard";
 import { ProfileCard } from "@/components/downloads/ProfileCard";
 import { QualityPicker } from "@/components/downloads/QualityPicker";
@@ -54,7 +49,7 @@ import { DownloadIcon, GlobeIcon, ShieldIcon } from "@/components/ui/icons";
  */
 const BATCH_TOAST_LIMIT = 5;
 
-export function DownloadsPage() {
+export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") => void }) {
   const toast = useToast();
   const [engine, setEngine] = useState<EngineStatus | null>(null);
   const [rechecking, setRechecking] = useState(false);
@@ -65,8 +60,6 @@ export function DownloadsPage() {
   const [destBusy, setDestBusy] = useState(false);
   const [quality, setQuality] = useState<QualitySettings | null>(null);
   const [qualityBusy, setQualityBusy] = useState(false);
-  const [igSession, setIgSession] = useState<SessionStatus | null>(null);
-  const [igBusy, setIgBusy] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   // Profiles found in a paste, waiting for the user to confirm the count.
   const [profiles, setProfiles] = useState<ProfileListing[]>([]);
@@ -123,9 +116,6 @@ export function DownloadsPage() {
           downloadGetDestination(),
           downloadGetQuality(),
         ]);
-        instagramStatus()
-          .then((st) => mounted.current && setIgSession(st))
-          .catch(() => {});
         if (!mounted.current) return;
         setEngine(status);
         setJobs(list);
@@ -163,6 +153,18 @@ export function DownloadsPage() {
       },
       onFailed: (job) => {
         upsert(job);
+        // A "not public" failure on a platform with a session login really means
+        // "you're not signed in" — send the user to the Accounts page to log in
+        // rather than leaving them stuck on an error they can actually fix.
+        const needsLogin =
+          job.error_code === "media_not_public" &&
+          (job.source === "instagram" || job.source === "facebook");
+        if (needsLogin) {
+          const name = job.source === "instagram" ? "Instagram" : "Facebook";
+          toast("info", `This ${name} link needs a login — opening Accounts to sign in.`);
+          onNavigate("accounts");
+          return;
+        }
         if (jobCount.current <= BATCH_TOAST_LIMIT) {
           toast(
             "error",
@@ -189,7 +191,7 @@ export function DownloadsPage() {
     return () => {
       void pending.then((unlisten) => unlisten());
     };
-  }, [upsert, toast]);
+  }, [upsert, toast, onNavigate]);
 
   /**
    * Submit a whole paste — any mix of video links and profile links.
@@ -420,37 +422,6 @@ export function DownloadsPage() {
     }
   }, [reportFor, pickedQuality, upsert, toast]);
 
-  /**
-   * Opens the Instagram login window and waits for it. A cancelled sign-in is
-   * a normal outcome, not something to report as a failure.
-   */
-  const connectInstagram = useCallback(async () => {
-    setIgBusy(true);
-    try {
-      setIgSession(await instagramConnect());
-      toast("success", "Instagram connected. Reels can now be downloaded.");
-    } catch (e) {
-      const err = toAuthError(e);
-      if (err.code !== "cancelled") {
-        toast("error", downloadMessage(err.code, err.message));
-      }
-    } finally {
-      if (mounted.current) setIgBusy(false);
-    }
-  }, [toast]);
-
-  const disconnectInstagram = useCallback(async () => {
-    setIgBusy(true);
-    try {
-      setIgSession(await instagramDisconnect());
-      toast("info", "Instagram session deleted.");
-    } catch (e) {
-      toast("error", toAuthError(e).message);
-    } finally {
-      if (mounted.current) setIgBusy(false);
-    }
-  }, [toast]);
-
   const toggleCompatible = useCallback(
     async (on: boolean) => {
       setQualityBusy(true);
@@ -575,17 +546,6 @@ export function DownloadsPage() {
             status={engine}
             onRecheck={() => void recheck()}
             rechecking={rechecking}
-          />
-        </div>
-      )}
-
-      {igSession && (
-        <div className="rise" style={{ marginBottom: 14, animationDelay: "40ms" }}>
-          <InstagramSessionCard
-            status={igSession}
-            busy={igBusy}
-            onConnect={() => void connectInstagram()}
-            onDisconnect={() => void disconnectInstagram()}
           />
         </div>
       )}

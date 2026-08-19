@@ -7,14 +7,14 @@ import {
 } from "@/lib/facebook";
 import { Button } from "@/components/ui/Button";
 import { useToast } from "@/components/ui/Toast";
-import { AlertIcon, CheckIcon, UploadIcon } from "@/components/ui/icons";
+import { AlertIcon, ArrowLeftIcon, CheckIcon, UploadIcon } from "@/components/ui/icons";
 
 /**
  * Facebook Page publishing. For now: pick a Page, choose a photo, write a
  * caption, upload. The upload runs entirely in Rust with the Page's own
  * access token — no token reaches this component.
  */
-export function FacebookPage() {
+export function FacebookPage({ onBack }: { onBack?: () => void }) {
   const toast = useToast();
   const [pages, setPages] = useState<Page[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -75,6 +75,11 @@ export function FacebookPage() {
   return (
     <div className="page">
       <header className="page__header rise">
+        {onBack && (
+          <button type="button" className="page__back" onClick={onBack}>
+            <ArrowLeftIcon size={14} /> Accounts
+          </button>
+        )}
         <span
           className="page__eyebrow"
           style={{ color: "#0866FF", borderColor: "color-mix(in srgb, #0866FF 40%, transparent)" }}

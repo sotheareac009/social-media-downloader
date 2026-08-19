@@ -11,11 +11,11 @@ import {
 } from "@/lib/telegram";
 import { Button } from "@/components/ui/Button";
 import { useToast } from "@/components/ui/Toast";
-import { AlertIcon, CheckIcon, ShieldIcon, TelegramIcon, XIcon } from "@/components/ui/icons";
+import { AlertIcon, ArrowLeftIcon, CheckIcon, ShieldIcon, TelegramIcon, XIcon } from "@/components/ui/icons";
 
 type Step = "phone" | "code" | "password";
 
-export function TelegramPage() {
+export function TelegramPage({ onBack }: { onBack?: () => void }) {
   const toast = useToast();
   const [config, setConfig] = useState<TelegramConfig | null>(null);
   const [status, setStatus] = useState<TelegramStatus | null>(null);
@@ -138,6 +138,11 @@ export function TelegramPage() {
   return (
     <div className="page">
       <header className="page__header rise">
+        {onBack && (
+          <button type="button" className="page__back" onClick={onBack}>
+            <ArrowLeftIcon size={14} /> Accounts
+          </button>
+        )}
         <span className="page__eyebrow page__eyebrow--telegram">
           <TelegramIcon size={12} />
           Telegram

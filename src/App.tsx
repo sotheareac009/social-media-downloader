@@ -13,7 +13,6 @@ import {
   DownloadIcon,
   HomeIcon,
   MoonIcon,
-  SendIcon,
   SlidersIcon,
   SunIcon,
   UploadIcon,
@@ -33,6 +32,13 @@ export default function App() {
   const [route, setRoute] = useState<Route>("home");
   // The Facebook menu item appears only once a Facebook account is connected.
   const [facebookConnected, setFacebookConnected] = useState(false);
+  // The Upload page holds real work-in-progress (chosen files, titles, target
+  // chats). Mount it on first visit and keep it alive — hidden, not unmounted —
+  // so navigating away and back doesn't wipe what you were doing.
+  const [uploadVisited, setUploadVisited] = useState(false);
+  useEffect(() => {
+    if (route === "upload") setUploadVisited(true);
+  }, [route]);
 
   useEffect(() => {
     let alive = true;
@@ -65,7 +71,6 @@ export default function App() {
         <Sidebar
           theme={theme}
           route={route}
-          facebookConnected={facebookConnected}
           onNavigate={setRoute}
           onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
         />
@@ -73,11 +78,15 @@ export default function App() {
           <div className="titlebar" data-tauri-drag-region />
           <div className="main__scroll">
             {route === "home" && <HomePage onNavigate={setRoute} />}
-            {route === "downloads" && <DownloadsPage />}
-            {route === "upload" && <UploadPage />}
+            {route === "downloads" && <DownloadsPage onNavigate={setRoute} />}
+            {uploadVisited && (
+              <div hidden={route !== "upload"}>
+                <UploadPage />
+              </div>
+            )}
             {route === "accounts" && <AccountsPage onNavigate={setRoute} />}
-            {route === "telegram" && <TelegramPage />}
-            {route === "facebook" && <FacebookPage />}
+            {route === "telegram" && <TelegramPage onBack={() => setRoute("accounts")} />}
+            {route === "facebook" && <FacebookPage onBack={() => setRoute("accounts")} />}
             {route === "settings" && <SettingsPage />}
           </div>
         </main>
@@ -89,13 +98,11 @@ export default function App() {
 function Sidebar({
   theme,
   route,
-  facebookConnected,
   onNavigate,
   onToggleTheme,
 }: {
   theme: Theme;
   route: Route;
-  facebookConnected: boolean;
   onNavigate: (r: Route) => void;
   onToggleTheme: () => void;
 }) {
@@ -144,28 +151,6 @@ function Sidebar({
           Upload
         </button>
         <button
-          className={`navitem ${route === "telegram" ? "navitem--active" : ""}`}
-          type="button"
-          onClick={() => onNavigate("telegram")}
-        >
-          <span className="navitem__icon">
-            <SendIcon size={16} />
-          </span>
-          Telegram
-        </button>
-        {facebookConnected && (
-          <button
-            className={`navitem ${route === "facebook" ? "navitem--active" : ""}`}
-            type="button"
-            onClick={() => onNavigate("facebook")}
-          >
-            <span className="navitem__icon">
-              <FacebookGlyph />
-            </span>
-            Facebook
-          </button>
-        )}
-        <button
           className={`navitem ${route === "accounts" ? "navitem--active" : ""}`}
           type="button"
           onClick={() => onNavigate("accounts")}
@@ -200,13 +185,5 @@ function Sidebar({
         </button>
       </div>
     </aside>
-  );
-}
-
-function FacebookGlyph() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M14.1 22v-8.6h2.9l.44-3.36H14.1V7.9c0-.97.27-1.63 1.66-1.63h1.78V3.26c-.31-.04-1.37-.13-2.6-.13-2.57 0-4.33 1.57-4.33 4.45v2.48H7.7v3.36h2.9V22z" />
-    </svg>
   );
 }
