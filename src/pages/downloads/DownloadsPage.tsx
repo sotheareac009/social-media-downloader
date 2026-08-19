@@ -443,7 +443,7 @@ export function DownloadsPage() {
     setIgBusy(true);
     try {
       setIgSession(await instagramDisconnect());
-      toast("info", "Instagram session removed from your keychain.");
+      toast("info", "Instagram session deleted.");
     } catch (e) {
       toast("error", toAuthError(e).message);
     } finally {

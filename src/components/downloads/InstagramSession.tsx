@@ -39,7 +39,8 @@ export function InstagramSessionCard({
           {status.connected ? (
             <>
               Reels and posts will download using the session you signed into.
-              It is stored in your keychain and sent only to Instagram.
+              It's kept in an owner-only file in this app's data folder, and
+              sent only to Instagram.
             </>
           ) : (
             <>

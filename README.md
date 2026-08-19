@@ -190,12 +190,18 @@ MEDIA_DOWNLOADER_YTDLP=/opt/homebrew/bin/yt-dlp
 
 ### Why "public only" is enforced, not just promised
 
-Every engine invocation passes `--ignore-config`, `--no-cookies` and
-`--no-cookies-from-browser`. So the engine cannot read your browser session and
-cannot load a `yt-dlp.conf` that would re-add one. A `.netrc` is never consulted
-either, because yt-dlp only reads one when `--netrc` is passed and we never
-pass it. `src-tauri/src/download/` has no access to the keychain
-and takes no token argument — there is no code path that could pass one.
+Every engine invocation passes `--ignore-config` and
+`--no-cookies-from-browser`. So the engine can never read your browser profile,
+and cannot load a `yt-dlp.conf` that would re-add one. A `.netrc` is never
+consulted either, because yt-dlp only reads one when `--netrc` is passed and we
+never pass it.
+
+Cookies are otherwise decided per call. YouTube, Facebook and TikTok always get
+`--no-cookies`. **Instagram is the sole exception** — it answers anonymous
+requests with an empty response, so it is passed a session captured in the
+app's own login window, and only for Instagram links. The jar is built in one
+place (`DownloadManager::cookie_jar`) and returns `None` for every other
+source; a test asserts `--cookies` and `--no-cookies` can never both be sent.
 
 A private post therefore fails with a clear "this isn't public" message whether
 or not you are signed in.
@@ -415,12 +421,28 @@ overridable method rather than a special case inside the manager.
 
 ### Where secrets are, and are not
 
-| | Access token | Refresh token | Account name / avatar |
-|---|---|---|---|
-| OS keychain | ✅ | ✅ | — |
-| SQLite | ❌ | ❌ | ✅ |
-| React / localStorage | ❌ | ❌ | ✅ |
-| Logs | ❌ | ❌ | — |
+| | Access token | Refresh token | Instagram session | Account name / avatar |
+|---|---|---|---|---|
+| OS keychain | ✅ | ✅ | ❌ | — |
+| Owner-only file (`0600`) | ❌ | ❌ | ✅ | — |
+| SQLite | ❌ | ❌ | ❌ | ✅ |
+| React / localStorage | ❌ | ❌ | ❌ | ✅ |
+| Logs | ❌ | ❌ | ❌ | — |
+
+**Why the Instagram session is a file, not a keychain entry.** Reading the
+keychain costs a login-password prompt on every app launch for an unsigned
+build — and one per download before the session was cached — which made the
+feature unusable. It lives in `instagram-session.json` in the app data
+directory, created `0600` on macOS and Linux, and on Windows inside
+`%APPDATA%` whose inherited ACL is already user-scoped. That is where
+`~/.ssh/id_ed25519`, `~/.aws/credentials` and yt-dlp's own cookie files keep
+comparable secrets.
+
+The trade is explicit: no encryption at rest and no OS unlock gate, in exchange
+for a usable feature. The value is still never exposed to JavaScript, never
+logged, and sent only to Instagram — and an Instagram session can be revoked at
+any time by logging out in the browser. An existing keychain session is
+migrated to the file on first read, costing one final prompt.
 
 `Credential` implements `Debug` by hand to print `<redacted>`, and no Tauri
 command accepts or returns it. If a later feature needs an authenticated

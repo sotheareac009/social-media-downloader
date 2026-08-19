@@ -93,6 +93,8 @@ pub fn read(key: &str) -> Option<String> {
         "MEDIA_DOWNLOADER_YTDLP" => option_env!("MEDIA_DOWNLOADER_YTDLP"),
         "MEDIA_DOWNLOADER_FFMPEG" => option_env!("MEDIA_DOWNLOADER_FFMPEG"),
         "MEDIA_DOWNLOADER_GALLERYDL" => option_env!("MEDIA_DOWNLOADER_GALLERYDL"),
+        "TELEGRAM_API_ID" => option_env!("TELEGRAM_API_ID"),
+        "TELEGRAM_API_HASH" => option_env!("TELEGRAM_API_HASH"),
         _ => None,
     }
     .map(str::to_string)

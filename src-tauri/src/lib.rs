@@ -19,6 +19,7 @@ pub mod config;
 pub mod db;
 pub mod download;
 pub mod errors;
+pub mod telegram;
 
 use std::sync::Arc;
 
@@ -87,6 +88,11 @@ pub fn run() {
             commands::download::download_reset_destination,
             commands::download::download_browse_destination,
             commands::download::download_reveal,
+            commands::telegram::telegram_get_config,
+            commands::telegram::telegram_status,
+            commands::telegram::telegram_get_session,
+            commands::telegram::telegram_save_session,
+            commands::telegram::telegram_clear_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

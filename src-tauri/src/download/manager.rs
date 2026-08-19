@@ -277,7 +277,7 @@ impl DownloadManager {
 
     /// Store a captured session and record that one exists.
     pub fn instagram_remember(&self, captured: &InstagramSession) -> Result<SessionStatus> {
-        session::save(captured)?;
+        session::save(&self.config_dir, captured)?;
         *self.instagram_cache.lock().expect("ig cache lock") =
             Some(Arc::new(captured.clone()));
         *self
@@ -291,7 +291,7 @@ impl DownloadManager {
     /// Forget the session. The marker is cleared even if the keychain delete
     /// fails, so the UI can never claim a connection the app cannot use.
     pub fn instagram_forget(&self) -> Result<SessionStatus> {
-        let cleared = session::clear();
+        let cleared = session::clear(&self.config_dir);
         *self.instagram_cache.lock().expect("ig cache lock") = None;
         *self
             .instagram_connected_at
@@ -424,7 +424,7 @@ impl DownloadManager {
             .expect("instagram marker lock")
             .as_ref()?;
 
-        let loaded = Arc::new(session::load().ok().flatten()?);
+        let loaded = Arc::new(session::load(&self.config_dir).ok().flatten()?);
         *self.instagram_cache.lock().expect("ig cache lock") = Some(loaded.clone());
         Some(loaded)
     }

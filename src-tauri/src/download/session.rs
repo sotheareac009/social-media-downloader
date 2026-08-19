@@ -11,9 +11,14 @@
 //! Instagram `sessionid` cookie *is* the account - it can read DMs, post, and
 //! change settings. It is treated accordingly:
 //!
-//!   * Stored in the OS keychain, never in a file, database or log.
-//!   * Written to disk only as a short-lived 0600 temp file that yt-dlp reads,
-//!     deleted immediately afterwards (see [`super::cookies`]).
+//!   * Stored in an owner-only file in the app data directory. Not the OS
+//!     keychain: reading that costs a login-password prompt on every app
+//!     launch for an unsigned build, which made downloading unusable. The
+//!     tools this app is built on - yt-dlp, gallery-dl, instaloader - all keep
+//!     the same cookies in the same kind of file, as do `~/.ssh/id_ed25519`
+//!     and `~/.aws/credentials`.
+//!   * Handed to the engines as a short-lived temp file, deleted immediately
+//!     afterwards (see [`super::cookies`]).
 //!   * Sent to Instagram and nowhere else - the cookie file is only ever
 //!     passed for `Source::Instagram` jobs.
 //!   * Captured from a dedicated login window, so no other site's cookies are
@@ -24,15 +29,20 @@
 //! session-free. They are session-free for YouTube, Facebook and TikTok, and
 //! use an explicitly captured session for Instagram only.
 
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{AppError, Result};
 
-/// Separate from the auth service namespace: this credential is not an
-/// account login, has different lifetime rules, and must not be confused with
-/// the OAuth entries by anything sweeping the keychain.
-const KEYRING_SERVICE: &str = "com.reach.mediadownloader.download";
-const KEYRING_ACCOUNT: &str = "instagram-session";
+/// Filename inside the app data directory.
+const FILE_NAME: &str = "instagram-session.json";
+
+/// Legacy keychain location, read once so an existing sign-in survives the
+/// move to file storage. Written to only by versions before that change.
+const LEGACY_KEYRING_SERVICE: &str = "com.reach.mediadownloader.download";
+const LEGACY_KEYRING_ACCOUNT: &str = "instagram-session";
 
 /// One cookie, reduced to the fields a Netscape cookie file needs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,32 +97,91 @@ pub fn is_instagram_domain(domain: &str) -> bool {
     d == "instagram.com" || d.ends_with(".instagram.com")
 }
 
-fn entry() -> Result<keyring::Entry> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .map_err(|e| AppError::Keychain(e.to_string()))
+fn path(dir: &Path) -> PathBuf {
+    dir.join(FILE_NAME)
 }
 
-pub fn save(session: &InstagramSession) -> Result<()> {
+/// Write the session so only the owner can read it.
+///
+/// Permissions are set as the file is created, not chmod'ed afterwards: the
+/// gap between the two is exactly when another process could read a session.
+///
+/// On Windows there is no POSIX mode. The app data directory
+/// (`%APPDATA%\com.reach.mediadownloader`) is already scoped to the user
+/// account by its inherited ACL, which is the same protection `~/.aws` and
+/// `%USERPROFILE%\.ssh` rely on there.
+pub fn save(dir: &Path, session: &InstagramSession) -> Result<()> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| AppError::DownloadPath(format!("session directory: {e}")))?;
+
+    let target = path(dir);
+    // Replace atomically so a crash mid-write cannot leave a truncated file
+    // where a valid session used to be.
+    let temp = target.with_extension("json.tmp");
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
     let blob = serde_json::to_string(session)
         .map_err(|_| AppError::Internal("session encode failed".into()))?;
-    entry()?
-        .set_password(&blob)
-        .map_err(|e| AppError::Keychain(e.to_string()))
+
+    {
+        let mut file = options
+            .open(&temp)
+            .map_err(|e| AppError::DownloadPath(format!("session file: {e}")))?;
+        file.write_all(blob.as_bytes())
+            .map_err(|e| AppError::DownloadPath(format!("session file: {e}")))?;
+    }
+
+    std::fs::rename(&temp, &target).map_err(|e| {
+        let _ = std::fs::remove_file(&temp);
+        AppError::DownloadPath(format!("session file: {e}"))
+    })
 }
 
-pub fn load() -> Result<Option<InstagramSession>> {
-    match entry()?.get_password() {
-        Ok(blob) => Ok(serde_json::from_str(&blob).ok()),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(AppError::Keychain(e.to_string())),
+/// Read the session, falling back to the old keychain entry once.
+///
+/// A corrupt or hand-edited file is treated as "no session" rather than an
+/// error: the worst outcome is being asked to sign in again.
+pub fn load(dir: &Path) -> Result<Option<InstagramSession>> {
+    if let Ok(blob) = std::fs::read_to_string(path(dir)) {
+        return Ok(serde_json::from_str(&blob).ok());
     }
+    Ok(migrate_from_keychain(dir))
 }
 
-pub fn clear() -> Result<()> {
-    match entry()?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(AppError::Keychain(e.to_string())),
+/// One-time move of a session stored by an earlier version.
+///
+/// Costs a single keychain prompt, then never again - which is the whole point
+/// of the change. Failure is silent: the user simply signs in once more.
+fn migrate_from_keychain(dir: &Path) -> Option<InstagramSession> {
+    let entry = keyring::Entry::new(LEGACY_KEYRING_SERVICE, LEGACY_KEYRING_ACCOUNT).ok()?;
+    let blob = entry.get_password().ok()?;
+    let session: InstagramSession = serde_json::from_str(&blob).ok()?;
+
+    if save(dir, &session).is_ok() {
+        // Only remove the old copy once the new one is safely written.
+        let _ = entry.delete_credential();
     }
+    Some(session)
+}
+
+pub fn clear(dir: &Path) -> Result<()> {
+    match std::fs::remove_file(path(dir)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(AppError::DownloadPath(format!("session file: {e}"))),
+    }
+    // Also drop any legacy entry, so signing out really signs out.
+    if let Ok(entry) = keyring::Entry::new(LEGACY_KEYRING_SERVICE, LEGACY_KEYRING_ACCOUNT) {
+        let _ = entry.delete_credential();
+    }
+    Ok(())
 }
 
 // Note: there is deliberately no `status()` here that reads the keychain.
@@ -135,6 +204,75 @@ mod tests {
             secure: true,
             expires: 0,
         }
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("md-session-{name}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn session() -> InstagramSession {
+        InstagramSession {
+            cookies: vec![cookie("sessionid", "1234%3Aabcd")],
+            captured_at: 42,
+        }
+    }
+
+    #[test]
+    fn a_session_round_trips_through_the_file() {
+        let dir = scratch("roundtrip");
+        save(&dir, &session()).unwrap();
+        let back = load(&dir).unwrap().expect("session should load");
+        assert!(back.is_usable());
+        assert_eq!(back.captured_at, 42);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_session_file_is_owner_only() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = scratch("perms");
+            save(&dir, &session()).unwrap();
+            let mode = std::fs::metadata(dir.join(FILE_NAME)).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "a session cookie must not be world-readable");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn clearing_removes_the_file_and_is_idempotent() {
+        let dir = scratch("clear");
+        save(&dir, &session()).unwrap();
+        clear(&dir).unwrap();
+        assert!(!dir.join(FILE_NAME).exists());
+        // Signing out twice must not error.
+        clear(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_corrupt_file_reads_as_no_session_rather_than_an_error() {
+        let dir = scratch("corrupt");
+        std::fs::write(dir.join(FILE_NAME), "{ not json").unwrap();
+        assert!(load(&dir).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_temp_file_is_left_behind_after_a_write() {
+        let dir = scratch("temp");
+        save(&dir, &session()).unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "atomic write must clean up");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
