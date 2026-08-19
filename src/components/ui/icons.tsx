@@ -1,6 +1,9 @@
 /** Inline stroke icons. Inline so the CSP never has to allow a remote asset. */
 type P = { size?: number; className?: string };
 
+/** Exported so callers can hold an icon in a data structure. */
+export type IconProps = P;
+
 const base = (size: number) => ({
   width: size,
   height: size,
@@ -124,5 +127,12 @@ export const GlobeIcon = ({ size = 16, className }: P) => (
   <svg {...base(size)} className={className}>
     <circle cx="12" cy="12" r="9" />
     <path d="M3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3Z" />
+  </svg>
+);
+
+export const HomeIcon = ({ size = 16, className }: P) => (
+  <svg {...base(size)} className={className}>
+    <path d="M4 10.5 12 4l8 6.5V19a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 19Z" />
+    <path d="M9.5 20.5v-6h5v6" />
   </svg>
 );

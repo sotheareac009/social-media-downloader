@@ -5,22 +5,27 @@
 //! URLs embedded in page state that changes without notice. yt-dlp tracks that
 //! churn full-time; a hand-rolled extractor would be broken within weeks.
 //!
-//! SECURITY - this module is the reason the feature can honestly be called
-//! "public only". Every invocation passes:
+//! SECURITY. Every invocation passes:
 //!
 //!   * `--ignore-config`, so a `yt-dlp.conf` sitting in the user's home cannot
 //!     inject flags we did not choose (including cookie and netrc flags).
-//!   * `--no-cookies` and `--no-cookies-from-browser`, so the engine cannot
-//!     read the browser session that would let it reach private posts.
+//!   * `--no-cookies-from-browser`, unconditionally. The app may use a session
+//!     it captured in its own login window, but it must never read the user's
+//!     browser profile, which would sweep in every site they are signed into.
+//!
+//! Cookies are otherwise a per-call decision: `None` becomes `--no-cookies`,
+//! which is what YouTube, Facebook and TikTok always get. Only Instagram is
+//! ever passed a jar, and only one the user explicitly captured - see
+//! [`crate::download::session`] for why that exception exists and what it costs.
 //!
 //! A `.netrc` needs no flag of its own: yt-dlp only consults one when `--netrc`
 //! is passed, and `--ignore-config` stops a config file from passing it. (There
 //! is no `--no-netrc` option - yt-dlp rejects it outright.)
 //!
 //! No OAuth credential is passed here, and there is no code path that could:
-//! this module has no access to the keychain and takes no token argument. A
-//! post that is not publicly visible therefore fails as
-//! [`AppError::MediaNotPublic`] rather than quietly succeeding.
+//! this module has no access to the keychain and takes no token argument. The
+//! Instagram jar arrives as a plain file path chosen by the caller, so this
+//! module cannot reach a stored session on its own either.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -230,15 +235,29 @@ pub async fn version() -> Result<String> {
 /// and prove every one is accepted. A flag yt-dlp does not recognise makes it
 /// exit before downloading anything, which is a total outage of the feature,
 /// so "these options exist" is worth asserting rather than assuming.
-pub const HARDENED_FLAGS: &[&str] = &[
-    "--ignore-config",
-    "--no-cookies",
-    "--no-cookies-from-browser",
-];
+/// Flags that hold for *every* invocation, session or not.
+///
+/// `--no-cookies-from-browser` is the one that never becomes conditional: the
+/// app may use a session it captured in its own login window, but it must
+/// never read the user's browser profile, which would sweep in every site they
+/// are signed into.
+pub const HARDENED_FLAGS: &[&str] = &["--ignore-config", "--no-cookies-from-browser"];
 
-fn hardened_base(cmd: &mut Command) {
-    cmd.args(HARDENED_FLAGS)
-        .arg("--socket-timeout")
+fn hardened_base(cmd: &mut Command, cookies: Option<&Path>) {
+    cmd.args(HARDENED_FLAGS);
+
+    // Either a jar this app captured, or none at all. There is no third case,
+    // and no source other than Instagram is ever given one.
+    match cookies {
+        Some(path) => {
+            cmd.arg("--cookies").arg(path);
+        }
+        None => {
+            cmd.arg("--no-cookies");
+        }
+    }
+
+    cmd.arg("--socket-timeout")
         .arg("20")
         .arg("--retries")
         .arg("3")
@@ -248,9 +267,9 @@ fn hardened_base(cmd: &mut Command) {
 }
 
 /// Read metadata without downloading. Cheap enough to run on paste.
-pub async fn probe(url: &Url, client: Option<&str>) -> Result<MediaInfo> {
+pub async fn probe(url: &Url, client: Option<&str>, cookies: Option<&Path>) -> Result<MediaInfo> {
     let mut cmd = Command::new(engine_path()?);
-    hardened_base(&mut cmd);
+    hardened_base(&mut cmd, cookies);
     apply_client(&mut cmd, client);
     cmd.arg("--no-playlist")
         .arg("--dump-single-json")
@@ -361,7 +380,7 @@ pub struct ProfileListing {
 /// a single-video probe does.
 pub async fn list_profile(url: &Url) -> Result<ProfileListing> {
     let mut cmd = Command::new(engine_path()?);
-    hardened_base(&mut cmd);
+    hardened_base(&mut cmd, None);
     cmd.arg("--yes-playlist")
         .arg("--flat-playlist")
         .arg("--dump-single-json")
@@ -463,11 +482,15 @@ fn format_tier(f: &serde_json::Value) -> Option<(u32, String)> {
 ///
 /// Tries each player client in turn: YouTube's anti-bot layer can refuse one
 /// client's metadata while another answers, exactly as it does for media.
-pub async fn inspect_formats(url: &Url, clients: &[Option<&str>]) -> Result<FormatReport> {
+pub async fn inspect_formats(
+    url: &Url,
+    clients: &[Option<&str>],
+    cookies: Option<&Path>,
+) -> Result<FormatReport> {
     let mut last = AppError::NoMediaFound;
 
     for client in clients {
-        match inspect_formats_once(url, *client).await {
+        match inspect_formats_once(url, *client, cookies).await {
             Ok(report) => return Ok(report),
             Err(e) => last = e,
         }
@@ -475,9 +498,13 @@ pub async fn inspect_formats(url: &Url, clients: &[Option<&str>]) -> Result<Form
     Err(last)
 }
 
-async fn inspect_formats_once(url: &Url, client: Option<&str>) -> Result<FormatReport> {
+async fn inspect_formats_once(
+    url: &Url,
+    client: Option<&str>,
+    cookies: Option<&Path>,
+) -> Result<FormatReport> {
     let mut cmd = Command::new(engine_path()?);
-    hardened_base(&mut cmd);
+    hardened_base(&mut cmd, cookies);
     apply_client(&mut cmd, client);
     cmd.arg("--no-playlist")
         .arg("--dump-single-json")
@@ -549,13 +576,14 @@ pub fn start(
     tx: mpsc::UnboundedSender<Progress>,
     client: Option<&str>,
     quality: Quality,
+    cookies: Option<&Path>,
 ) -> Result<Running> {
     let template = format!(
         "{PROGRESS_PREFIX} %(progress.downloaded_bytes)s %(progress.total_bytes,progress.total_bytes_estimate)s %(progress.speed)s %(progress.eta)s"
     );
 
     let mut cmd = Command::new(engine_path()?);
-    hardened_base(&mut cmd);
+    hardened_base(&mut cmd, cookies);
     let ffmpeg = locate_ffmpeg();
     apply_client(&mut cmd, client);
     cmd.arg("--no-playlist")

@@ -1,0 +1,9 @@
+# Default: let Git handle text normally.
+* text=auto
+
+# These are executed inside Linux containers. A CRLF checkout on Windows makes
+# the shebang unparseable ("/bin/sh^M: bad interpreter"), so pin them to LF.
+*.sh text eol=lf
+Dockerfile text eol=lf
+docker-entrypoint.sh text eol=lf
+docker-compose.yml text eol=lf

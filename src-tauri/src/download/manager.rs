@@ -19,6 +19,9 @@ use tokio::sync::{mpsc, Semaphore};
 
 use crate::download::quality::Quality;
 use crate::download::settings::Settings;
+use crate::download::cookies::CookieFile;
+use crate::download::session;
+use crate::download::slideshow;
 use crate::download::url::{classify, classify_target, Source, TargetKind};
 use crate::download::ytdlp::{
     self, FormatReport, MediaInfo, Progress, ProfileListing, YOUTUBE_CLIENTS,
@@ -104,6 +107,10 @@ pub struct JobView {
     /// the saved file is audio only. Surfaced so it reads as "this post has no
     /// video" rather than "the downloader dropped the video".
     pub audio_only: bool,
+    /// True when a photo post was rebuilt into a playable video from its cover
+    /// image. The distinction matters: the file *is* a video, but it shows one
+    /// still frame, not the original slideshow.
+    pub still_image_video: bool,
     /// Set once the file lands. Absolute path, for "Show in folder".
     pub output_path: Option<String>,
     /// 1-based, so the UI can say "Retrying 2 of 3" instead of going quiet
@@ -287,8 +294,9 @@ impl DownloadManager {
 
     /// Check a link without committing to a download. Powers the paste preview.
     pub async fn inspect(&self, raw: &str) -> Result<MediaInfo> {
-        let (_, url) = classify(raw)?;
-        ytdlp::probe(&url, None).await
+        let (source, url) = classify(raw)?;
+        let jar = Self::cookie_jar(source);
+        ytdlp::probe(&url, None, jar.as_ref().map(|j| j.path())).await
     }
 
     /// Read a link's metadata and the quality tiers it actually offers.
@@ -301,7 +309,24 @@ impl DownloadManager {
             Source::YouTube => YOUTUBE_CLIENTS,
             _ => &[None],
         };
-        ytdlp::inspect_formats(&url, clients).await
+        let jar = Self::cookie_jar(source);
+        ytdlp::inspect_formats(&url, clients, jar.as_ref().map(|j| j.path())).await
+    }
+
+    /// A cookie jar for this source, or `None`.
+    ///
+    /// Instagram is the only source that ever gets one, and only when the user
+    /// has explicitly signed in through the app's own login window. Every
+    /// other source downloads with no session, exactly as before.
+    fn cookie_jar(source: Source) -> Option<CookieFile> {
+        if source != Source::Instagram {
+            return None;
+        }
+        let stored = session::load().ok().flatten()?;
+        if !stored.is_usable() {
+            return None;
+        }
+        CookieFile::write(&stored.cookies).ok()
     }
 
     /// The quality a job should download at: its own choice, or the default.
@@ -368,6 +393,7 @@ impl DownloadManager {
             eta_seconds: None,
             fraction: None,
             audio_only: false,
+            still_image_video: false,
             output_path: None,
             attempt: 1,
             max_attempts: MAX_ATTEMPTS,
@@ -526,11 +552,15 @@ pub async fn run_job(manager: Arc<DownloadManager>, app: AppHandle, id: String) 
     };
     let mut client_idx = 0usize;
 
+    // Held for the whole job so retries reuse it; deleted when this returns.
+    let jar = DownloadManager::cookie_jar(source);
+    let cookies = jar.as_ref().map(|j| j.path());
+
     for attempt in 1..=MAX_ATTEMPTS {
         if manager.is_cancelled(&id) {
             return;
         }
-        match attempt_job(&manager, &app, &id, &url, attempt, clients[client_idx]).await {
+        match attempt_job(&manager, &app, &id, &url, attempt, clients[client_idx], cookies).await {
             Outcome::Done | Outcome::Cancelled => return,
             Outcome::Failed(e) => return finish_failed(&manager, &app, &id, e),
             Outcome::Refused(e) => {
@@ -597,6 +627,7 @@ async fn attempt_job(
     url: &url::Url,
     attempt: u32,
     client: Option<&str>,
+    cookies: Option<&std::path::Path>,
 ) -> Outcome {
     if let Some(v) = manager.mutate(id, |v| {
         v.status = JobStatus::Probing;
@@ -605,7 +636,7 @@ async fn attempt_job(
         let _ = app.emit(events::UPDATED, v);
     }
 
-    let info = match ytdlp::probe(url, client).await {
+    let info = match ytdlp::probe(url, client, cookies).await {
         Ok(i) => i,
         Err(e) => return Outcome::from(e),
     };
@@ -631,7 +662,8 @@ async fn attempt_job(
     }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Progress>();
-    let mut running = match ytdlp::start(url, &dest, tx, client, manager.quality_for(id)) {
+    let mut running = match ytdlp::start(url, &dest, tx, client, manager.quality_for(id), cookies)
+    {
         Ok(r) => r,
         Err(e) => return Outcome::from(e),
     };
@@ -712,6 +744,32 @@ async fn attempt_job(
             // The file on disk is the only honest answer for "how big is it".
             // Summed stream counters miss container overhead, and a remux
             // changes the size again - so measure rather than infer.
+            // A photo post lands as bare audio. If FFmpeg is available, rebuild
+            // it into something playable rather than leaving an mp3 sitting in
+            // a folder of videos. Failure here is not job failure: the audio is
+            // still a successful download.
+            let mut still_image = false;
+            let mut path = path;
+            if !info.has_video {
+                if let (Some(audio), Some(cover), Some(ffmpeg)) = (
+                    path.as_deref(),
+                    info.thumbnail_url.as_deref(),
+                    ytdlp::locate_ffmpeg(),
+                ) {
+                    match slideshow::build_still_video(cover, std::path::Path::new(audio), &ffmpeg)
+                        .await
+                    {
+                        Ok(built) => {
+                            still_image = true;
+                            path = Some(built.display().to_string());
+                        }
+                        Err(e) => {
+                            log_conversion_failure(&e);
+                        }
+                    }
+                }
+            }
+
             let actual = path
                 .as_deref()
                 .and_then(|p| std::fs::metadata(p).ok())
@@ -719,6 +777,7 @@ async fn attempt_job(
                 .map(|m| m.len());
 
             if let Some(v) = manager.mutate(id, |v| {
+                v.still_image_video = still_image;
                 v.status = JobStatus::Completed;
                 v.speed_bps = None;
                 v.eta_seconds = None;
@@ -771,6 +830,12 @@ fn finish_failed(manager: &Arc<DownloadManager>, app: &AppHandle, id: &str, e: A
     }) {
         let _ = app.emit(events::FAILED, v);
     }
+}
+
+/// A failed photo-post conversion is worth a line in the log and nothing more:
+/// the download itself succeeded, and the audio is still there.
+fn log_conversion_failure(e: &AppError) {
+    eprintln!("photo post kept as audio: {e}");
 }
 
 /// Fallback for when the engine didn't report its output path: the most

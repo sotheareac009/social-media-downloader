@@ -1,0 +1,106 @@
+# Build installers for all three desktop platforms.
+#
+# WHY CI RATHER THAN DOCKER. Tauri cannot cross-compile: a .dmg has to be built
+# on macOS and a .msi on Windows, because each links against that platform's own
+# webview and toolchain. Docker only covers the Linux target. A build matrix is
+# the one way to produce all three from a single action.
+#
+# Triggered by pushing a tag, or manually from the Actions tab.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      # One platform failing should not hide the others' results.
+      fail-fast: false
+      matrix:
+        include:
+          # A universal binary covers both Apple Silicon and Intel Macs, so
+          # there is one .dmg to hand out rather than two.
+          - platform: macos-latest
+            target: universal-apple-darwin
+            label: macOS
+          - platform: ubuntu-22.04
+            target: ""
+            label: Linux
+          - platform: windows-latest
+            target: ""
+            label: Windows
+
+    runs-on: ${{ matrix.platform }}
+    name: ${{ matrix.label }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # WebKitGTK and its friends are not on the Ubuntu runner by default.
+      # Pinned to 22.04 because 24.04 ships a webkit2gtk version Tauri v2 does
+      # not yet build against cleanly.
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev \
+            libxdo-dev \
+            xdg-utils
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # Building universal on macOS needs both architectures present.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - run: npm ci
+
+      # Tests are cheap next to a full Tauri build, and a broken build is worth
+      # catching before spending ten minutes bundling it.
+      - name: Test
+        run: |
+          npm run build
+          cargo test --manifest-path src-tauri/Cargo.toml
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Media Downloader ${{ github.ref_name }}"
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+
+      # Also keep the artefacts on the run itself, so a manual dispatch (which
+      # has no tag to attach a release to) still produces something downloadable.
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: media-downloader-${{ matrix.label }}
+          path: |
+            src-tauri/target/**/release/bundle/**/*.dmg
+            src-tauri/target/**/release/bundle/**/*.deb
+            src-tauri/target/**/release/bundle/**/*.AppImage
+            src-tauri/target/**/release/bundle/**/*.msi
+            src-tauri/target/**/release/bundle/**/*.exe
+          if-no-files-found: warn

@@ -6,6 +6,9 @@ import {
   downloadGetDestination,
   downloadGetQuality,
   downloadInspectFormats,
+  instagramConnect,
+  instagramDisconnect,
+  instagramStatus,
   downloadSetQuality,
   downloadList,
   downloadRemove,
@@ -25,10 +28,12 @@ import {
   type ProfileListing,
   type Quality,
   type QualitySettings,
+  type SessionStatus,
 } from "@/lib/download";
 import { toAuthError } from "@/lib/auth";
 import { DestinationBar } from "@/components/downloads/DestinationBar";
 import { EngineNotice } from "@/components/downloads/EngineNotice";
+import { InstagramSessionCard } from "@/components/downloads/InstagramSession";
 import { JobCard } from "@/components/downloads/JobCard";
 import { ProfileCard } from "@/components/downloads/ProfileCard";
 import { QualityPicker } from "@/components/downloads/QualityPicker";
@@ -59,6 +64,8 @@ export function DownloadsPage() {
   const [destBusy, setDestBusy] = useState(false);
   const [quality, setQuality] = useState<QualitySettings | null>(null);
   const [qualityBusy, setQualityBusy] = useState(false);
+  const [igSession, setIgSession] = useState<SessionStatus | null>(null);
+  const [igBusy, setIgBusy] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   // Profiles found in a paste, waiting for the user to confirm the count.
   const [profiles, setProfiles] = useState<ProfileListing[]>([]);
@@ -115,6 +122,9 @@ export function DownloadsPage() {
           downloadGetDestination(),
           downloadGetQuality(),
         ]);
+        instagramStatus()
+          .then((st) => mounted.current && setIgSession(st))
+          .catch(() => {});
         if (!mounted.current) return;
         setEngine(status);
         setJobs(list);
@@ -407,6 +417,37 @@ export function DownloadsPage() {
     }
   }, [reportFor, pickedQuality, upsert, toast]);
 
+  /**
+   * Opens the Instagram login window and waits for it. A cancelled sign-in is
+   * a normal outcome, not something to report as a failure.
+   */
+  const connectInstagram = useCallback(async () => {
+    setIgBusy(true);
+    try {
+      setIgSession(await instagramConnect());
+      toast("success", "Instagram connected. Reels can now be downloaded.");
+    } catch (e) {
+      const err = toAuthError(e);
+      if (err.code !== "cancelled") {
+        toast("error", downloadMessage(err.code, err.message));
+      }
+    } finally {
+      if (mounted.current) setIgBusy(false);
+    }
+  }, [toast]);
+
+  const disconnectInstagram = useCallback(async () => {
+    setIgBusy(true);
+    try {
+      setIgSession(await instagramDisconnect());
+      toast("info", "Instagram session removed from your keychain.");
+    } catch (e) {
+      toast("error", toAuthError(e).message);
+    } finally {
+      if (mounted.current) setIgBusy(false);
+    }
+  }, [toast]);
+
   const clearFinished = useCallback(async () => {
     await downloadClearFinished();
     setJobs((prev) => prev.filter((j) => !isTerminal(j.status)));
@@ -516,6 +557,17 @@ export function DownloadsPage() {
             status={engine}
             onRecheck={() => void recheck()}
             rechecking={rechecking}
+          />
+        </div>
+      )}
+
+      {igSession && (
+        <div className="rise" style={{ marginBottom: 14, animationDelay: "40ms" }}>
+          <InstagramSessionCard
+            status={igSession}
+            busy={igBusy}
+            onConnect={() => void connectInstagram()}
+            onDisconnect={() => void disconnectInstagram()}
           />
         </div>
       )}
@@ -675,7 +727,8 @@ function PublicOnlyNote() {
       <ul className="assurance__list">
         {[
           "Only public posts — the same ones you could open in a private browser window without logging in.",
-          "Downloads run with no session: no cookies, no browser profile, no access token is ever passed to the engine.",
+          "YouTube, Facebook and TikTok download with no session at all — no cookies, no token.",
+          "Instagram refuses anonymous requests, so it uses the session you sign into here. Your browser profile is never read.",
           "Connecting an account on the Accounts page does not unlock private videos, and isn't required here.",
           "You're responsible for how you use what you download — copyright and each platform's terms still apply.",
         ].map((line) => (

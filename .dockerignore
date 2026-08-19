@@ -16,4 +16,5 @@ src-tauri/target
 README.md
 Dockerfile
 docker-compose.yml
+!docker-entrypoint.sh
 .dockerignore

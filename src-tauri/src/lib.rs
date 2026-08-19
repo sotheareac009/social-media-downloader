@@ -4,8 +4,10 @@
 //!
 //!   * [`auth`] - sign in to a platform and hold the credential in the OS
 //!     keychain. Profile scopes only; this grants no access to media.
-//!   * [`download`] - fetch *public* Facebook and TikTok videos through
-//!     yt-dlp, with no session, no cookie and no token.
+//!   * [`download`] - fetch public videos through yt-dlp. YouTube, Facebook
+//!     and TikTok are fetched with no session at all. Instagram is the single
+//!     exception: it refuses anonymous requests, so it uses a session the user
+//!     captures in a dedicated login window, stored in the OS keychain.
 //!
 //! Keeping them apart is what lets the download feature work without signing
 //! in, and what stops it from ever reaching private posts. See the module note
@@ -74,6 +76,9 @@ pub fn run() {
             commands::download::download_cancel,
             commands::download::download_remove,
             commands::download::download_clear_finished,
+            commands::download::download_instagram_connect,
+            commands::download::download_instagram_status,
+            commands::download::download_instagram_disconnect,
             commands::download::download_get_quality,
             commands::download::download_set_quality,
             commands::download::download_get_destination,

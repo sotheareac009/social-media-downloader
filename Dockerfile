@@ -117,8 +117,12 @@ WORKDIR /home/app
 
 COPY --from=build /app/src-tauri/target/release/media-downloader /usr/local/bin/media-downloader
 
+# Checks for a usable display before starting, so a container with no X server
+# prints an explanation rather than a GTK panic.
+COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+
 # Where downloads land inside the container; docker-compose maps this to the
 # host. The app defaults to ~/Downloads/Media Downloader.
 RUN mkdir -p /home/app/Downloads
 
-ENTRYPOINT ["/usr/local/bin/media-downloader"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

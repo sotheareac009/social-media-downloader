@@ -2,15 +2,15 @@
  * Typed bridge to the Rust download layer.
  *
  * Note the shape of what crosses this boundary: a job carries a title, a byte
- * count and a local path. The signed CDN URL the engine actually fetches from
- * stays in Rust, and no credential is involved on either side — public media
- * is fetched with no session at all.
+ * count and a local path. The signed CDN URL the engine fetches from stays in
+ * Rust, and no cookie value is ever exposed here — `SessionStatus` reports
+ * whether Instagram is connected, never what the session is.
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 /** Platforms this build will fetch public media from. */
-export type Source = "facebook" | "tiktok" | "youtube";
+export type Source = "facebook" | "tiktok" | "youtube" | "instagram";
 
 export type JobStatus =
   | "queued"
@@ -37,6 +37,8 @@ export interface JobView {
   fraction: number | null;
   /** True when the post had no video stream — a TikTok photo/slideshow. */
   audio_only: boolean;
+  /** True when a photo post was rebuilt into a video from its cover image. */
+  still_image_video: boolean;
   output_path: string | null;
   /** 1-based; equals 1 unless the platform throttled us and we backed off. */
   attempt: number;
@@ -138,6 +140,13 @@ export interface FormatReport {
   best_label: string | null;
 }
 
+/** Instagram download session — never carries a cookie value. */
+export interface SessionStatus {
+  connected: boolean;
+  /** Unix seconds. */
+  captured_at: number | null;
+}
+
 export interface EngineStatus {
   available: boolean;
   path: string | null;
@@ -192,6 +201,16 @@ export const downloadRemove = (id: string) =>
 
 export const downloadClearFinished = () =>
   invoke<number>("download_clear_finished");
+
+export const instagramStatus = () =>
+  invoke<SessionStatus>("download_instagram_status");
+
+/** Opens a dedicated login window; resolves once a session is captured. */
+export const instagramConnect = () =>
+  invoke<SessionStatus>("download_instagram_connect");
+
+export const instagramDisconnect = () =>
+  invoke<SessionStatus>("download_instagram_disconnect");
 
 export const downloadGetQuality = () =>
   invoke<QualitySettings>("download_get_quality");
@@ -257,7 +276,7 @@ export async function subscribeToDownloadEvents(
 export function downloadMessage(code: string | null, fallback: string): string {
   switch (code) {
     case "unsupported_url":
-      return "That isn't a YouTube, Facebook or TikTok link.";
+      return "That isn't a supported video link. Instagram profiles and stories aren't supported — only /reel/, /p/ and /tv/ posts.";
     case "engine_missing":
       return "The download engine (yt-dlp) isn't installed yet.";
     case "media_not_public":

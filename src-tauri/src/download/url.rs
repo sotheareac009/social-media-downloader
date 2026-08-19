@@ -25,6 +25,7 @@ pub enum Source {
     Facebook,
     TikTok,
     YouTube,
+    Instagram,
 }
 
 impl Source {
@@ -33,6 +34,7 @@ impl Source {
             Source::Facebook => "facebook",
             Source::TikTok => "tiktok",
             Source::YouTube => "youtube",
+            Source::Instagram => "instagram",
         }
     }
 
@@ -41,6 +43,7 @@ impl Source {
             Source::Facebook => "Facebook",
             Source::TikTok => "TikTok",
             Source::YouTube => "YouTube",
+            Source::Instagram => "Instagram",
         }
     }
 }
@@ -62,6 +65,7 @@ pub enum TargetKind {
 const FACEBOOK_HOSTS: &[&str] = &["facebook.com", "fb.watch", "fb.com", "facebook.net"];
 const TIKTOK_HOSTS: &[&str] = &["tiktok.com", "vm.tiktok.com", "vt.tiktok.com"];
 const YOUTUBE_HOSTS: &[&str] = &["youtube.com", "youtu.be", "youtube-nocookie.com"];
+const INSTAGRAM_HOSTS: &[&str] = &["instagram.com", "instagr.am", "ddinstagram.com"];
 
 /// Strip the subdomains that are merely presentational, so `m.facebook.com`
 /// and `web.facebook.com` resolve to the same allowlist entry. Anything else
@@ -74,6 +78,24 @@ fn normalise_host(host: &str) -> &str {
         }
     }
     host
+}
+
+/// Instagram post shapes that carry media: `/reel/<code>`, `/reels/<code>`,
+/// `/p/<code>`, `/tv/<code>`, and the same nested under a handle.
+fn is_instagram_post(url: &Url) -> bool {
+    let segments: Vec<&str> = url
+        .path_segments()
+        .map(|s| s.filter(|p| !p.is_empty()).collect())
+        .unwrap_or_default();
+
+    const KINDS: &[&str] = &["reel", "reels", "p", "tv"];
+    match segments.as_slice() {
+        // instagram.com/reel/<code>
+        [kind, code, ..] if KINDS.contains(kind) => !code.is_empty(),
+        // instagram.com/<handle>/reel/<code>
+        [_, kind, code, ..] if KINDS.contains(kind) => !code.is_empty(),
+        _ => false,
+    }
 }
 
 /// Classify a pasted link and say whether it names a video or a whole profile.
@@ -177,6 +199,15 @@ pub fn classify(raw: &str) -> Result<(Source, Url)> {
         Ok((Source::TikTok, parsed))
     } else if YOUTUBE_HOSTS.contains(&host) {
         Ok((Source::YouTube, parsed))
+    } else if INSTAGRAM_HOSTS.contains(&host) {
+        // Only single-post shapes are accepted. yt-dlp's `instagram:user`
+        // extractor is marked CURRENTLY BROKEN, so a bare profile link is
+        // refused here rather than queued to fail later with a worse message.
+        if is_instagram_post(&parsed) {
+            Ok((Source::Instagram, parsed))
+        } else {
+            Err(AppError::UnsupportedUrl)
+        }
     } else {
         Err(AppError::UnsupportedUrl)
     }
@@ -268,6 +299,34 @@ mod tests {
         for raw in single {
             let (_, _, kind) = classify_target(raw).unwrap();
             assert_eq!(kind, TargetKind::Single, "{raw}");
+        }
+    }
+
+    #[test]
+    fn instagram_post_shapes_are_accepted() {
+        for raw in [
+            "https://www.instagram.com/reel/Cabc123XYZ/",
+            "https://instagram.com/reels/Cabc123XYZ/",
+            "https://www.instagram.com/p/Cabc123XYZ/",
+            "https://www.instagram.com/tv/Cabc123XYZ/",
+            "https://www.instagram.com/someone/reel/Cabc123XYZ/",
+        ] {
+            let (source, _, kind) = classify_target(raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
+            assert_eq!(source, Source::Instagram, "{raw}");
+            assert_eq!(kind, TargetKind::Single, "{raw}");
+        }
+    }
+
+    #[test]
+    fn instagram_profiles_and_stories_are_refused_up_front() {
+        // `instagram:user` is marked CURRENTLY BROKEN in yt-dlp, so accepting
+        // a profile would only queue work that cannot succeed.
+        for raw in [
+            "https://www.instagram.com/someone/",
+            "https://www.instagram.com/",
+            "https://www.instagram.com/explore/tags/cats/",
+        ] {
+            assert!(classify(raw).is_err() || classify_target(raw).is_err(), "{raw}");
         }
     }
 

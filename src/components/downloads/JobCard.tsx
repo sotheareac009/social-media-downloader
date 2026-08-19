@@ -21,6 +21,7 @@ const SOURCE_LABEL: Record<JobView["source"], string> = {
   facebook: "Facebook",
   tiktok: "TikTok",
   youtube: "YouTube",
+  instagram: "Instagram",
 };
 
 export function JobCard({
@@ -75,11 +76,21 @@ export function JobCard({
         {job.status === "completed" && (
           <div
             className={`job__status ${
-              job.audio_only ? "job__status--note" : "job__status--ok"
+              job.audio_only && !job.still_image_video
+                ? "job__status--note"
+                : "job__status--ok"
             }`}
           >
             <CheckIcon size={13} />
-            {job.audio_only ? (
+            {job.still_image_video ? (
+              <span>
+                Saved as video · {formatBytes(job.downloaded_bytes || job.total_bytes)}
+                <span className="job__why">
+                  {" "}
+                  — photo post, built from its cover image and audio
+                </span>
+              </span>
+            ) : job.audio_only ? (
               <span>
                 Saved audio only · {formatBytes(job.downloaded_bytes || job.total_bytes)}
                 <span className="job__why">

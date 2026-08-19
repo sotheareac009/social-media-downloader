@@ -64,7 +64,7 @@ echo '{{"id":"abc123","title":"A public reel","uploader":"someone","duration":12
     );
 
     let url = url::Url::parse("https://www.tiktok.com/@u/video/7300000000000000000").unwrap();
-    let info = ytdlp::probe(&url, None).await.expect("probe should succeed");
+    let info = ytdlp::probe(&url, None, None).await.expect("probe should succeed");
 
     assert_eq!(info.id, "abc123");
     assert_eq!(info.title, "A public reel");
@@ -111,7 +111,7 @@ echo '{{"id":"abc123","title":"A public reel","uploader":"someone","duration":12
         &format!(r#"printf '%s\n' "$@" > {}"#, dl_argv.display()),
     );
     let (tx, _rx) = mpsc::unbounded_channel();
-    let mut running = ytdlp::start(&url, &dir, tx, None, Quality::Best).unwrap();
+    let mut running = ytdlp::start(&url, &dir, tx, None, Quality::Best, None).unwrap();
     let _ = ytdlp::wait(&mut running).await;
 
     let argv = std::fs::read_to_string(&dl_argv).unwrap();
@@ -124,6 +124,44 @@ echo '{{"id":"abc123","title":"A public reel","uploader":"someone","duration":12
     assert!(
         argv.lines().any(|l| l.starts_with("after_move:")),
         "the engine must still be asked to report its output path:\n{argv}"
+    );
+
+    // ---- 1c. a supplied cookie jar replaces --no-cookies, never the reverse
+    // The security shape of the Instagram feature lives here. Two invariants:
+    // a jar is used when given, and the browser-profile flag is never dropped
+    // — that one must hold whether or not a session exists, because
+    // --cookies-from-browser would sweep in every site the user is signed
+    // into rather than the one window they opened for this.
+    let jar_argv = dir.join("jar-argv.txt");
+    install_stub(
+        &dir,
+        "jar",
+        &format!(r#"printf '%s\n' "$@" > {}"#, jar_argv.display()),
+    );
+    let fake_jar = dir.join("cookies.txt");
+    std::fs::write(&fake_jar, "# Netscape HTTP Cookie File\n").unwrap();
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut running =
+        ytdlp::start(&url, &dir, tx, None, Quality::Best, Some(&fake_jar)).unwrap();
+    let _ = ytdlp::wait(&mut running).await;
+
+    let argv = std::fs::read_to_string(&jar_argv).unwrap();
+    assert!(
+        argv.lines().any(|l| l == "--cookies"),
+        "a supplied jar must be passed:\n{argv}"
+    );
+    assert!(
+        argv.lines().any(|l| l == fake_jar.to_string_lossy()),
+        "the jar path must follow --cookies:\n{argv}"
+    );
+    assert!(
+        !argv.lines().any(|l| l == "--no-cookies"),
+        "--no-cookies and --cookies conflict; yt-dlp must not get both:\n{argv}"
+    );
+    assert!(
+        argv.lines().any(|l| l == "--no-cookies-from-browser"),
+        "the browser profile must stay off-limits even with a session:\n{argv}"
     );
 
     // ---- 2. progress lines cross the pipe and parse ------------------------
@@ -139,7 +177,7 @@ exit 0"#,
     );
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut running = ytdlp::start(&url, &dir, tx, None, Quality::Best).expect("spawn");
+    let mut running = ytdlp::start(&url, &dir, tx, None, Quality::Best, None).expect("spawn");
     ytdlp::wait(&mut running).await.expect("clean exit");
 
     let mut seen = Vec::new();
@@ -166,7 +204,7 @@ exit 0"#,
 exit 1"#,
     );
     let (tx, _rx) = mpsc::unbounded_channel();
-    let mut running = ytdlp::start(&url, &dir, tx, None, Quality::Best).unwrap();
+    let mut running = ytdlp::start(&url, &dir, tx, None, Quality::Best, None).unwrap();
     match ytdlp::wait(&mut running).await {
         Err(AppError::MediaNotPublic) => {}
         other => panic!("expected MediaNotPublic, got {other:?}"),
@@ -175,7 +213,7 @@ exit 1"#,
     // ---- 4. cancellation actually kills the child --------------------------
     install_stub(&dir, "hang", r#"sleep 30"#);
     let (tx, _rx) = mpsc::unbounded_channel();
-    let mut running = ytdlp::start(&url, &dir, tx, None, Quality::Best).unwrap();
+    let mut running = ytdlp::start(&url, &dir, tx, None, Quality::Best, None).unwrap();
     running.kill().await;
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),

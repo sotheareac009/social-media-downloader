@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { AccountsPage } from "@/pages/accounts/AccountsPage";
 import { DownloadsPage } from "@/pages/downloads/DownloadsPage";
+import { HomePage } from "@/pages/home/HomePage";
 import { ToastProvider } from "@/components/ui/Toast";
 import {
   BoltIcon,
   DownloadIcon,
+  HomeIcon,
   MoonIcon,
   SlidersIcon,
   SunIcon,
@@ -12,16 +14,16 @@ import {
 } from "@/components/ui/icons";
 
 type Theme = "light" | "dark";
-type Route = "accounts" | "downloads";
+type Route = "home" | "accounts" | "downloads";
 const THEME_KEY = "md.theme";
 
 export default function App() {
   const [theme, setTheme] = useState<Theme>(
     () => (localStorage.getItem(THEME_KEY) as Theme) ?? "dark",
   );
-  // Downloads is the landing page: it's the one thing that works without any
-  // setup at all, since it needs no account.
-  const [route, setRoute] = useState<Route>("downloads");
+  // Home is the landing page: it reports what's ready before you try to use
+  // it, which is the difference between "nothing works" and "install yt-dlp".
+  const [route, setRoute] = useState<Route>("home");
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -41,7 +43,9 @@ export default function App() {
         <main className="main">
           <div className="titlebar" data-tauri-drag-region />
           <div className="main__scroll">
-            {route === "downloads" ? <DownloadsPage /> : <AccountsPage />}
+            {route === "home" && <HomePage onNavigate={setRoute} />}
+            {route === "downloads" && <DownloadsPage />}
+            {route === "accounts" && <AccountsPage />}
           </div>
         </main>
       </div>
@@ -74,6 +78,16 @@ function Sidebar({
 
       <nav className="sidebar__section">
         <div className="sidebar__label">Library</div>
+        <button
+          className={`navitem ${route === "home" ? "navitem--active" : ""}`}
+          type="button"
+          onClick={() => onNavigate("home")}
+        >
+          <span className="navitem__icon">
+            <HomeIcon size={16} />
+          </span>
+          Home
+        </button>
         <button
           className={`navitem ${route === "downloads" ? "navitem--active" : ""}`}
           type="button"

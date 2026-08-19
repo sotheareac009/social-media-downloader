@@ -9,10 +9,15 @@ Two independent capabilities, deliberately not wired together:
 | **Downloads** | No | Public Facebook and TikTok videos and reels |
 | **Accounts** | Yes | Your profile name and avatar — nothing else |
 
-**Signing in does not unlock private media, and downloading does not require
-signing in.** The scopes requested at login are profile-only, and the download
-engine is deliberately run with no session at all (see below). A post is
-downloadable exactly when it is already public.
+**Signing in on the Accounts page does not unlock private media.** The scopes
+requested there are profile-only, and those credentials never reach the
+download engine.
+
+Downloading needs no account for YouTube, Facebook or TikTok — those run with
+no session at all. **Instagram is the one exception**: it answers anonymous
+requests with an empty response, so reels require a login captured in the app's
+own Instagram window. That session is used for Instagram links and nothing
+else.
 
 ---
 
@@ -489,6 +494,23 @@ docker compose up app
 Downloads are written to `./downloads` on the host, so they survive the
 container. `./.env` is mounted read-only if present — it is never copied into
 the image, so no client ID is ever baked into a layer.
+
+### If the app container exits immediately
+
+It prints an explanation and exits **78** (`EX_CONFIG`) when no X display is
+reachable — which is always the case on macOS and Windows. That is the expected
+outcome there, not a broken image. Without the check, GTK aborts with
+`Failed to initialize gtk backend!`, which says nothing about the real cause.
+
+### Architecture matters
+
+Bundles are built for the architecture of the machine running Docker. Building
+on Apple Silicon produces **aarch64** artefacts, which will not run on an x86_64
+Linux box. For those, build explicitly:
+
+```bash
+docker build --platform linux/amd64 --target build -t media-downloader:build .
+```
 
 ### Two honest limitations
 
