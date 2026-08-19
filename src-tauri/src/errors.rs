@@ -70,9 +70,21 @@ pub enum AppError {
     #[error("that link isn't a supported Facebook or TikTok video URL")]
     UnsupportedUrl,
 
+    /// An Instagram profile or tab, which yt-dlp cannot currently list.
+    /// Separated from `UnsupportedUrl` because the answer is "not yet, and
+    /// here is the workaround" rather than "wrong kind of link".
+    #[error("Instagram profiles can't be listed yet — paste individual reel links instead")]
+    InstagramProfileUnsupported,
+
     /// yt-dlp is not installed or not on PATH.
     #[error("the download engine (yt-dlp) was not found on this system")]
     EngineMissing,
+
+    /// gallery-dl is not installed. Only needed for Instagram profile
+    /// listing, so this is separate from `EngineMissing` - downloads work
+    /// fine without it.
+    #[error("listing Instagram profiles needs gallery-dl, which isn't installed")]
+    ListerMissing,
 
     /// yt-dlp ran but failed. Carries only its final, already-sanitized line.
     #[error("the download engine failed: {0}")]
@@ -130,7 +142,9 @@ impl AppError {
             Self::CallbackListener => "callback_listener",
             Self::BrowserLaunch => "browser_launch",
             Self::UnsupportedUrl => "unsupported_url",
+            Self::InstagramProfileUnsupported => "instagram_profile_unsupported",
             Self::EngineMissing => "engine_missing",
+            Self::ListerMissing => "lister_missing",
             Self::EngineFailed(_) => "engine_failed",
             Self::MediaNotPublic => "media_not_public",
             Self::NoMediaFound => "no_media_found",

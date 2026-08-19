@@ -157,6 +157,10 @@ pub struct EngineStatus {
     /// as separate video and audio streams that need merging.
     pub has_ffmpeg: bool,
     pub ffmpeg_path: Option<String>,
+    /// gallery-dl, needed only to list Instagram profiles. Single Instagram
+    /// links work without it.
+    pub has_lister: bool,
+    pub lister_version: Option<String>,
 }
 
 /// The destination as the UI needs to describe it.
@@ -179,6 +183,13 @@ pub struct DownloadManager {
     /// Non-secret marker mirroring the keychain entry; see `settings`.
     instagram_connected_at: Mutex<Option<i64>>,
     prefer_compatible: Mutex<bool>,
+    /// The Instagram session, held after its first successful read.
+    ///
+    /// Without this, every job decrypts the keychain entry again — and macOS
+    /// asks for the login password each time, so downloading a ten-reel
+    /// profile meant ten password prompts. Reading once per app run is the
+    /// difference between usable and infuriating.
+    instagram_cache: Mutex<Option<Arc<session::InstagramSession>>>,
     /// Where the app would save with no preference set.
     default_dir: PathBuf,
     /// Where `downloader-settings.json` lives.
@@ -200,6 +211,7 @@ impl DownloadManager {
             quality: Mutex::new(saved.quality),
             instagram_connected_at: Mutex::new(saved.instagram_connected_at),
             prefer_compatible: Mutex::new(saved.prefer_compatible),
+            instagram_cache: Mutex::new(None),
             default_dir,
             config_dir,
             slots: Arc::new(Semaphore::new(MAX_CONCURRENT)),
@@ -266,6 +278,8 @@ impl DownloadManager {
     /// Store a captured session and record that one exists.
     pub fn instagram_remember(&self, captured: &InstagramSession) -> Result<SessionStatus> {
         session::save(captured)?;
+        *self.instagram_cache.lock().expect("ig cache lock") =
+            Some(Arc::new(captured.clone()));
         *self
             .instagram_connected_at
             .lock()
@@ -278,6 +292,7 @@ impl DownloadManager {
     /// fails, so the UI can never claim a connection the app cannot use.
     pub fn instagram_forget(&self) -> Result<SessionStatus> {
         let cleared = session::clear();
+        *self.instagram_cache.lock().expect("ig cache lock") = None;
         *self
             .instagram_connected_at
             .lock()
@@ -336,6 +351,8 @@ impl DownloadManager {
 
     pub async fn engine_status(&self) -> EngineStatus {
         let ffmpeg = ytdlp::locate_ffmpeg();
+        let lister_version = crate::download::gallerydl::version().await;
+        let has_lister = crate::download::gallerydl::locate().is_some();
         match ytdlp::locate() {
             None => EngineStatus {
                 available: false,
@@ -343,6 +360,8 @@ impl DownloadManager {
                 version: None,
                 has_ffmpeg: ffmpeg.is_some(),
                 ffmpeg_path: ffmpeg.map(|p| p.display().to_string()),
+                has_lister,
+                lister_version: lister_version.clone(),
             },
             Some(path) => EngineStatus {
                 available: true,
@@ -350,6 +369,8 @@ impl DownloadManager {
                 version: ytdlp::version().await.ok().filter(|v| !v.is_empty()),
                 has_ffmpeg: ffmpeg.is_some(),
                 ffmpeg_path: ffmpeg.map(|p| p.display().to_string()),
+                has_lister,
+                lister_version,
             },
         }
     }
@@ -357,7 +378,7 @@ impl DownloadManager {
     /// Check a link without committing to a download. Powers the paste preview.
     pub async fn inspect(&self, raw: &str) -> Result<MediaInfo> {
         let (source, url) = classify(raw)?;
-        let jar = Self::cookie_jar(source);
+        let jar = self.cookie_jar(source);
         ytdlp::probe(&url, None, jar.as_ref().map(|j| j.path())).await
     }
 
@@ -371,7 +392,7 @@ impl DownloadManager {
             Source::YouTube => YOUTUBE_CLIENTS,
             _ => &[None],
         };
-        let jar = Self::cookie_jar(source);
+        let jar = self.cookie_jar(source);
         ytdlp::inspect_formats(&url, clients, jar.as_ref().map(|j| j.path())).await
     }
 
@@ -380,15 +401,32 @@ impl DownloadManager {
     /// Instagram is the only source that ever gets one, and only when the user
     /// has explicitly signed in through the app's own login window. Every
     /// other source downloads with no session, exactly as before.
-    fn cookie_jar(source: Source) -> Option<CookieFile> {
+    fn cookie_jar(&self, source: Source) -> Option<CookieFile> {
         if source != Source::Instagram {
             return None;
         }
-        let stored = session::load().ok().flatten()?;
+        let stored = self.instagram_session()?;
         if !stored.is_usable() {
             return None;
         }
         CookieFile::write(&stored.cookies).ok()
+    }
+
+    /// The session, from memory when possible. Only the first call in an app
+    /// run can trigger a keychain prompt.
+    fn instagram_session(&self) -> Option<Arc<session::InstagramSession>> {
+        if let Some(cached) = self.instagram_cache.lock().expect("ig cache lock").clone() {
+            return Some(cached);
+        }
+        // Nothing recorded means nothing to decrypt, so do not even ask.
+        self.instagram_connected_at
+            .lock()
+            .expect("instagram marker lock")
+            .as_ref()?;
+
+        let loaded = Arc::new(session::load().ok().flatten()?);
+        *self.instagram_cache.lock().expect("ig cache lock") = Some(loaded.clone());
+        Some(loaded)
     }
 
     /// The quality a job should download at: its own choice, or the default.
@@ -403,10 +441,23 @@ impl DownloadManager {
 
     /// List a creator's videos without downloading any of them.
     pub async fn inspect_profile(&self, raw: &str) -> Result<ProfileListing> {
-        let (_, url, kind) = classify_target(raw)?;
+        let (source, url, kind) = classify_target(raw)?;
         if kind != TargetKind::Profile {
             return Err(AppError::UnsupportedUrl);
         }
+
+        // Instagram is listed by gallery-dl; yt-dlp's own extractor for it is
+        // marked CURRENTLY BROKEN upstream. Every *download* still goes
+        // through yt-dlp, so only the enumeration differs.
+        if source == Source::Instagram {
+            let jar = self.cookie_jar(source);
+            return crate::download::gallerydl::list_instagram_profile(
+                &url,
+                jar.as_ref().map(|j| j.path()),
+            )
+            .await;
+        }
+
         ytdlp::list_profile(&url).await
     }
 
@@ -616,7 +667,7 @@ pub async fn run_job(manager: Arc<DownloadManager>, app: AppHandle, id: String) 
     let mut client_idx = 0usize;
 
     // Held for the whole job so retries reuse it; deleted when this returns.
-    let jar = DownloadManager::cookie_jar(source);
+    let jar = manager.cookie_jar(source);
     let cookies = jar.as_ref().map(|j| j.path());
 
     for attempt in 1..=MAX_ATTEMPTS {

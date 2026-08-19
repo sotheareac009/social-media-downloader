@@ -158,6 +158,9 @@ export interface EngineStatus {
   /** Optional, but decides YouTube quality: without it, 360p is the ceiling. */
   has_ffmpeg: boolean;
   ffmpeg_path: string | null;
+  /** gallery-dl — needed only to list whole Instagram profiles. */
+  has_lister: boolean;
+  lister_version: string | null;
 }
 
 export interface ProgressEvent {
@@ -290,6 +293,10 @@ export function downloadMessage(code: string | null, fallback: string): string {
       return "This post isn't public, so it can't be downloaded. Signing in wouldn't change that — this app only fetches posts anyone can already view.";
     case "no_media_found":
       return "No video was found at that link.";
+    case "instagram_profile_unsupported":
+      return "That Instagram page can't be listed — stories and explore pages have no listing path. Profile and /reels/ links do work.";
+    case "lister_missing":
+      return "Listing a whole Instagram profile needs gallery-dl. Install it with: brew install gallery-dl";
     case "client_refused":
       return "YouTube refused every way we asked for this video. That's usually temporary — try again in a few minutes.";
     case "temporarily_unavailable":

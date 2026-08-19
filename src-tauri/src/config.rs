@@ -92,6 +92,7 @@ pub fn read(key: &str) -> Option<String> {
         // common case where a GUI app doesn't inherit the shell's PATH.
         "MEDIA_DOWNLOADER_YTDLP" => option_env!("MEDIA_DOWNLOADER_YTDLP"),
         "MEDIA_DOWNLOADER_FFMPEG" => option_env!("MEDIA_DOWNLOADER_FFMPEG"),
+        "MEDIA_DOWNLOADER_GALLERYDL" => option_env!("MEDIA_DOWNLOADER_GALLERYDL"),
         _ => None,
     }
     .map(str::to_string)

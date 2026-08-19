@@ -34,6 +34,7 @@ export function EngineNotice({
           </div>
         </div>
         {!status.has_ffmpeg && <FfmpegHint />}
+        {!status.has_lister && <ListerHint />}
       </>
     );
   }
@@ -105,6 +106,41 @@ function FfmpegHint() {
           Installed but not found? Set{" "}
           <code>MEDIA_DOWNLOADER_FFMPEG=/full/path/to/ffmpeg</code> in your{" "}
           <code>.env</code> and restart.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Only blocks one feature, so it is worded as an optional extra rather than a
+ * problem: single Instagram links download fine without it.
+ */
+function ListerHint() {
+  return (
+    <div className="engine engine--hint">
+      <span className="engine__icon">
+        <AlertIcon size={14} />
+      </span>
+      <div className="engine__body">
+        <div className="engine__title">
+          Whole Instagram profiles need gallery-dl
+        </div>
+        <p className="engine__lede">
+          yt-dlp can't list Instagram profiles — its extractor for them is
+          broken upstream — so <strong>gallery-dl</strong> does the listing.
+          Individual reel links work without it, and downloading still goes
+          through yt-dlp either way.
+        </p>
+        <div className="engine__cmds">
+          <Cmd label="macOS" cmd="brew install gallery-dl" />
+          <Cmd label="Windows" cmd="pip install gallery-dl" />
+          <Cmd label="Linux / pipx" cmd="pipx install gallery-dl" />
+        </div>
+        <p className="engine__hint">
+          Installed but not found? Set{" "}
+          <code>MEDIA_DOWNLOADER_GALLERYDL=/full/path/to/gallery-dl</code> in
+          your <code>.env</code> and restart.
         </p>
       </div>
     </div>

@@ -54,7 +54,7 @@ const PLATFORMS: Platform[] = [
   {
     id: "instagram",
     name: "Instagram",
-    supports: ["Reels", "Posts & IGTV", "Sign-in required"],
+    supports: ["Reels", "Whole profiles", "Posts & IGTV", "Sign-in required"],
   },
 ];
 

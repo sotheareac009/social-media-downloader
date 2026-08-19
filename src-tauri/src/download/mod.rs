@@ -27,6 +27,7 @@
 
 pub mod compat;
 pub mod cookies;
+pub mod gallerydl;
 pub mod manager;
 pub mod quality;
 pub mod session;

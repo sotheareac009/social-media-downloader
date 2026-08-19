@@ -98,12 +98,41 @@ fn is_instagram_post(url: &Url) -> bool {
     }
 }
 
+/// Instagram paths that are *not* a handle, so `/explore/...` is never
+/// mistaken for a user called "explore".
+const INSTAGRAM_RESERVED: &[&str] = &[
+    "p", "reel", "reels", "tv", "explore", "accounts", "stories", "direct",
+    "about", "developer", "legal", "privacy", "session",
+];
+
+/// A profile, or its reels tab: `/<handle>` or `/<handle>/reels`.
+///
+/// Listed by gallery-dl rather than yt-dlp - see
+/// [`crate::download::gallerydl`] for why.
+fn is_instagram_profile(url: &Url) -> bool {
+    let segments: Vec<&str> = url
+        .path_segments()
+        .map(|s| s.filter(|p| !p.is_empty()).collect())
+        .unwrap_or_default();
+
+    let handle_ok = |h: &&str| !h.is_empty() && !INSTAGRAM_RESERVED.contains(&h.to_ascii_lowercase().as_str());
+
+    match segments.as_slice() {
+        [handle] => handle_ok(handle),
+        [handle, tab] if tab.eq_ignore_ascii_case("reels") => handle_ok(handle),
+        _ => false,
+    }
+}
+
 /// Classify a pasted link and say whether it names a video or a whole profile.
 pub fn classify_target(raw: &str) -> Result<(Source, Url, TargetKind)> {
     let (source, url) = classify(raw)?;
     match source {
         Source::TikTok if is_tiktok_profile(&url) => Ok((source, url, TargetKind::Profile)),
         Source::YouTube => Ok(classify_youtube(url)),
+        Source::Instagram if is_instagram_profile(&url) => {
+            Ok((source, url, TargetKind::Profile))
+        }
         _ => Ok((source, url, TargetKind::Single)),
     }
 }
@@ -205,8 +234,12 @@ pub fn classify(raw: &str) -> Result<(Source, Url)> {
         // refused here rather than queued to fail later with a worse message.
         if is_instagram_post(&parsed) {
             Ok((Source::Instagram, parsed))
+        } else if is_instagram_profile(&parsed) {
+            Ok((Source::Instagram, parsed))
         } else {
-            Err(AppError::UnsupportedUrl)
+            // Stories, explore pages, direct messages: no listing path exists
+            // for these, so refuse rather than queue work that cannot run.
+            Err(AppError::InstagramProfileUnsupported)
         }
     } else {
         Err(AppError::UnsupportedUrl)
@@ -318,16 +351,40 @@ mod tests {
     }
 
     #[test]
-    fn instagram_profiles_and_stories_are_refused_up_front() {
-        // `instagram:user` is marked CURRENTLY BROKEN in yt-dlp, so accepting
-        // a profile would only queue work that cannot succeed.
+    fn instagram_profiles_and_reel_tabs_are_listable() {
         for raw in [
-            "https://www.instagram.com/someone/",
+            "https://www.instagram.com/ve.leo.vet/",
+            "https://www.instagram.com/ve.leo.vet",
+            "https://www.instagram.com/ve.leo.vet/reels/",
+        ] {
+            let (source, _, kind) = classify_target(raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
+            assert_eq!(source, Source::Instagram, "{raw}");
+            assert_eq!(kind, TargetKind::Profile, "{raw}");
+        }
+    }
+
+    #[test]
+    fn instagram_pages_that_are_not_profiles_are_refused() {
+        // `/explore/...` must not be read as a user named "explore", and
+        // stories have no listing path at all.
+        for raw in [
             "https://www.instagram.com/",
             "https://www.instagram.com/explore/tags/cats/",
+            "https://www.instagram.com/stories/someone/",
+            "https://www.instagram.com/accounts/login/",
         ] {
-            assert!(classify(raw).is_err() || classify_target(raw).is_err(), "{raw}");
+            let err = classify_target(raw).unwrap_err();
+            assert!(
+                matches!(err, AppError::InstagramProfileUnsupported),
+                "{raw} should be refused: {err}"
+            );
         }
+    }
+
+    #[test]
+    fn a_reel_link_is_still_a_single_post_not_a_profile() {
+        let (_, _, kind) = classify_target("https://www.instagram.com/reel/DcM1QVGvMPJ/").unwrap();
+        assert_eq!(kind, TargetKind::Single);
     }
 
     #[test]

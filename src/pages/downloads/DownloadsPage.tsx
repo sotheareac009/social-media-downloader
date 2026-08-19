@@ -139,6 +139,8 @@ export function DownloadsPage() {
             version: null,
             has_ffmpeg: false,
             ffmpeg_path: null,
+            has_lister: false,
+            lister_version: null,
           });
         }
       }
