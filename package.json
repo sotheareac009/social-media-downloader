@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:windows": "tauri build",
     "preview": "vite preview",
     "tauri": "tauri"
   },

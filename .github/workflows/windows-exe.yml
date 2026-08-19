@@ -1,0 +1,47 @@
+# Build the Windows installer from a real Windows runner.
+#
+# Tauri apps should be bundled on the target OS because the build links against
+# that platform's WebView/toolchain. Run this manually from GitHub Actions, then
+# download the `media-downloader-windows` artifact.
+
+name: Windows EXE
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Windows installer
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - run: npm ci
+
+      - name: Test
+        run: |
+          npm run build
+          cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build Windows installer
+        run: npm run build:windows
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: media-downloader-windows
+          path: |
+            src-tauri/target/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.msi
+          if-no-files-found: error
