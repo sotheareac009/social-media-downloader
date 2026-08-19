@@ -115,19 +115,12 @@ pub fn clear() -> Result<()> {
     }
 }
 
-/// Status for the UI, without decrypting more than necessary.
-pub fn status() -> SessionStatus {
-    match load() {
-        Ok(Some(s)) if s.is_usable() => SessionStatus {
-            connected: true,
-            captured_at: Some(s.captured_at),
-        },
-        _ => SessionStatus {
-            connected: false,
-            captured_at: None,
-        },
-    }
-}
+// Note: there is deliberately no `status()` here that reads the keychain.
+// Answering "is Instagram connected?" by decrypting the session costs a macOS
+// authorization prompt on every render, and three pages ask on mount. The UI
+// reads a non-secret marker from the settings file instead - see
+// `DownloadManager::instagram_status`. This mirrors the same rule stated in
+// `auth::storage`, which this module briefly forgot.
 
 #[cfg(test)]
 mod tests {

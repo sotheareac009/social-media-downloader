@@ -19,8 +19,9 @@ use tokio::sync::{mpsc, Semaphore};
 
 use crate::download::quality::Quality;
 use crate::download::settings::Settings;
+use crate::download::compat;
 use crate::download::cookies::CookieFile;
-use crate::download::session;
+use crate::download::session::{self, InstagramSession, SessionStatus};
 use crate::download::slideshow;
 use crate::download::url::{classify, classify_target, Source, TargetKind};
 use crate::download::ytdlp::{
@@ -111,6 +112,9 @@ pub struct JobView {
     /// image. The distinction matters: the file *is* a video, but it shows one
     /// still frame, not the original slideshow.
     pub still_image_video: bool,
+    /// Set when the file was re-encoded for playback, naming the codec it came
+    /// from — so "why is this bigger/slower" has a visible answer.
+    pub converted_from: Option<String>,
     /// Set once the file lands. Absolute path, for "Show in folder".
     pub output_path: Option<String>,
     /// 1-based, so the UI can say "Retrying 2 of 3" instead of going quiet
@@ -172,6 +176,9 @@ pub struct DownloadManager {
     order: Mutex<Vec<String>>,
     dest_dir: Mutex<PathBuf>,
     quality: Mutex<Quality>,
+    /// Non-secret marker mirroring the keychain entry; see `settings`.
+    instagram_connected_at: Mutex<Option<i64>>,
+    prefer_compatible: Mutex<bool>,
     /// Where the app would save with no preference set.
     default_dir: PathBuf,
     /// Where `downloader-settings.json` lives.
@@ -191,6 +198,8 @@ impl DownloadManager {
             order: Mutex::new(Vec::new()),
             dest_dir: Mutex::new(active),
             quality: Mutex::new(saved.quality),
+            instagram_connected_at: Mutex::new(saved.instagram_connected_at),
+            prefer_compatible: Mutex::new(saved.prefer_compatible),
             default_dir,
             config_dir,
             slots: Arc::new(Semaphore::new(MAX_CONCURRENT)),
@@ -242,6 +251,54 @@ impl DownloadManager {
         Ok(self.destination_view())
     }
 
+    /// Whether Instagram is connected, answered without touching the keychain.
+    pub fn instagram_status(&self) -> SessionStatus {
+        let at = *self
+            .instagram_connected_at
+            .lock()
+            .expect("instagram marker lock");
+        SessionStatus {
+            connected: at.is_some(),
+            captured_at: at,
+        }
+    }
+
+    /// Store a captured session and record that one exists.
+    pub fn instagram_remember(&self, captured: &InstagramSession) -> Result<SessionStatus> {
+        session::save(captured)?;
+        *self
+            .instagram_connected_at
+            .lock()
+            .expect("instagram marker lock") = Some(captured.captured_at);
+        self.persist(self.saved_destination())?;
+        Ok(self.instagram_status())
+    }
+
+    /// Forget the session. The marker is cleared even if the keychain delete
+    /// fails, so the UI can never claim a connection the app cannot use.
+    pub fn instagram_forget(&self) -> Result<SessionStatus> {
+        let cleared = session::clear();
+        *self
+            .instagram_connected_at
+            .lock()
+            .expect("instagram marker lock") = None;
+        self.persist(self.saved_destination())?;
+        cleared?;
+        Ok(self.instagram_status())
+    }
+
+    pub fn prefer_compatible(&self) -> bool {
+        *self.prefer_compatible.lock().expect("compat lock")
+    }
+
+    /// Applies to jobs started from now on; one already running keeps the
+    /// format it negotiated.
+    pub fn set_prefer_compatible(&self, on: bool) -> Result<bool> {
+        *self.prefer_compatible.lock().expect("compat lock") = on;
+        self.persist(self.saved_destination())?;
+        Ok(on)
+    }
+
     pub fn quality(&self) -> Quality {
         *self.quality.lock().expect("quality lock")
     }
@@ -267,6 +324,11 @@ impl DownloadManager {
         Settings {
             destination,
             quality: self.quality(),
+            instagram_connected_at: *self
+                .instagram_connected_at
+                .lock()
+                .expect("instagram marker lock"),
+            prefer_compatible: self.prefer_compatible(),
         }
         .save(&self.config_dir)
         .map_err(|e| AppError::DownloadPath(format!("could not save your choice: {e}")))
@@ -394,6 +456,7 @@ impl DownloadManager {
             fraction: None,
             audio_only: false,
             still_image_video: false,
+            converted_from: None,
             output_path: None,
             attempt: 1,
             max_attempts: MAX_ATTEMPTS,
@@ -662,8 +725,15 @@ async fn attempt_job(
     }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Progress>();
-    let mut running = match ytdlp::start(url, &dest, tx, client, manager.quality_for(id), cookies)
-    {
+    let mut running = match ytdlp::start(
+        url,
+        &dest,
+        tx,
+        client,
+        manager.quality_for(id),
+        cookies,
+        manager.prefer_compatible(),
+    ) {
         Ok(r) => r,
         Err(e) => return Outcome::from(e),
     };
@@ -756,9 +826,21 @@ async fn attempt_job(
                     info.thumbnail_url.as_deref(),
                     ytdlp::locate_ffmpeg(),
                 ) {
-                    match slideshow::build_still_video(cover, std::path::Path::new(audio), &ffmpeg)
-                        .await
-                    {
+                    // Metadata said "no video"; the file is the authority.
+                    // Converting a real video would encode a still image over
+                    // its soundtrack and delete the original - so this second
+                    // check is what makes the feature safe rather than clever.
+                    let audio_path = std::path::Path::new(audio);
+                    let really_audio_only =
+                        !slideshow::file_has_video(&ffmpeg, audio_path).await;
+
+                    match if really_audio_only {
+                        slideshow::build_still_video(cover, audio_path, &ffmpeg).await
+                    } else {
+                        Err(AppError::Internal(
+                            "metadata reported no video but the file has a video stream; left as downloaded".into(),
+                        ))
+                    } {
                         Ok(built) => {
                             still_image = true;
                             path = Some(built.display().to_string());
@@ -766,6 +848,22 @@ async fn attempt_job(
                         Err(e) => {
                             log_conversion_failure(&e);
                         }
+                    }
+                }
+            }
+
+            // Selection prefers H.264, but a platform that offers nothing else
+            // still lands a VP9 or AV1 file that QuickTime refuses to open.
+            // This is the backstop that makes "playable" actually true.
+            let mut converted_from = None;
+            if manager.prefer_compatible() {
+                if let (Some(file), Some(ffmpeg)) = (path.as_deref(), ytdlp::locate_ffmpeg()) {
+                    match compat::ensure_playable(&ffmpeg, std::path::Path::new(file)).await {
+                        Ok(compat::Outcome::Converted { from }) => converted_from = Some(from),
+                        Ok(compat::Outcome::Skipped(why)) => eprintln!("compatibility: {why}"),
+                        Ok(compat::Outcome::Untouched) => {}
+                        // The download itself succeeded; keep it.
+                        Err(e) => eprintln!("compatibility pass failed, keeping original: {e}"),
                     }
                 }
             }
@@ -778,6 +876,7 @@ async fn attempt_job(
 
             if let Some(v) = manager.mutate(id, |v| {
                 v.still_image_video = still_image;
+                v.converted_from = converted_from.clone();
                 v.status = JobStatus::Completed;
                 v.speed_bps = None;
                 v.eta_seconds = None;

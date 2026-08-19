@@ -16,7 +16,7 @@ use crate::download::quality::Quality;
 
 const FILE_NAME: &str = "downloader-settings.json";
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     /// Absent means "use the OS Downloads folder", which is also what a
     /// deleted or unreadable file resolves to.
@@ -26,6 +26,37 @@ pub struct Settings {
     /// hand-edited value falls back to.
     #[serde(default)]
     pub quality: Quality,
+    /// When an Instagram session was captured, or `None` if there is none.
+    ///
+    /// A non-secret marker, deliberately kept beside the other preferences
+    /// rather than derived from the keychain: answering "is Instagram
+    /// connected?" by decrypting the session costs a macOS authorization
+    /// prompt every time a page renders. The secret itself stays in the
+    /// keychain and is read only when a download actually needs it.
+    #[serde(default)]
+    pub instagram_connected_at: Option<i64>,
+    /// Prefer H.264 so downloads open in QuickTime and Photos.
+    ///
+    /// Defaults to on, including for settings files written before this field
+    /// existed: a file that will not open reads as a broken app, while a
+    /// 1080p cap is a visible, explicable trade-off.
+    #[serde(default = "default_true")]
+    pub prefer_compatible: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            destination: None,
+            quality: Quality::default(),
+            instagram_connected_at: None,
+            prefer_compatible: true,
+        }
+    }
 }
 
 impl Settings {
@@ -85,11 +116,15 @@ mod tests {
         let s = Settings {
             destination: Some(PathBuf::from("/tmp/somewhere")),
             quality: Quality::P1080,
+            instagram_connected_at: Some(1_700_000_000),
+            prefer_compatible: false,
         };
         s.save(&dir).unwrap();
         let back = Settings::load(&dir);
         assert_eq!(back.destination, Some(PathBuf::from("/tmp/somewhere")));
         assert_eq!(back.quality, Quality::P1080);
+        assert_eq!(back.instagram_connected_at, Some(1_700_000_000));
+        assert!(!back.prefer_compatible);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -114,6 +149,14 @@ mod tests {
         let s = Settings::load(&dir);
         assert_eq!(s.destination, Some(PathBuf::from("/tmp/legacy-folder")));
         assert_eq!(s.quality, Quality::Best);
+        assert!(
+            s.instagram_connected_at.is_none(),
+            "a file written before this field existed must not claim a session"
+        );
+        assert!(
+            s.prefer_compatible,
+            "an older settings file must still default to playable output"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

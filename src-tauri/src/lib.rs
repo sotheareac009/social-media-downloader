@@ -81,6 +81,7 @@ pub fn run() {
             commands::download::download_instagram_disconnect,
             commands::download::download_get_quality,
             commands::download::download_set_quality,
+            commands::download::download_set_compatible,
             commands::download::download_get_destination,
             commands::download::download_set_destination,
             commands::download::download_reset_destination,

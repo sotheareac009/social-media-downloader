@@ -9,6 +9,7 @@ import {
   instagramConnect,
   instagramDisconnect,
   instagramStatus,
+  downloadSetCompatible,
   downloadSetQuality,
   downloadList,
   downloadRemove,
@@ -448,6 +449,21 @@ export function DownloadsPage() {
     }
   }, [toast]);
 
+  const toggleCompatible = useCallback(
+    async (on: boolean) => {
+      setQualityBusy(true);
+      try {
+        await downloadSetCompatible(on);
+        setQuality((prev) => (prev ? { ...prev, prefer_compatible: on } : prev));
+      } catch (e) {
+        toast("error", toAuthError(e).message);
+      } finally {
+        if (mounted.current) setQualityBusy(false);
+      }
+    },
+    [toast],
+  );
+
   const clearFinished = useCallback(async () => {
     await downloadClearFinished();
     setJobs((prev) => prev.filter((j) => !isTerminal(j.status)));
@@ -586,6 +602,7 @@ export function DownloadsPage() {
           settings={quality}
           busy={qualityBusy}
           onChange={(q) => void changeQuality(q)}
+          onToggleCompatible={(on) => void toggleCompatible(on)}
         />
       )}
 

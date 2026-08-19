@@ -12,6 +12,11 @@ import {
   type ProviderId,
 } from "@/lib/auth";
 import { AccountCard } from "@/components/accounts/AccountCard";
+import {
+  instagramConnect,
+  instagramStatus,
+  type SessionStatus,
+} from "@/lib/download";
 import { useToast } from "@/components/ui/Toast";
 import { AlertIcon, CheckIcon, ShieldIcon, UsersIcon } from "@/components/ui/icons";
 
@@ -25,6 +30,10 @@ export function AccountsPage() {
     Partial<Record<ProviderId, string>>
   >({});
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Downloading from Instagram uses a separate credential from this page's
+  // account sign-in; shown here so the two states stop looking contradictory.
+  const [igDownload, setIgDownload] = useState<SessionStatus | null>(null);
+  const [igBusy, setIgBusy] = useState(false);
 
   // Guards a state update landing after unmount when a flow is abandoned.
   const mounted = useRef(true);
@@ -51,6 +60,9 @@ export function AccountsPage() {
         const [descriptors] = await Promise.all([authGetProviders(), refresh()]);
         if (!mounted.current) return;
         setProviders(descriptors);
+        instagramStatus()
+          .then((st) => mounted.current && setIgDownload(st))
+          .catch(() => {});
       } catch (e) {
         if (!mounted.current) return;
         setLoadError(friendlyMessage(toAuthError(e)));
@@ -121,6 +133,24 @@ export function AccountsPage() {
     [applyAccount, toast],
   );
 
+  /**
+   * The same session sign-in the Downloads page runs — one flow, one place it
+   * is implemented, reachable from either page.
+   */
+  const signInForDownloads = useCallback(async () => {
+    setIgBusy(true);
+    try {
+      setIgDownload(await instagramConnect());
+      toast("success", "Instagram connected. Reels can now be downloaded.");
+    } catch (e) {
+      const err = toAuthError(e);
+      // Closing the window is a decision, not a failure.
+      if (err.code !== "cancelled") toast("error", friendlyMessage(err));
+    } finally {
+      if (mounted.current) setIgBusy(false);
+    }
+  }, [toast]);
+
   const connectedCount = Object.values(accounts).filter((a) => a.connected).length;
 
   return (
@@ -162,6 +192,20 @@ export function AccountsPage() {
                   <AccountCard
                     descriptor={descriptor}
                     account={account}
+                    downloadConnected={
+                      descriptor.id === "instagram" && igDownload?.connected === true
+                    }
+                    onDownloadSignIn={
+                      descriptor.id === "instagram" && !descriptor.configured
+                        ? () => void signInForDownloads()
+                        : undefined
+                    }
+                    downloadBusy={igBusy}
+                    downloadNote={
+                      descriptor.id === "instagram" && igDownload?.connected
+                        ? "Reels and posts will download using this session. Connecting an account below is optional — it only adds your name and avatar, and is not needed for downloading."
+                        : null
+                    }
                     busy={busy === descriptor.id}
                     blocked={busy !== null && busy !== descriptor.id}
                     notice={configErrors[descriptor.id]}

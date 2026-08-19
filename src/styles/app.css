@@ -2179,3 +2179,32 @@
 .logo--instagram {
   background: linear-gradient(135deg, #f9ce34, #ee2a7b 55%, #6228d7);
 }
+
+/* Informational sibling of .notice--danger: this is context, not a problem. */
+.notice--info {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text-secondary);
+}
+
+.notice--info .notice__icon {
+  color: var(--accent-text);
+}
+
+.quality__compat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.quality__compat input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.quality__hint {
+  color: var(--text-tertiary);
+  font-style: italic;
+}

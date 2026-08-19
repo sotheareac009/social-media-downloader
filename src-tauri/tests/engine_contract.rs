@@ -111,7 +111,7 @@ echo '{{"id":"abc123","title":"A public reel","uploader":"someone","duration":12
         &format!(r#"printf '%s\n' "$@" > {}"#, dl_argv.display()),
     );
     let (tx, _rx) = mpsc::unbounded_channel();
-    let mut running = ytdlp::start(&url, &dir, tx, None, Quality::Best, None).unwrap();
+    let mut running = ytdlp::start(&url, &dir, tx, None, Quality::Best, None, true).unwrap();
     let _ = ytdlp::wait(&mut running).await;
 
     let argv = std::fs::read_to_string(&dl_argv).unwrap();
@@ -143,7 +143,7 @@ echo '{{"id":"abc123","title":"A public reel","uploader":"someone","duration":12
 
     let (tx, _rx) = mpsc::unbounded_channel();
     let mut running =
-        ytdlp::start(&url, &dir, tx, None, Quality::Best, Some(&fake_jar)).unwrap();
+        ytdlp::start(&url, &dir, tx, None, Quality::Best, Some(&fake_jar), true).unwrap();
     let _ = ytdlp::wait(&mut running).await;
 
     let argv = std::fs::read_to_string(&jar_argv).unwrap();
@@ -177,7 +177,7 @@ exit 0"#,
     );
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut running = ytdlp::start(&url, &dir, tx, None, Quality::Best, None).expect("spawn");
+    let mut running = ytdlp::start(&url, &dir, tx, None, Quality::Best, None, true).expect("spawn");
     ytdlp::wait(&mut running).await.expect("clean exit");
 
     let mut seen = Vec::new();
@@ -204,7 +204,7 @@ exit 0"#,
 exit 1"#,
     );
     let (tx, _rx) = mpsc::unbounded_channel();
-    let mut running = ytdlp::start(&url, &dir, tx, None, Quality::Best, None).unwrap();
+    let mut running = ytdlp::start(&url, &dir, tx, None, Quality::Best, None, true).unwrap();
     match ytdlp::wait(&mut running).await {
         Err(AppError::MediaNotPublic) => {}
         other => panic!("expected MediaNotPublic, got {other:?}"),
@@ -213,7 +213,7 @@ exit 1"#,
     // ---- 4. cancellation actually kills the child --------------------------
     install_stub(&dir, "hang", r#"sleep 30"#);
     let (tx, _rx) = mpsc::unbounded_channel();
-    let mut running = ytdlp::start(&url, &dir, tx, None, Quality::Best, None).unwrap();
+    let mut running = ytdlp::start(&url, &dir, tx, None, Quality::Best, None, true).unwrap();
     running.kill().await;
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),

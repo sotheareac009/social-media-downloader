@@ -577,6 +577,7 @@ pub fn start(
     client: Option<&str>,
     quality: Quality,
     cookies: Option<&Path>,
+    prefer_compatible: bool,
 ) -> Result<Running> {
     let template = format!(
         "{PROGRESS_PREFIX} %(progress.downloaded_bytes)s %(progress.total_bytes,progress.total_bytes_estimate)s %(progress.speed)s %(progress.eta)s"
@@ -588,7 +589,7 @@ pub fn start(
     apply_client(&mut cmd, client);
     cmd.arg("--no-playlist")
         .arg("-f")
-        .arg(quality.format_selector(ffmpeg.is_some()))
+        .arg(quality.format_selector(ffmpeg.is_some(), prefer_compatible))
         .arg("-o")
         // Byte-truncated so a long caption cannot exceed the filesystem's
         // name limit; the id keeps two posts with the same title distinct.

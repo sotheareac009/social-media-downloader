@@ -24,6 +24,27 @@ use tokio::process::Command;
 
 use crate::errors::{AppError, Result};
 
+/// Whether a file on disk actually contains a video stream.
+///
+/// The authority for "is this a photo post" has to be the downloaded file, not
+/// the metadata. Trusting metadata alone caused a real failure: an Instagram
+/// reel whose JSON did not expose a video codec was treated as audio, so a
+/// still image was encoded over its soundtrack and the genuine video was
+/// deleted. Probing costs milliseconds and makes that impossible.
+///
+/// Returns `true` when the answer cannot be determined - refusing to convert
+/// is always the safe direction, since the download is already correct.
+pub async fn file_has_video(ffmpeg: &Path, file: &Path) -> bool {
+    // `None` means no video stream *or* an unprobeable file. Both resolve to
+    // "leave it alone", which is the safe direction either way.
+    match crate::download::compat::ffprobe_beside(ffmpeg) {
+        None => true,
+        Some(_) => crate::download::compat::video_codec(ffmpeg, file)
+            .await
+            .is_some(),
+    }
+}
+
 /// Build `<audio>.mp4` from a still image and an audio track.
 ///
 /// On success the audio file is removed and the new path returned. Any failure

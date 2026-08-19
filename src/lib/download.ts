@@ -39,6 +39,8 @@ export interface JobView {
   audio_only: boolean;
   /** True when a photo post was rebuilt into a video from its cover image. */
   still_image_video: boolean;
+  /** Codec the file was re-encoded from, when it wasn't Apple-playable. */
+  converted_from: string | null;
   output_path: string | null;
   /** 1-based; equals 1 unless the platform throttled us and we backed off. */
   attempt: number;
@@ -122,6 +124,8 @@ export interface QualitySettings {
   selected: Quality;
   options: QualityOption[];
   has_ffmpeg: boolean;
+  /** Prefer H.264 so files open in QuickTime and Photos. */
+  prefer_compatible: boolean;
 }
 
 /** One quality tier a specific video offers. */
@@ -217,6 +221,9 @@ export const downloadGetQuality = () =>
 
 export const downloadSetQuality = (quality: Quality) =>
   invoke<Quality>("download_set_quality", { quality });
+
+export const downloadSetCompatible = (on: boolean) =>
+  invoke<boolean>("download_set_compatible", { on });
 
 export const downloadGetDestination = () =>
   invoke<Destination>("download_get_destination");

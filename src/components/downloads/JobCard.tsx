@@ -98,6 +98,14 @@ export function JobCard({
                   — this post is a photo slideshow, so it has no video track
                 </span>
               </span>
+            ) : job.converted_from ? (
+              <span>
+                Saved · {formatBytes(job.downloaded_bytes || job.total_bytes)}
+                <span className="job__why">
+                  {" "}
+                  — converted from {job.converted_from} so it plays in QuickTime
+                </span>
+              </span>
             ) : (
               <>Saved · {formatBytes(job.downloaded_bytes || job.total_bytes)}</>
             )}

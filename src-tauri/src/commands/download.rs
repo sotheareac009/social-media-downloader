@@ -208,6 +208,8 @@ pub struct QualitySettings {
     pub options: Vec<QualityOption>,
     /// Repeated here so the picker can warn without a second round trip.
     pub has_ffmpeg: bool,
+    /// Prefer H.264 so files open in QuickTime and Photos.
+    pub prefer_compatible: bool,
 }
 
 const IG_LOGIN_LABEL: &str = "instagram-login";
@@ -223,7 +225,10 @@ const IG_LOGIN_URL: &str = "https://www.instagram.com/accounts/login/";
 /// Resolves when a `sessionid` cookie appears, which is the moment login
 /// actually succeeded. Closing the window first cancels the flow.
 #[tauri::command]
-pub async fn download_instagram_connect(app: AppHandle) -> Result<SessionStatus> {
+pub async fn download_instagram_connect(
+    app: AppHandle,
+    manager: State<'_, Arc<DownloadManager>>,
+) -> Result<SessionStatus> {
     // Reusing a stale window would show a page from a previous attempt.
     if let Some(existing) = app.get_webview_window(IG_LOGIN_LABEL) {
         let _ = existing.close();
@@ -312,24 +317,29 @@ pub async fn download_instagram_connect(app: AppHandle) -> Result<SessionStatus>
             captured_at: crate::auth::now_unix(),
         };
         if candidate.is_usable() {
-            session::save(&candidate)?;
+            let status = manager.instagram_remember(&candidate)?;
             let _ = window.close();
-            return Ok(session::status());
+            return Ok(status);
         }
     }
 }
 
+/// Cheap by design: reads a non-secret marker, so rendering a page never
+/// triggers a keychain authorization prompt.
 #[tauri::command]
-pub async fn download_instagram_status() -> Result<SessionStatus> {
-    Ok(session::status())
+pub async fn download_instagram_status(
+    manager: State<'_, Arc<DownloadManager>>,
+) -> Result<SessionStatus> {
+    Ok(manager.instagram_status())
 }
 
 /// Forget the stored session. The window's own cookies are not this app's to
 /// clear, so the user is told to sign out in the browser too if they want that.
 #[tauri::command]
-pub async fn download_instagram_disconnect() -> Result<SessionStatus> {
-    session::clear()?;
-    Ok(session::status())
+pub async fn download_instagram_disconnect(
+    manager: State<'_, Arc<DownloadManager>>,
+) -> Result<SessionStatus> {
+    manager.instagram_forget()
 }
 
 #[tauri::command]
@@ -340,6 +350,7 @@ pub async fn download_get_quality(
     Ok(QualitySettings {
         selected: manager.quality(),
         has_ffmpeg,
+        prefer_compatible: manager.prefer_compatible(),
         options: Quality::ALL
             .iter()
             .map(|q| QualityOption {
@@ -359,6 +370,14 @@ pub async fn download_set_quality(
     quality: Quality,
 ) -> Result<Quality> {
     manager.set_quality(quality)
+}
+
+#[tauri::command]
+pub async fn download_set_compatible(
+    manager: State<'_, Arc<DownloadManager>>,
+    on: bool,
+) -> Result<bool> {
+    manager.set_prefer_compatible(on)
 }
 
 #[tauri::command]

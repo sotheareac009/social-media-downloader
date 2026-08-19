@@ -25,6 +25,7 @@
 //! every invocation so the user's browser profile is never read, and the jar
 //! is a 0600 temp file deleted when the job ends. See [`session`].
 
+pub mod compat;
 pub mod cookies;
 pub mod manager;
 pub mod quality;
