@@ -47,6 +47,9 @@ const PROGRESS_PREFIX: &str = "MDPROGRESS";
 /// Marker for the engine's report of where the finished file landed.
 const PATH_PREFIX: &str = "MDPATH ";
 
+const PROFILE_LIST_ATTEMPTS: usize = 3;
+const PROFILE_LIST_BACKOFF_SECONDS: &[u64] = &[5, 15];
+
 /// Emitted for every progress line the engine prints.
 #[derive(Debug, Clone, Serialize)]
 pub struct Progress {
@@ -219,7 +222,7 @@ fn apply_client(cmd: &mut Command, client: Option<&str>) {
 
 /// The engine's own version string, for the UI's diagnostics panel.
 pub async fn version() -> Result<String> {
-    let out = Command::new(engine_path()?)
+    let out = crate::process::command(engine_path()?)
         .arg("--version")
         .stdin(Stdio::null())
         .output()
@@ -268,7 +271,7 @@ fn hardened_base(cmd: &mut Command, cookies: Option<&Path>) {
 
 /// Read metadata without downloading. Cheap enough to run on paste.
 pub async fn probe(url: &Url, client: Option<&str>, cookies: Option<&Path>) -> Result<MediaInfo> {
-    let mut cmd = Command::new(engine_path()?);
+    let mut cmd = crate::process::command(engine_path()?);
     hardened_base(&mut cmd, cookies);
     apply_client(&mut cmd, client);
     cmd.arg("--no-playlist")
@@ -379,7 +382,28 @@ pub struct ProfileListing {
 /// same profile succeeds moments later - so this retries a little harder than
 /// a single-video probe does.
 pub async fn list_profile(url: &Url) -> Result<ProfileListing> {
-    let mut cmd = Command::new(engine_path()?);
+    let mut last = AppError::NoMediaFound;
+
+    for attempt in 0..PROFILE_LIST_ATTEMPTS {
+        match list_profile_once(url).await {
+            Ok(listing) => return Ok(listing),
+            Err(AppError::TemporarilyUnavailable) if attempt + 1 < PROFILE_LIST_ATTEMPTS => {
+                last = AppError::TemporarilyUnavailable;
+                let delay = PROFILE_LIST_BACKOFF_SECONDS
+                    .get(attempt)
+                    .copied()
+                    .unwrap_or(15);
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Err(last)
+}
+
+async fn list_profile_once(url: &Url) -> Result<ProfileListing> {
+    let mut cmd = crate::process::command(engine_path()?);
     hardened_base(&mut cmd, None);
     cmd.arg("--yes-playlist")
         .arg("--flat-playlist")
@@ -503,7 +527,7 @@ async fn inspect_formats_once(
     client: Option<&str>,
     cookies: Option<&Path>,
 ) -> Result<FormatReport> {
-    let mut cmd = Command::new(engine_path()?);
+    let mut cmd = crate::process::command(engine_path()?);
     hardened_base(&mut cmd, cookies);
     apply_client(&mut cmd, client);
     cmd.arg("--no-playlist")
@@ -583,7 +607,7 @@ pub fn start(
         "{PROGRESS_PREFIX} %(progress.downloaded_bytes)s %(progress.total_bytes,progress.total_bytes_estimate)s %(progress.speed)s %(progress.eta)s"
     );
 
-    let mut cmd = Command::new(engine_path()?);
+    let mut cmd = crate::process::command(engine_path()?);
     hardened_base(&mut cmd, cookies);
     let ffmpeg = locate_ffmpeg();
     apply_client(&mut cmd, client);
@@ -755,6 +779,8 @@ fn classify_failure(stderr: &str) -> AppError {
         "rate-limit",
         "too many requests",
         "429",
+        "unexpected response from webpage request",
+        "unexpected respone from webpage request",
         "temporarily unavailable",
         "try again later",
         "unable to download webpage: http error 5",
@@ -954,6 +980,8 @@ mod tests {
         for stderr in [
             "ERROR: [TikTok] 7668241190671764757: Unable to extract universal data for rehydration; please report this issue",
             "ERROR: [TikTok] 123: Unable to extract webpage video data",
+            "ERROR: [tiktok] {videoid}: Unexpected response from webpage request; please report this issue",
+            "ERROR: [tiktok] {videoid}: Unexpected respone from webpage request; please report this issue",
             "ERROR: HTTP Error 429: Too Many Requests",
         ] {
             assert!(

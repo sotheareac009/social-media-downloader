@@ -20,6 +20,7 @@ pub mod db;
 pub mod download;
 pub mod errors;
 pub mod facebook;
+pub mod process;
 pub mod telegram;
 pub mod youtube;
 

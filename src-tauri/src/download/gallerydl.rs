@@ -24,8 +24,6 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use tokio::process::Command;
-
 use crate::download::ytdlp::{ProfileEntry, ProfileListing};
 use crate::errors::{AppError, Result};
 
@@ -85,7 +83,7 @@ pub fn locate() -> Option<PathBuf> {
 }
 
 pub async fn version() -> Option<String> {
-    let out = Command::new(locate()?)
+    let out = crate::process::command(locate()?)
         .arg("--version")
         .stdin(Stdio::null())
         .output()
@@ -102,7 +100,7 @@ pub async fn list_instagram_profile(
 ) -> Result<ProfileListing> {
     let binary = locate().ok_or(AppError::ListerMissing)?;
 
-    let mut cmd = Command::new(binary);
+    let mut cmd = crate::process::command(binary);
     cmd.arg("--dump-json")
         // Metadata only; nothing is written to disk by this call.
         .arg("--simulate")

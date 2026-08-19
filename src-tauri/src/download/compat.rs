@@ -17,8 +17,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use tokio::process::Command;
-
 use crate::errors::{AppError, Result};
 
 /// Codecs macOS plays without complaint. Everything else is re-encoded when
@@ -41,7 +39,7 @@ pub fn ffprobe_beside(ffmpeg: &Path) -> Option<PathBuf> {
 /// The first video stream's codec name, or `None` when there is no video.
 pub async fn video_codec(ffmpeg: &Path, file: &Path) -> Option<String> {
     let ffprobe = ffprobe_beside(ffmpeg)?;
-    let out = Command::new(ffprobe)
+    let out = crate::process::command(ffprobe)
         .args(["-v", "error", "-select_streams", "v:0"])
         .args(["-show_entries", "stream=codec_name", "-of", "csv=p=0"])
         .arg(file)
@@ -56,7 +54,7 @@ pub async fn video_codec(ffmpeg: &Path, file: &Path) -> Option<String> {
 
 async fn duration_seconds(ffmpeg: &Path, file: &Path) -> Option<f64> {
     let ffprobe = ffprobe_beside(ffmpeg)?;
-    let out = Command::new(ffprobe)
+    let out = crate::process::command(ffprobe)
         .args(["-v", "error", "-show_entries", "format=duration"])
         .args(["-of", "csv=p=0"])
         .arg(file)
@@ -104,7 +102,7 @@ pub async fn ensure_playable(ffmpeg: &Path, file: &Path) -> Result<Outcome> {
     }
 
     let temp = file.with_extension("compat.mp4");
-    let status = Command::new(ffmpeg)
+    let status = crate::process::command(ffmpeg)
         .args(["-loglevel", "error", "-y", "-i"])
         .arg(file)
         // veryfast keeps this in seconds for a short reel; crf 20 is visually

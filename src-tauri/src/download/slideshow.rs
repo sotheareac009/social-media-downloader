@@ -20,8 +20,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use tokio::process::Command;
-
 use crate::errors::{AppError, Result};
 
 /// Whether a file on disk actually contains a video stream.
@@ -60,7 +58,7 @@ pub async fn build_still_video(
 
     let output = audio_path.with_extension("mp4");
 
-    let status = Command::new(ffmpeg)
+    let status = crate::process::command(ffmpeg)
         .arg("-loglevel")
         .arg("error")
         .arg("-y")

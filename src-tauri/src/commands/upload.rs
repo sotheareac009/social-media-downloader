@@ -123,7 +123,7 @@ pub async fn upload_video_meta(path: String) -> Result<Option<VideoMeta>> {
         return Ok(None);
     };
 
-    let out = tokio::process::Command::new(ffprobe)
+    let out = crate::process::command(ffprobe)
         .args([
             "-v", "error",
             "-select_streams", "v:0",
@@ -177,7 +177,7 @@ pub async fn upload_video_thumbnail(path: String) -> Result<Option<String>> {
 
     // Seek ~1s in (past black intro frames), grab one frame, scale to a
     // thumbnail, and write JPEG to stdout.
-    let out = tokio::process::Command::new(ffmpeg)
+    let out = crate::process::command(ffmpeg)
         .args(["-ss", "1", "-i"])
         .arg(&path)
         .args([
