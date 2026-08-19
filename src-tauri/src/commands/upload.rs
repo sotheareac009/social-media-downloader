@@ -5,7 +5,7 @@
 //! YouTube is implemented so far; the others report why they aren't ready, so
 //! the selector can show the whole set honestly.
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::auth::manager::AuthManager;
 use crate::auth::ProviderId;
@@ -26,9 +26,18 @@ pub struct UploadTarget {
 
 /// Which platforms the Upload screen can offer, and their readiness.
 #[tauri::command]
-pub async fn upload_targets(manager: State<'_, AuthManager>) -> Result<Vec<UploadTarget>> {
-    // YouTube is ready when Google is connected (the token carries the upload
-    // scope once the account is reconnected after enabling it).
+pub async fn upload_targets(
+    app: AppHandle,
+    manager: State<'_, AuthManager>,
+) -> Result<Vec<UploadTarget>> {
+    // Telegram is ready when a session exists (non-secret file check).
+    let telegram_ready = app
+        .path()
+        .app_data_dir()
+        .map(|d| crate::telegram::status(&d).connected)
+        .unwrap_or(false);
+
+    // YouTube is ready when Google is connected.
     let youtube_ready = manager.access_token(ProviderId::Google).await.is_ok();
 
     Ok(vec![
@@ -54,8 +63,12 @@ pub async fn upload_targets(manager: State<'_, AuthManager>) -> Result<Vec<Uploa
             id: "telegram".into(),
             name: "Telegram".into(),
             accepts: "video,photo".into(),
-            ready: false,
-            reason: Some("Telegram upload isn't built yet.".into()),
+            ready: telegram_ready,
+            reason: if telegram_ready {
+                None
+            } else {
+                Some("Connect Telegram first (Telegram page → sign in).".into())
+            },
         },
     ])
 }
@@ -89,6 +102,63 @@ pub async fn upload_pick_files(app: AppHandle, kind: String) -> Result<Vec<Strin
 pub async fn upload_youtube_channels(manager: State<'_, AuthManager>) -> Result<Vec<Channel>> {
     let cred = manager.access_token(ProviderId::Google).await?;
     youtube::my_channels(&reqwest::Client::new(), &cred.access_token).await
+}
+
+/// A video's dimensions and duration, for correct Telegram video attributes.
+#[derive(serde::Serialize)]
+pub struct VideoMeta {
+    pub width: u32,
+    pub height: u32,
+    pub duration: f64,
+}
+
+/// Probe a video with ffprobe. `None` when ffmpeg/ffprobe is missing or the
+/// probe fails - the caller then sends without video attributes.
+#[tauri::command]
+pub async fn upload_video_meta(path: String) -> Result<Option<VideoMeta>> {
+    let Some(ffmpeg) = crate::download::ytdlp::locate_ffmpeg() else {
+        return Ok(None);
+    };
+    let Some(ffprobe) = crate::download::compat::ffprobe_beside(&ffmpeg) else {
+        return Ok(None);
+    };
+
+    let out = tokio::process::Command::new(ffprobe)
+        .args([
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height:format=duration",
+            "-of", "json",
+        ])
+        .arg(&path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .map_err(|_| AppError::EngineMissing)?;
+
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).map_err(|_| AppError::MalformedProviderResponse)?;
+
+    let stream = v.get("streams").and_then(|s| s.get(0));
+    let width = stream.and_then(|s| s.get("width")).and_then(|x| x.as_u64());
+    let height = stream.and_then(|s| s.get("height")).and_then(|x| x.as_u64());
+    let duration = v
+        .get("format")
+        .and_then(|f| f.get("duration"))
+        .and_then(|d| d.as_str())
+        .and_then(|s| s.parse::<f64>().ok());
+
+    match (width, height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => Ok(Some(VideoMeta {
+            width: w as u32,
+            height: h as u32,
+            duration: duration.unwrap_or(0.0),
+        })),
+        _ => Ok(None),
+    }
 }
 
 /// Extract a poster frame from a video, as a base64 `data:` URL.

@@ -1,9 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
+  telegramListChats,
+  telegramSendFile,
+  type TelegramChat,
+} from "@/lib/telegram";
+import {
   uploadPickFiles,
   uploadVideoThumbnail,
   uploadTargets,
+  uploadVideoMeta,
   uploadYoutube,
   uploadYoutubeChannels,
   type Privacy,
@@ -24,6 +30,13 @@ interface Item {
   error?: string;
 }
 
+/** Read a local file's bytes through the asset protocol. */
+async function readFileBytes(path: string): Promise<Uint8Array> {
+  const res = await fetch(convertFileSrc(path));
+  const buf = await res.arrayBuffer();
+  return new Uint8Array(buf);
+}
+
 /** Filename without its extension, used as each video's default title. */
 function baseName(path: string): string {
   const name = path.split("/").pop() ?? path;
@@ -34,10 +47,16 @@ function baseName(path: string): string {
 export function UploadPage() {
   const toast = useToast();
   const [targets, setTargets] = useState<UploadTarget[] | null>(null);
-  const [targetId, setTargetId] = useState("youtube");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [items, setItems] = useState<Item[]>([]);
   const [privacy, setPrivacy] = useState<Privacy>("unlisted");
-  const [channel, setChannel] = useState<YoutubeChannel | null | "none">(null);
+  const [channels, setChannels] = useState<YoutubeChannel[] | null | "none">(null);
+  const [chosenChannel, setChosenChannel] = useState<string | null>(null);
+  // Which platform's destination dropdown is open (null = none).
+  const [openMenu, setOpenMenu] = useState<string | null>(null);
+  const [tgChats, setTgChats] = useState<TelegramChat[] | null | "error">(null);
+  const [tgSelected, setTgSelected] = useState<Set<string>>(new Set());
+  const [tgSearch, setTgSearch] = useState("");
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
 
@@ -49,35 +68,97 @@ export function UploadPage() {
     };
   }, []);
 
+  // Close the destination dropdown on any outside click.
+  useEffect(() => {
+    if (!openMenu) return;
+    const close = () => setOpenMenu(null);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [openMenu]);
+
   useEffect(() => {
     void (async () => {
       const list = await uploadTargets().catch(() => []);
       if (!mounted.current) return;
       setTargets(list);
       const firstReady = list.find((t) => t.ready);
-      if (firstReady) setTargetId(firstReady.id);
+      if (firstReady) setSelected(new Set([firstReady.id]));
     })();
   }, []);
 
-  const target = useMemo(
-    () => targets?.find((t) => t.id === targetId) ?? null,
-    [targets, targetId],
+  const chosen = useMemo(
+    () => (targets ?? []).filter((t) => selected.has(t.id) && t.ready),
+    [targets, selected],
   );
-  const accepts = target?.accepts.includes("video") ? "video" : "photo";
+  const youtubeChosen = chosen.some((t) => t.id === "youtube");
+  const telegramChosen = chosen.some((t) => t.id === "telegram");
+  // File kind: video if any chosen platform takes video, else photo.
+  const accepts =
+    chosen.length === 0 || chosen.some((t) => t.accepts.includes("video"))
+      ? "video"
+      : "photo";
+
+  const toggleTarget = useCallback((t: UploadTarget) => {
+    if (!t.ready) return; // can't select a platform that isn't usable yet
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(t.id)) next.delete(t.id);
+      else next.add(t.id);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
-    if (target?.id !== "youtube" || !target.ready) {
-      setChannel(null);
+    if (!youtubeChosen) {
+      setChannels(null);
       return;
     }
     let alive = true;
     uploadYoutubeChannels()
-      .then((cs) => alive && setChannel(cs[0] ?? "none"))
-      .catch(() => alive && setChannel(null));
+      .then((cs) => {
+        if (!alive) return;
+        if (cs.length === 0) {
+          setChannels("none");
+        } else {
+          setChannels(cs);
+          setChosenChannel((prev) => prev ?? cs[0].id);
+        }
+      })
+      .catch(() => alive && setChannels(null));
     return () => {
       alive = false;
     };
-  }, [target?.id, target?.ready]);
+  }, [youtubeChosen]);
+
+  useEffect(() => {
+    if (!telegramChosen) return;
+    let alive = true;
+    setTgChats(null);
+    telegramListChats()
+      .then((cs) => alive && setTgChats(cs))
+      .catch(() => alive && setTgChats("error"));
+    return () => {
+      alive = false;
+    };
+  }, [telegramChosen]);
+
+  // Per-platform destination list + the chosen one, keyed by platform id.
+  const destinations = useMemo(
+    (): Record<string, { id: string; name: string; avatar: string | null }[]> => ({
+      youtube:
+        Array.isArray(channels)
+          ? channels.map((c) => ({ id: c.id, name: c.title, avatar: c.thumbnail }))
+          : [],
+    }),
+    [channels],
+  );
+  const chosenId: Record<string, string | null> = { youtube: chosenChannel };
+  const setChosen: Record<string, (id: string) => void> = { youtube: setChosenChannel };
+
+  function activeDest(platform: string) {
+    const list = destinations[platform] ?? [];
+    return list.find((d) => d.id === chosenId[platform]) ?? list[0] ?? null;
+  }
 
   const addFiles = useCallback(async () => {
     try {
@@ -109,9 +190,8 @@ export function UploadPage() {
   }, []);
 
   const publish = useCallback(async () => {
-    if (!target?.ready || items.length === 0) return;
+    if (chosen.length === 0 || items.length === 0) return;
     setBusy(true);
-    // Reset any previous outcomes so a re-run reads cleanly.
     setItems((prev) => prev.map((i) => ({ ...i, status: "pending", error: undefined })));
 
     let ok = 0;
@@ -119,21 +199,41 @@ export function UploadPage() {
       setItems((prev) =>
         prev.map((i) => (i.path === item.path ? { ...i, status: "uploading" } : i)),
       );
-      try {
-        if (target.id === "youtube") {
-          const perTitle = item.title.trim() || baseName(item.path);
-          await uploadYoutube(item.path, perTitle, item.description, privacy);
-        } else {
-          throw new Error("That platform isn't available yet.");
+      const perTitle = item.title.trim() || baseName(item.path);
+      const failures: string[] = [];
+
+      // Send this file to every chosen platform.
+      let bytes: Uint8Array | null = null; // read once, reused across chats
+      for (const t of chosen) {
+        try {
+          if (t.id === "youtube") {
+            await uploadYoutube(item.path, perTitle, item.description, privacy);
+          } else if (t.id === "telegram") {
+            if (tgSelected.size === 0) throw new Error("pick at least one chat");
+            if (!bytes) bytes = await readFileBytes(item.path);
+            const fileName = item.path.split("/").pop() ?? "video.mp4";
+            // Dimensions/duration so Telegram keeps the correct aspect ratio.
+            const meta = await uploadVideoMeta(item.path).catch(() => null);
+            for (const chatId of tgSelected) {
+              await telegramSendFile(chatId, bytes, fileName, item.description || perTitle, meta);
+            }
+          } else {
+            throw new Error(`${t.name} upload isn't available yet.`);
+          }
+        } catch (e) {
+          failures.push(`${t.name}: ${messageOf(e)}`);
         }
+      }
+
+      if (failures.length === 0) {
         ok += 1;
         setItems((prev) =>
           prev.map((i) => (i.path === item.path ? { ...i, status: "done" } : i)),
         );
-      } catch (e) {
+      } else {
         setItems((prev) =>
           prev.map((i) =>
-            i.path === item.path ? { ...i, status: "failed", error: messageOf(e) } : i,
+            i.path === item.path ? { ...i, status: "failed", error: failures.join(" · ") } : i,
           ),
         );
       }
@@ -141,11 +241,12 @@ export function UploadPage() {
 
     if (mounted.current) setBusy(false);
     const failed = items.length - ok;
-    if (failed === 0) toast("success", `Uploaded ${ok} ${ok === 1 ? "video" : "videos"}.`);
-    else toast(ok > 0 ? "info" : "error", `${ok} uploaded, ${failed} failed.`);
-  }, [target, items, privacy, toast]);
+    const dests = chosen.map((t) => t.name).join(", ");
+    if (failed === 0) toast("success", `Uploaded ${ok} to ${dests}.`);
+    else toast(ok > 0 ? "info" : "error", `${ok} done, ${failed} with errors.`);
+  }, [chosen, items, privacy, tgSelected, toast]);
 
-  const canPublish = target?.ready === true && items.length > 0 && !busy;
+  const canPublish = chosen.length > 0 && items.length > 0 && !busy;
 
   return (
     <div className="page">
@@ -171,32 +272,88 @@ export function UploadPage() {
               <button
                 key={t.id}
                 type="button"
-                className={`up-target ${targetId === t.id ? "up-target--active" : ""} ${
+                className={`up-target ${selected.has(t.id) && t.ready ? "up-target--active" : ""} ${
                   t.ready ? "" : "up-target--off"
                 }`.trim()}
                 style={{ ["--brand" as string]: brand }}
-                onClick={() => setTargetId(t.id)}
+                onClick={() => toggleTarget(t)}
                 title={t.reason ?? undefined}
+                aria-pressed={selected.has(t.id) && t.ready}
               >
                 <span className="up-target__edge" />
                 <SourceLogo source={t.id as SourceId} />
                 <span className="up-target__text">
                   <span className="up-target__name">{t.name}</span>
-                  <span
-                    className={`up-target__pill ${t.ready ? "up-target__pill--ok" : "up-target__pill--off"}`}
-                  >
-                    {t.ready ? (
-                      <>
-                        <CheckIcon size={10} /> Ready
-                      </>
-                    ) : (
-                      "Not ready"
-                    )}
-                  </span>
+                  {t.id === "telegram" && t.ready ? (
+                    <span className="up-target__acct">
+                      <span className="up-target__acctname">
+                        {tgSelected.size === 0
+                          ? "Choose chats below"
+                          : `${tgSelected.size} chat${tgSelected.size === 1 ? "" : "s"} selected`}
+                      </span>
+                    </span>
+                  ) : (() => {
+                    const list = destinations[t.id] ?? [];
+                    const dest = activeDest(t.id);
+                    const many = list.length > 1;
+                    if (!dest) {
+                      return (
+                        <span
+                          className={`up-target__pill ${t.ready ? "up-target__pill--ok" : "up-target__pill--off"}`}
+                        >
+                          {t.ready ? (
+                            <>
+                              <CheckIcon size={10} /> Ready
+                            </>
+                          ) : (
+                            "Not ready"
+                          )}
+                        </span>
+                      );
+                    }
+                    return (
+                      <span
+                        className={`up-target__acct ${many ? "up-target__acct--menu" : ""}`.trim()}
+                        role={many ? "button" : undefined}
+                        onClick={(e) => {
+                          if (!many) return;
+                          e.stopPropagation();
+                          setOpenMenu((m) => (m === t.id ? null : t.id));
+                        }}
+                        title={many ? "Choose where to post" : undefined}
+                      >
+                        {dest.avatar && (
+                          <img src={dest.avatar} alt="" referrerPolicy="no-referrer" />
+                        )}
+                        <span className="up-target__acctname">{dest.name}</span>
+                        {many && <span className="up-target__caret">▾</span>}
+                        {many && openMenu === t.id && (
+                          <span className="up-menu" onClick={(e) => e.stopPropagation()}>
+                            {list.map((d) => (
+                              <button
+                                key={d.id}
+                                type="button"
+                                className={`up-menu__item ${d.id === dest.id ? "up-menu__item--on" : ""}`.trim()}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setChosen[t.id]?.(d.id);
+                                  setOpenMenu(null);
+                                }}
+                              >
+                                {d.avatar && <img src={d.avatar} alt="" referrerPolicy="no-referrer" />}
+                                <span>{d.name}</span>
+                                {d.id === dest.id && <CheckIcon size={12} />}
+                              </button>
+                            ))}
+                          </span>
+                        )}
+                      </span>
+                    );
+                  })()}
                 </span>
-                {targetId === t.id && (
-                  <span className="up-target__check">
-                    <CheckIcon size={13} />
+                {t.ready && (
+                  <span className={`up-target__mark ${selected.has(t.id) ? "up-target__mark--on" : ""}`.trim()}>
+                    {selected.has(t.id) && <CheckIcon size={12} />}
                   </span>
                 )}
               </button>
@@ -204,22 +361,67 @@ export function UploadPage() {
           })}
         </div>
 
-        {target && !target.ready && target.reason && (
-          <div className="notice notice--danger" style={{ margin: "12px 0 0" }}>
-            <span className="notice__icon"><AlertIcon size={14} /></span>
-            <div>{target.reason}</div>
+        {telegramChosen && (
+          <div className="tg-picker">
+            <div className="tg-picker__head">
+              <span className="tg-picker__title">Telegram destinations</span>
+              {tgSelected.size > 0 && (
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--sm"
+                  onClick={() => setTgSelected(new Set())}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <input
+              className="tg-field__input"
+              style={{ marginBottom: 8 }}
+              placeholder="Search groups & channels…"
+              value={tgSearch}
+              onChange={(e) => setTgSearch(e.target.value)}
+            />
+            <div className="tg-picker__list">
+              {tgChats === null && <div className="up-menu__note">Loading your chats…</div>}
+              {tgChats === "error" && (
+                <div className="up-menu__note">Couldn't load chats. Reconnect Telegram on its page.</div>
+              )}
+              {Array.isArray(tgChats) && tgChats.length === 0 && (
+                <div className="up-menu__note">No groups or channels found.</div>
+              )}
+              {Array.isArray(tgChats) &&
+                tgChats
+                  .filter((c) => c.title.toLowerCase().includes(tgSearch.trim().toLowerCase()))
+                  .map((c) => {
+                    const on = tgSelected.has(c.id);
+                    return (
+                      <button
+                        key={c.id}
+                        type="button"
+                        className={`tg-picker__item ${on ? "tg-picker__item--on" : ""}`.trim()}
+                        onClick={() =>
+                          setTgSelected((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(c.id)) next.delete(c.id);
+                            else next.add(c.id);
+                            return next;
+                          })
+                        }
+                      >
+                        <span className={`tg-picker__check ${on ? "tg-picker__check--on" : ""}`}>
+                          {on && <CheckIcon size={12} />}
+                        </span>
+                        <span className="tg-picker__kind">{c.kind === "channel" ? "📢" : "👥"}</span>
+                        <span className="tg-picker__name">{c.title}</span>
+                      </button>
+                    );
+                  })}
+            </div>
           </div>
         )}
 
-        {target?.id === "youtube" && target.ready && channel && channel !== "none" && (
-          <div className="up-channel">
-            {channel.thumbnail && <img src={channel.thumbnail} alt="" />}
-            <span>
-              Uploading to <strong>{channel.title}</strong>
-            </span>
-          </div>
-        )}
-        {target?.id === "youtube" && channel === "none" && (
+        {youtubeChosen && channels === "none" && (
           <div className="notice notice--danger" style={{ margin: "12px 0 0" }}>
             <span className="notice__icon"><AlertIcon size={14} /></span>
             <div>This Google account has no YouTube channel yet. Create one on youtube.com first.</div>
@@ -307,10 +509,10 @@ export function UploadPage() {
           </ul>
         )}
 
-        {target?.id === "youtube" && (
+        {youtubeChosen && (
           <>
             <label className="tg-field__label" htmlFor="up-privacy" style={{ marginTop: 16 }}>
-              Visibility
+              YouTube visibility
             </label>
             <select
               id="up-privacy"
@@ -336,7 +538,9 @@ export function UploadPage() {
           >
             {busy
               ? "Uploading…"
-              : `Upload ${items.length > 1 ? `${items.length} to` : "to"} ${target?.name ?? "…"}`}
+              : chosen.length === 0
+                ? "Pick a platform"
+                : `Upload ${items.length > 1 ? `${items.length} ` : ""}to ${chosen.map((t) => t.name).join(", ")}`}
           </Button>
         </div>
       </div>

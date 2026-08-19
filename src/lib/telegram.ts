@@ -101,7 +101,7 @@ export const telegramClearConfig = () =>
 
 export const telegramStatus = () => invoke<TelegramStatus>("telegram_status");
 
-const telegramGetSession = () =>
+export const telegramGetSession = () =>
   invoke<string | null>("telegram_get_session");
 
 const telegramSaveSession = (session: string) =>
@@ -112,6 +112,110 @@ export const telegramClearSession = () =>
 
 const telegramSetDisplayName = (name: string) =>
   invoke<TelegramStatus>("telegram_set_display_name", { name });
+
+// ------------------------------------------------------------- upload
+
+export interface TelegramChat {
+  /** Peer id as a string (BigInt-safe). */
+  id: string;
+  title: string;
+  kind: "group" | "channel";
+}
+
+/** A connected client kept alive across upload actions, from the stored session. */
+let sharedClient: TelegramClient | null = null;
+
+async function connectedClient(): Promise<TelegramClient> {
+  if (sharedClient && sharedClient.connected) return sharedClient;
+  const config = await telegramGetConfig();
+  const session = await telegramGetSession();
+  if (!config.configured || !session) {
+    throw new TelegramLoginError("Telegram isn't connected. Sign in on the Telegram page.");
+  }
+  const client = new TelegramClient(
+    new StringSession(session),
+    config.api_id,
+    config.api_hash,
+    { connectionRetries: 3, useWSS: true, timeout: 15, baseLogger: new Logger(LogLevel.NONE) },
+  );
+  await client.connect();
+  sharedClient = client;
+  return client;
+}
+
+/** Groups and channels the signed-in account belongs to, for the picker. */
+export async function telegramListChats(): Promise<TelegramChat[]> {
+  const client = await connectedClient();
+  const dialogs = await client.getDialogs({ limit: 500 });
+  const out: TelegramChat[] = [];
+  for (const d of dialogs) {
+    // Groups and channels only — skip 1:1 user chats.
+    if (d.isGroup || d.isChannel) {
+      out.push({
+        id: String(d.id),
+        title: d.title || d.name || "Untitled",
+        kind: d.isChannel && !d.isGroup ? "channel" : "group",
+      });
+    }
+  }
+  return out;
+}
+
+/** Send a file (already loaded as bytes) to a chat, with an optional caption. */
+export interface SendVideoMeta {
+  width: number;
+  height: number;
+  duration: number;
+}
+
+export async function telegramSendFile(
+  chatId: string,
+  bytes: Uint8Array,
+  fileName: string,
+  caption: string,
+  videoMeta?: SendVideoMeta | null,
+): Promise<void> {
+  const client = await connectedClient();
+  const { CustomFile } = await import("telegram/client/uploads");
+
+  // Upload the in-memory bytes ourselves, then send the resulting handle.
+  //
+  // Why not just pass the file to sendFile: GramJS's default upload path reads
+  // large CustomFiles from a file *path* (empty in a browser → throws), and a
+  // raw browser File is mishandled by _fileToMedia. Uploading via uploadFile
+  // with maxBufferSize ≥ the file size forces the in-memory buffer path, which
+  // works at any size we can hold in memory.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const toUpload = new CustomFile(fileName, bytes.length, "", bytes as any);
+  const handle = await client.uploadFile({
+    file: toUpload,
+    workers: 1,
+    maxBufferSize: bytes.length + 1024,
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const attributes: any[] = [new Api.DocumentAttributeFilename({ fileName })];
+  // Telegram needs the video's dimensions/duration or it renders the preview
+  // with a broken aspect ratio. Present only for real videos.
+  if (videoMeta && videoMeta.width > 0 && videoMeta.height > 0) {
+    attributes.push(
+      new Api.DocumentAttributeVideo({
+        duration: Math.round(videoMeta.duration),
+        w: videoMeta.width,
+        h: videoMeta.height,
+        supportsStreaming: true,
+      }),
+    );
+  }
+
+  await client.sendFile(chatId, {
+    file: handle,
+    caption: caption || undefined,
+    forceDocument: false,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    attributes: attributes as any,
+  });
+}
 
 // ------------------------------------------------------------- login flow
 

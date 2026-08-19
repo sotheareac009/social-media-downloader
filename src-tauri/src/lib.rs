@@ -100,6 +100,7 @@ pub fn run() {
             commands::upload::upload_targets,
             commands::upload::upload_pick_files,
             commands::upload::upload_video_thumbnail,
+            commands::upload::upload_video_meta,
             commands::upload::upload_youtube,
             commands::upload::upload_youtube_channels,
             commands::telegram::telegram_get_config,

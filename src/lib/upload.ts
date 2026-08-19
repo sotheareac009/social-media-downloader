@@ -30,6 +30,16 @@ export const uploadPickFiles = (kind: "video" | "photo" | "any") =>
 export const uploadVideoThumbnail = (path: string) =>
   invoke<string | null>("upload_video_thumbnail", { path });
 
+export interface VideoMeta {
+  width: number;
+  height: number;
+  duration: number;
+}
+
+/** Video dimensions + duration (for Telegram video attributes), or null. */
+export const uploadVideoMeta = (path: string) =>
+  invoke<VideoMeta | null>("upload_video_meta", { path });
+
 /** Upload a video to YouTube. Resolves to the new video id. */
 export const uploadYoutube = (
   filePath: string,
