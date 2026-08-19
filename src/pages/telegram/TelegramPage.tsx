@@ -52,7 +52,7 @@ export function TelegramPage() {
         if (cfg.configured && st.connected) {
           const ok = await telegramValidateSession(cfg).catch(() => false);
           if (mounted.current && !ok) {
-            setStatus({ connected: false, connected_at: null });
+            setStatus({ connected: false, connected_at: null, display_name: null });
           }
         }
       } finally {

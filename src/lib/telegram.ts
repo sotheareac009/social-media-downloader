@@ -85,6 +85,7 @@ export interface TelegramConfig {
 export interface TelegramStatus {
   connected: boolean;
   connected_at: number | null;
+  display_name: string | null;
 }
 
 // ---------------------------------------------------------------- commands
@@ -108,6 +109,9 @@ const telegramSaveSession = (session: string) =>
 
 export const telegramClearSession = () =>
   invoke<TelegramStatus>("telegram_clear_session");
+
+const telegramSetDisplayName = (name: string) =>
+  invoke<TelegramStatus>("telegram_set_display_name", { name });
 
 // ------------------------------------------------------------- login flow
 
@@ -219,6 +223,19 @@ export class TelegramLogin {
       throw new TelegramLoginError("Signed in, but no session was produced.");
     }
     await telegramSaveSession(session);
+
+    // Best-effort: record the account's display name for the Accounts list.
+    try {
+      const me = await client.getMe();
+      const name =
+        [me.firstName, me.lastName].filter(Boolean).join(" ") ||
+        me.username ||
+        "Telegram account";
+      await telegramSetDisplayName(name);
+    } catch {
+      /* the session is saved; a missing name is cosmetic */
+    }
+
     await safeDisconnect(client);
     this.client = null;
   }

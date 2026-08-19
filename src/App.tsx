@@ -4,6 +4,9 @@ import { DownloadsPage } from "@/pages/downloads/DownloadsPage";
 import { HomePage } from "@/pages/home/HomePage";
 import { TelegramPage } from "@/pages/telegram/TelegramPage";
 import { SettingsPage } from "@/pages/settings/SettingsPage";
+import { FacebookPage } from "@/pages/facebook/FacebookPage";
+import { UploadPage } from "@/pages/upload/UploadPage";
+import { authGetAccounts, subscribeToAuthEvents } from "@/lib/auth";
 import { ToastProvider } from "@/components/ui/Toast";
 import {
   BoltIcon,
@@ -13,11 +16,12 @@ import {
   SendIcon,
   SlidersIcon,
   SunIcon,
+  UploadIcon,
   UsersIcon,
 } from "@/components/ui/icons";
 
 type Theme = "light" | "dark";
-type Route = "home" | "accounts" | "downloads" | "telegram" | "settings";
+type Route = "home" | "accounts" | "downloads" | "upload" | "telegram" | "facebook" | "settings";
 const THEME_KEY = "md.theme";
 
 export default function App() {
@@ -27,6 +31,27 @@ export default function App() {
   // Home is the landing page: it reports what's ready before you try to use
   // it, which is the difference between "nothing works" and "install yt-dlp".
   const [route, setRoute] = useState<Route>("home");
+  // The Facebook menu item appears only once a Facebook account is connected.
+  const [facebookConnected, setFacebookConnected] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    const check = () =>
+      authGetAccounts()
+        .then((list) => alive && setFacebookConnected(list.some((a) => a.provider === "facebook" && a.connected)))
+        .catch(() => {});
+    void check();
+    // Keep the menu in sync when an account connects or disconnects.
+    const pending = subscribeToAuthEvents({ onSuccess: check, onDisconnected: check });
+    return () => {
+      alive = false;
+      void pending.then((un) => un());
+    };
+  }, []);
+
+  useEffect(() => {
+    if (route === "facebook" && !facebookConnected) setRoute("accounts");
+  }, [route, facebookConnected]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -40,6 +65,7 @@ export default function App() {
         <Sidebar
           theme={theme}
           route={route}
+          facebookConnected={facebookConnected}
           onNavigate={setRoute}
           onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
         />
@@ -48,8 +74,10 @@ export default function App() {
           <div className="main__scroll">
             {route === "home" && <HomePage onNavigate={setRoute} />}
             {route === "downloads" && <DownloadsPage />}
-            {route === "accounts" && <AccountsPage />}
+            {route === "upload" && <UploadPage />}
+            {route === "accounts" && <AccountsPage onNavigate={setRoute} />}
             {route === "telegram" && <TelegramPage />}
+            {route === "facebook" && <FacebookPage />}
             {route === "settings" && <SettingsPage />}
           </div>
         </main>
@@ -61,11 +89,13 @@ export default function App() {
 function Sidebar({
   theme,
   route,
+  facebookConnected,
   onNavigate,
   onToggleTheme,
 }: {
   theme: Theme;
   route: Route;
+  facebookConnected: boolean;
   onNavigate: (r: Route) => void;
   onToggleTheme: () => void;
 }) {
@@ -104,6 +134,16 @@ function Sidebar({
           Downloads
         </button>
         <button
+          className={`navitem ${route === "upload" ? "navitem--active" : ""}`}
+          type="button"
+          onClick={() => onNavigate("upload")}
+        >
+          <span className="navitem__icon">
+            <UploadIcon size={16} />
+          </span>
+          Upload
+        </button>
+        <button
           className={`navitem ${route === "telegram" ? "navitem--active" : ""}`}
           type="button"
           onClick={() => onNavigate("telegram")}
@@ -113,6 +153,18 @@ function Sidebar({
           </span>
           Telegram
         </button>
+        {facebookConnected && (
+          <button
+            className={`navitem ${route === "facebook" ? "navitem--active" : ""}`}
+            type="button"
+            onClick={() => onNavigate("facebook")}
+          >
+            <span className="navitem__icon">
+              <FacebookGlyph />
+            </span>
+            Facebook
+          </button>
+        )}
         <button
           className={`navitem ${route === "accounts" ? "navitem--active" : ""}`}
           type="button"
@@ -148,5 +200,13 @@ function Sidebar({
         </button>
       </div>
     </aside>
+  );
+}
+
+function FacebookGlyph() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M14.1 22v-8.6h2.9l.44-3.36H14.1V7.9c0-.97.27-1.63 1.66-1.63h1.78V3.26c-.31-.04-1.37-.13-2.6-.13-2.57 0-4.33 1.57-4.33 4.45v2.48H7.7v3.36h2.9V22z" />
+    </svg>
   );
 }

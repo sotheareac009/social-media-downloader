@@ -19,7 +19,9 @@ pub mod config;
 pub mod db;
 pub mod download;
 pub mod errors;
+pub mod facebook;
 pub mod telegram;
+pub mod youtube;
 
 use std::sync::Arc;
 
@@ -91,12 +93,21 @@ pub fn run() {
             commands::download::download_reset_destination,
             commands::download::download_browse_destination,
             commands::download::download_reveal,
+            commands::facebook::facebook_list_pages,
+            commands::facebook::facebook_pick_photo,
+            commands::facebook::facebook_upload_photo,
+            commands::facebook::facebook_recent_downloads,
+            commands::upload::upload_targets,
+            commands::upload::upload_pick_file,
+            commands::upload::upload_youtube,
+            commands::upload::upload_youtube_channels,
             commands::telegram::telegram_get_config,
             commands::telegram::telegram_set_config,
             commands::telegram::telegram_clear_config,
             commands::telegram::telegram_status,
             commands::telegram::telegram_get_session,
             commands::telegram::telegram_save_session,
+            commands::telegram::telegram_set_display_name,
             commands::telegram::telegram_clear_session,
         ])
         .run(tauri::generate_context!())

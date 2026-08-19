@@ -22,9 +22,14 @@ import {
   type SessionStatus,
 } from "@/lib/download";
 import { useToast } from "@/components/ui/Toast";
-import { AlertIcon, CheckIcon, ShieldIcon, UsersIcon } from "@/components/ui/icons";
+import { AlertIcon, CheckIcon, ShieldIcon, TelegramIcon, UsersIcon } from "@/components/ui/icons";
+import { telegramStatus as fetchTelegramStatus, type TelegramStatus } from "@/lib/telegram";
 
-export function AccountsPage() {
+export function AccountsPage({
+  onNavigate,
+}: {
+  onNavigate?: (r: "telegram") => void;
+}) {
   const toast = useToast();
   const [providers, setProviders] = useState<ProviderDescriptor[] | null>(null);
   const [accounts, setAccounts] = useState<Record<string, AccountView>>({});
@@ -40,6 +45,7 @@ export function AccountsPage() {
   const [igBusy, setIgBusy] = useState(false);
   const [fbDownload, setFbDownload] = useState<SessionStatus | null>(null);
   const [fbBusy, setFbBusy] = useState(false);
+  const [telegram, setTelegram] = useState<TelegramStatus | null>(null);
 
   // Guards a state update landing after unmount when a flow is abandoned.
   const mounted = useRef(true);
@@ -71,6 +77,9 @@ export function AccountsPage() {
           .catch(() => {});
         facebookStatus()
           .then((st) => mounted.current && setFbDownload(st))
+          .catch(() => {});
+        fetchTelegramStatus()
+          .then((st) => mounted.current && setTelegram(st))
           .catch(() => {});
       } catch (e) {
         if (!mounted.current) return;
@@ -293,6 +302,11 @@ export function AccountsPage() {
             })}
       </div>
 
+      <TelegramAccountCard
+        status={telegram}
+        onOpen={() => onNavigate?.("telegram")}
+      />
+
       <Assurance connectedCount={connectedCount} />
     </div>
   );
@@ -336,6 +350,56 @@ function secureStoreName(): string {
   if (ua.includes("Mac")) return "your macOS Keychain";
   if (ua.includes("Windows")) return "Windows Credential Manager";
   return "your system's Secret Service keyring";
+}
+
+/**
+ * Telegram on the Accounts list, alongside the OAuth providers. Telegram's
+ * actual sign-in is a multi-step phone flow that lives on its own page, so
+ * this card reflects status and links there rather than logging in inline.
+ */
+function TelegramAccountCard({
+  status,
+  onOpen,
+}: {
+  status: TelegramStatus | null;
+  onOpen: () => void;
+}) {
+  const connected = status?.connected === true;
+  return (
+    <article
+      className={`card ${connected ? "card--connected" : ""}`.trim()}
+      style={{ ["--brand" as string]: "#229ED9", marginTop: 12 }}
+    >
+      <span className="card__edge" />
+      <div className="card__body">
+        <div className="logo logo--telegram" aria-hidden>
+          <TelegramIcon size={21} className="" />
+        </div>
+        <div className="card__text">
+          <h2 className="card__name">
+            Telegram
+            {connected ? (
+              <span className="badge badge--success">
+                <CheckIcon size={11} /> Connected
+              </span>
+            ) : (
+              <span className="badge badge--muted">Not connected</span>
+            )}
+          </h2>
+          <p className="card__meta">
+            {connected
+              ? status?.display_name ?? "Signed in"
+              : "Sign in with your phone number"}
+          </p>
+        </div>
+        <div className="card__actions">
+          <button className="btn btn--ghost" type="button" onClick={onOpen}>
+            {connected ? "Manage" : "Connect"}
+          </button>
+        </div>
+      </div>
+    </article>
+  );
 }
 
 function Assurance({ connectedCount }: { connectedCount: number }) {

@@ -2431,3 +2431,108 @@
   background: color-mix(in srgb, #229ed9 12%, var(--surface-1));
   color: #229ed9;
 }
+
+.logo--telegram { color:#fff; }
+
+/* --- facebook page post --------------------------------------------------- */
+
+.fbpost {
+  max-width: 560px;
+  padding: 20px;
+  border-radius: var(--r-xl);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-sm);
+}
+
+.fbpost__file {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.fbpost__filename {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--success);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fbpost__actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+
+/* --- upload target selector ---------------------------------------------- */
+
+.up-targets {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+
+.up-target {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 11px 13px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease-out), background var(--t-fast) var(--ease-out);
+}
+
+.up-target--active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.up-target--off {
+  opacity: 0.7;
+}
+
+.up-target__name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.up-target__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+}
+
+.up-target--active .up-target__state {
+  color: var(--accent-text);
+}
+
+.up-channel {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 12px;
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--success-border);
+  background: var(--success-soft);
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.up-channel img {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-full);
+}
+
+.up-channel strong { color: var(--text-primary); }

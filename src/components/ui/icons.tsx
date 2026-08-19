@@ -149,3 +149,9 @@ export const TelegramIcon = ({ size = 16, className }: P) => (
     <path d="M21.94 4.4 18.9 19.1c-.23 1.02-.84 1.27-1.7.79l-4.7-3.47-2.27 2.19c-.25.25-.46.46-.94.46l.34-4.8L18.4 6.9c.38-.34-.08-.53-.6-.19L6.98 13.7l-4.64-1.45c-1.01-.32-1.03-1.01.21-1.5l18.15-7c.84-.3 1.58.2 1.24 1.65Z" />
   </svg>
 );
+
+export const UploadIcon = ({ size = 16, className }: P) => (
+  <svg {...base(size)} className={className}>
+    <path d="M12 15V4M8 8l4-4 4 4M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
+  </svg>
+);

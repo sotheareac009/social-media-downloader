@@ -118,6 +118,17 @@ pub async fn telegram_save_session(
     Ok(telegram::status(&dir))
 }
 
+/// Store the signed-in account's display name (from GramJS getMe). Non-secret.
+#[tauri::command]
+pub async fn telegram_set_display_name(
+    app: tauri::AppHandle,
+    name: String,
+) -> Result<TelegramStatus> {
+    let dir = data_dir(&app)?;
+    telegram::save_display_name(&dir, &name)?;
+    Ok(telegram::status(&dir))
+}
+
 #[tauri::command]
 pub async fn telegram_clear_session(app: tauri::AppHandle) -> Result<TelegramStatus> {
     let dir = data_dir(&app)?;

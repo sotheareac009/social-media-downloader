@@ -25,7 +25,17 @@ const TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 const USERINFO_ENDPOINT: &str = "https://openidconnect.googleapis.com/v1/userinfo";
 const REVOKE_ENDPOINT: &str = "https://oauth2.googleapis.com/revoke";
 
-const SCOPES: &[&str] = &["openid", "https://www.googleapis.com/auth/userinfo.profile"];
+const SCOPES: &[&str] = &[
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    // Upload videos to the user's own YouTube channel. No app review is needed
+    // for a user uploading to their own channel, though the OAuth consent
+    // screen must list this scope and the YouTube Data API must be enabled.
+    "https://www.googleapis.com/auth/youtube.upload",
+    // Read-only, needed to *show* which channel the upload will go to.
+    // `youtube.upload` alone cannot read channel info (`channels.list?mine`).
+    "https://www.googleapis.com/auth/youtube.readonly",
+];
 
 pub struct GoogleProvider {
     client_id: Option<String>,
@@ -303,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn requests_only_identity_scopes() {
+    fn requests_expected_scopes() {
         let p = provider_with_id();
         let flow = p.authorize("http://127.0.0.1:1/callback").unwrap();
         let url = Url::parse(&flow.authorize_url).unwrap();
@@ -311,7 +321,10 @@ mod tests {
         let scope = &q["scope"];
         assert!(scope.contains("openid"));
         assert!(scope.contains("userinfo.profile"));
-        for forbidden in ["drive", "youtube", "gmail", "photoslibrary"] {
+        // Upload + read-only are deliberately included; broader write is not.
+        assert!(scope.contains("youtube.upload"));
+        assert!(scope.contains("youtube.readonly"));
+        for forbidden in ["drive", "gmail", "photoslibrary", "youtube.force-ssl"] {
             assert!(!scope.contains(forbidden), "over-broad scope requested: {scope}");
         }
     }

@@ -84,6 +84,27 @@ pub struct TelegramStatus {
     pub connected: bool,
     /// Unix seconds the session file was written.
     pub connected_at: Option<i64>,
+    /// The signed-in account's display name, when known. Non-secret.
+    pub display_name: Option<String>,
+}
+
+const PROFILE_FILE: &str = "telegram-profile.txt";
+
+fn profile_path(dir: &Path) -> PathBuf {
+    dir.join(PROFILE_FILE)
+}
+
+pub fn save_display_name(dir: &Path, name: &str) -> Result<()> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| AppError::DownloadPath(format!("profile directory: {e}")))?;
+    std::fs::write(profile_path(dir), name.trim())
+        .map_err(|e| AppError::DownloadPath(format!("profile file: {e}")))
+}
+
+fn load_display_name(dir: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(profile_path(dir)).ok()?;
+    let name = raw.trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 /// Persist the GramJS session string.
@@ -127,6 +148,7 @@ pub fn load(dir: &Path) -> Option<String> {
 }
 
 pub fn clear(dir: &Path) -> Result<()> {
+    let _ = std::fs::remove_file(profile_path(dir));
     match std::fs::remove_file(path(dir)) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -145,11 +167,13 @@ pub fn status(dir: &Path) -> TelegramStatus {
             TelegramStatus {
                 connected: load(dir).is_some(),
                 connected_at,
+                display_name: load_display_name(dir),
             }
         }
         Err(_) => TelegramStatus {
             connected: false,
             connected_at: None,
+            display_name: None,
         },
     }
 }
