@@ -14,8 +14,10 @@ import {
 import { AccountCard } from "@/components/accounts/AccountCard";
 import {
   facebookConnect,
+  facebookDisconnect,
   facebookStatus,
   instagramConnect,
+  instagramDisconnect,
   instagramStatus,
   type SessionStatus,
 } from "@/lib/download";
@@ -171,6 +173,30 @@ export function AccountsPage() {
     }
   }, [toast]);
 
+  const disconnectInstagram = useCallback(async () => {
+    setIgBusy(true);
+    try {
+      setIgDownload(await instagramDisconnect());
+      toast("info", "Instagram disconnected.");
+    } catch (e) {
+      toast("error", toAuthError(e).message);
+    } finally {
+      if (mounted.current) setIgBusy(false);
+    }
+  }, [toast]);
+
+  const disconnectFacebook = useCallback(async () => {
+    setFbBusy(true);
+    try {
+      setFbDownload(await facebookDisconnect());
+      toast("info", "Facebook disconnected.");
+    } catch (e) {
+      toast("error", toAuthError(e).message);
+    } finally {
+      if (mounted.current) setFbBusy(false);
+    }
+  }, [toast]);
+
   const connectedCount = Object.values(accounts).filter((a) => a.connected).length;
 
   return (
@@ -224,6 +250,27 @@ export function AccountsPage() {
                           : undefined
                     }
                     downloadBusy={descriptor.id === "facebook" ? fbBusy : igBusy}
+                    downloadName={
+                      descriptor.id === "instagram"
+                        ? igDownload?.display_name ?? null
+                        : descriptor.id === "facebook"
+                          ? fbDownload?.display_name ?? null
+                          : null
+                    }
+                    downloadAvatar={
+                      descriptor.id === "instagram"
+                        ? igDownload?.avatar_url ?? null
+                        : descriptor.id === "facebook"
+                          ? fbDownload?.avatar_url ?? null
+                          : null
+                    }
+                    onDownloadDisconnect={
+                      descriptor.id === "instagram" && igDownload?.connected
+                        ? () => void disconnectInstagram()
+                        : descriptor.id === "facebook" && fbDownload?.connected
+                          ? () => void disconnectFacebook()
+                          : undefined
+                    }
                     downloadNote={
                       descriptor.id === "instagram" && igDownload?.connected
                         ? "Reels and posts will download using this session. Connecting an account below is optional — it only adds your name and avatar, and is not needed for downloading."

@@ -28,6 +28,10 @@ interface Props {
    * keep reporting "Needs setup" as though nothing had happened.
    */
   downloadConnected?: boolean;
+  /** Name/avatar of the connected download session, when fetched. */
+  downloadName?: string | null;
+  downloadAvatar?: string | null;
+  onDownloadDisconnect?: () => void;
   /** Starts the download-session sign-in, when this provider supports one. */
   onDownloadSignIn?: () => void;
   downloadBusy?: boolean;
@@ -43,7 +47,10 @@ export function AccountCard({
   notice,
   downloadNote,
   downloadConnected = false,
+  downloadName,
+  downloadAvatar,
   onDownloadSignIn,
+  onDownloadDisconnect,
   downloadBusy = false,
   onConnect,
   onDisconnect,
@@ -89,6 +96,7 @@ export function AccountCard({
             blocked={blocked}
             downloadConnected={downloadConnected}
             onDownloadSignIn={onDownloadSignIn}
+            onDownloadDisconnect={onDownloadDisconnect}
             downloadBusy={downloadBusy}
             onConnect={onConnect}
             onDisconnect={onDisconnect}
@@ -100,6 +108,9 @@ export function AccountCard({
       <div className="card__identity">
         <div>
           {connected && <Identity account={account} />}
+          {!connected && downloadConnected && (
+            <SessionIdentity name={downloadName} avatar={downloadAvatar} />
+          )}
         </div>
       </div>
 
@@ -224,6 +235,40 @@ function Identity({ account }: { account: AccountView }) {
         <div className="identity__sub">
           {account.email ?? `ID ${truncateId(account.external_id)}`}
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** Name + avatar for a download-session login (Instagram / Facebook). */
+function SessionIdentity({
+  name,
+  avatar,
+}: {
+  name?: string | null;
+  avatar?: string | null;
+}) {
+  const [failed, setFailed] = useState(false);
+  const display = name ?? "Signed in for downloads";
+  const showAvatar = avatar && !failed;
+  return (
+    <div className="identity">
+      {showAvatar ? (
+        <img
+          className="identity__avatar"
+          src={avatar!}
+          alt=""
+          referrerPolicy="no-referrer"
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <div className="identity__fallback" aria-hidden>
+          {initial(display)}
+        </div>
+      )}
+      <div className="identity__text">
+        <div className="identity__name">{display}</div>
+        <div className="identity__sub">Connected for downloading</div>
       </div>
     </div>
   );

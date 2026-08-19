@@ -149,6 +149,10 @@ export interface SessionStatus {
   connected: boolean;
   /** Unix seconds. */
   captured_at: number | null;
+  /** The connected account's name, when it could be fetched. */
+  display_name: string | null;
+  /** A profile-picture URL (https), when available. */
+  avatar_url: string | null;
 }
 
 export interface EngineStatus {

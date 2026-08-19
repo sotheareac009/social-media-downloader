@@ -10,6 +10,8 @@ interface Props {
   blocked: boolean;
   /** A working download session exists for this provider. */
   downloadConnected?: boolean;
+  /** Sign out of the download session. */
+  onDownloadDisconnect?: () => void;
   /**
    * Starts a *download* sign-in — the same flow the Downloads page runs.
    * Offered for providers that have no OAuth client ID but do support a
@@ -28,6 +30,7 @@ export function ConnectButton({
   blocked,
   downloadConnected = false,
   onDownloadSignIn,
+  onDownloadDisconnect,
   downloadBusy = false,
   onConnect,
   onDisconnect,
@@ -48,9 +51,21 @@ export function ConnectButton({
   }
 
   if (!descriptor.configured) {
-    // Already signed in for downloads: account sign-in is optional and OAuth
-    // is not configured, so there is genuinely nothing to offer here.
-    if (downloadConnected) return null;
+    // Signed in via a download session: offer to sign out of it, since there
+    // is no OAuth account to disconnect instead.
+    if (downloadConnected) {
+      return (
+        <Button
+          variant="danger"
+          loading={downloadBusy}
+          icon={<XIcon size={14} />}
+          onClick={onDownloadDisconnect}
+          aria-label={`Disconnect ${descriptor.display_name}`}
+        >
+          {downloadBusy ? "Disconnecting" : "Disconnect"}
+        </Button>
+      );
+    }
 
     // No OAuth, but a session sign-in is available — give the real action
     // rather than a permanently disabled button.
