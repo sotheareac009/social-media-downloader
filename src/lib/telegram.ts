@@ -161,6 +161,31 @@ export async function telegramListChats(): Promise<TelegramChat[]> {
   return out;
 }
 
+const avatarCache = new Map<string, string | null>();
+
+/** A small profile-photo URL for a chat, or null if it has none. Cached. */
+export async function telegramChatAvatar(chatId: string): Promise<string | null> {
+  if (avatarCache.has(chatId)) return avatarCache.get(chatId) ?? null;
+  try {
+    const client = await connectedClient();
+    const buf = (await client.downloadProfilePhoto(chatId, { isBig: false })) as
+      | Uint8Array
+      | string
+      | undefined;
+    if (!buf || (typeof buf !== "string" && buf.length === 0)) {
+      avatarCache.set(chatId, null);
+      return null;
+    }
+    const bytes = typeof buf === "string" ? new TextEncoder().encode(buf) : new Uint8Array(buf);
+    const url = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
+    avatarCache.set(chatId, url);
+    return url;
+  } catch {
+    avatarCache.set(chatId, null);
+    return null;
+  }
+}
+
 /** Send a file (already loaded as bytes) to a chat, with an optional caption. */
 export interface SendVideoMeta {
   width: number;

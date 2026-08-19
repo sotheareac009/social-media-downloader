@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
+  telegramChatAvatar,
   telegramListChats,
   telegramSendFile,
   type TelegramChat,
@@ -130,17 +131,30 @@ export function UploadPage() {
     };
   }, [youtubeChosen]);
 
+  const [tgRefreshing, setTgRefreshing] = useState(false);
+  const loadTgChats = useCallback(async (showLoading: boolean) => {
+    if (showLoading) setTgChats(null);
+    setTgRefreshing(true);
+    try {
+      const cs = await telegramListChats();
+      if (mounted.current) setTgChats(cs);
+    } catch {
+      // Keep any existing list on a refresh failure; only hard-fail the first load.
+      if (mounted.current) setTgChats((prev) => (Array.isArray(prev) ? prev : "error"));
+    } finally {
+      if (mounted.current) setTgRefreshing(false);
+    }
+  }, []);
+
+  // Load when Telegram is first chosen.
   useEffect(() => {
-    if (!telegramChosen) return;
-    let alive = true;
-    setTgChats(null);
-    telegramListChats()
-      .then((cs) => alive && setTgChats(cs))
-      .catch(() => alive && setTgChats("error"));
-    return () => {
-      alive = false;
-    };
-  }, [telegramChosen]);
+    if (telegramChosen) void loadTgChats(true);
+  }, [telegramChosen, loadTgChats]);
+
+  // Refresh whenever the picker opens, so a group created since shows up.
+  useEffect(() => {
+    if (openMenu === "telegram") void loadTgChats(false);
+  }, [openMenu, loadTgChats]);
 
   // Per-platform destination list + the chosen one, keyed by platform id.
   const destinations = useMemo(
@@ -268,46 +282,169 @@ export function UploadPage() {
         <div className="up-targets">
           {(targets ?? []).map((t) => {
             const brand = SOURCE_COLOR[t.id as SourceId] ?? "var(--accent)";
+            const isSel = selected.has(t.id) && t.ready;
+
+            // Telegram is a container card: the header toggles the platform,
+            // while a dropdown + chosen-chat chips live inside it.
+            if (t.id === "telegram") {
+              return (
+                <div
+                  key={t.id}
+                  className={`up-target up-target--box ${isSel ? "up-target--active up-target--wide" : ""} ${t.ready ? "" : "up-target--off"}`.trim()}
+                  style={{ ["--brand" as string]: brand }}
+                >
+                  <span className="up-target__edge" />
+                  <button
+                    type="button"
+                    className="up-target__head"
+                    onClick={() => toggleTarget(t)}
+                    disabled={!t.ready}
+                  >
+                    <SourceLogo source="telegram" />
+                    <span className="up-target__text">
+                      <span className="up-target__name">Telegram</span>
+                      <span className={`up-target__pill ${t.ready ? "up-target__pill--ok" : "up-target__pill--off"}`}>
+                        {t.ready
+                          ? tgSelected.size === 0
+                            ? (<><CheckIcon size={10} /> Ready</>)
+                            : `${tgSelected.size} chat${tgSelected.size === 1 ? "" : "s"}`
+                          : "Not ready"}
+                      </span>
+                    </span>
+                    {t.ready && (
+                      <span className={`up-target__mark ${isSel ? "up-target__mark--on" : ""}`.trim()}>
+                        {isSel && <CheckIcon size={12} />}
+                      </span>
+                    )}
+                  </button>
+
+                  {isSel && (
+                    <div className="up-tg">
+                      <button
+                        type="button"
+                        className="up-tg__trigger"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setOpenMenu((m) => (m === "telegram" ? null : "telegram"));
+                        }}
+                      >
+                        <span>{tgSelected.size === 0 ? "Select groups & channels" : "Add or remove chats"}</span>
+                        <span className="up-target__caret">▾</span>
+                      </button>
+
+                      {openMenu === "telegram" && (
+                        <div className="up-tg__drop" onClick={(e) => e.stopPropagation()}>
+                          <div className="up-tg__searchrow">
+                            <input
+                              className="up-tg__search"
+                              placeholder="Search groups & channels…"
+                              value={tgSearch}
+                              autoFocus
+                              onChange={(e) => setTgSearch(e.target.value)}
+                            />
+                            <button
+                              type="button"
+                              className="up-tg__refresh"
+                              title="Refresh list"
+                              disabled={tgRefreshing}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void loadTgChats(false);
+                              }}
+                            >
+                              {tgRefreshing ? "…" : "↻"}
+                            </button>
+                          </div>
+                          <div className="up-tg__list">
+                            {tgChats === null && <div className="up-menu__note">Loading your chats…</div>}
+                            {tgChats === "error" && <div className="up-menu__note">Couldn't load chats. Reconnect Telegram.</div>}
+                            {Array.isArray(tgChats) && tgChats.length === 0 && <div className="up-menu__note">No groups or channels found.</div>}
+                            {Array.isArray(tgChats) &&
+                              tgChats
+                                .filter((c) => c.title.toLowerCase().includes(tgSearch.trim().toLowerCase()))
+                                .map((c) => {
+                                  const on = tgSelected.has(c.id);
+                                  return (
+                                    <button
+                                      key={c.id}
+                                      type="button"
+                                      className={`up-tg__item ${on ? "up-tg__item--on" : ""}`.trim()}
+                                      onClick={() =>
+                                        setTgSelected((prev) => {
+                                          const n = new Set(prev);
+                                          if (n.has(c.id)) n.delete(c.id);
+                                          else n.add(c.id);
+                                          return n;
+                                        })
+                                      }
+                                    >
+                                      <span className={`tg-picker__check ${on ? "tg-picker__check--on" : ""}`}>{on && <CheckIcon size={12} />}</span>
+                                      <TgAvatar chatId={c.id} kind={c.kind} size={26} />
+                                      <span className="tg-picker__name">{c.title}</span>
+                                    </button>
+                                  );
+                                })}
+                          </div>
+                        </div>
+                      )}
+
+                      {tgSelected.size > 0 && Array.isArray(tgChats) && (
+                        <div className="up-tg__chips">
+                          {[...tgSelected].map((id) => {
+                            const c = tgChats.find((x) => x.id === id);
+                            if (!c) return null;
+                            return (
+                              <span key={id} className="up-tg__chip">
+                                <TgAvatar chatId={c.id} kind={c.kind} size={18} />
+                                <span className="up-tg__chipname">{c.title}</span>
+                                <button
+                                  type="button"
+                                  className="up-tg__chipx"
+                                  aria-label="Remove"
+                                  onClick={() =>
+                                    setTgSelected((prev) => {
+                                      const n = new Set(prev);
+                                      n.delete(id);
+                                      return n;
+                                    })
+                                  }
+                                >
+                                  <XIcon size={11} />
+                                </button>
+                              </span>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            }
+
+            // Other platforms: single-select button cards.
             return (
               <button
                 key={t.id}
                 type="button"
-                className={`up-target ${selected.has(t.id) && t.ready ? "up-target--active" : ""} ${
-                  t.ready ? "" : "up-target--off"
-                }`.trim()}
+                className={`up-target ${isSel ? "up-target--active" : ""} ${t.ready ? "" : "up-target--off"}`.trim()}
                 style={{ ["--brand" as string]: brand }}
                 onClick={() => toggleTarget(t)}
                 title={t.reason ?? undefined}
-                aria-pressed={selected.has(t.id) && t.ready}
+                aria-pressed={isSel}
               >
                 <span className="up-target__edge" />
                 <SourceLogo source={t.id as SourceId} />
                 <span className="up-target__text">
                   <span className="up-target__name">{t.name}</span>
-                  {t.id === "telegram" && t.ready ? (
-                    <span className="up-target__acct">
-                      <span className="up-target__acctname">
-                        {tgSelected.size === 0
-                          ? "Choose chats below"
-                          : `${tgSelected.size} chat${tgSelected.size === 1 ? "" : "s"} selected`}
-                      </span>
-                    </span>
-                  ) : (() => {
+                  {(() => {
                     const list = destinations[t.id] ?? [];
                     const dest = activeDest(t.id);
                     const many = list.length > 1;
                     if (!dest) {
                       return (
-                        <span
-                          className={`up-target__pill ${t.ready ? "up-target__pill--ok" : "up-target__pill--off"}`}
-                        >
-                          {t.ready ? (
-                            <>
-                              <CheckIcon size={10} /> Ready
-                            </>
-                          ) : (
-                            "Not ready"
-                          )}
+                        <span className={`up-target__pill ${t.ready ? "up-target__pill--ok" : "up-target__pill--off"}`}>
+                          {t.ready ? (<><CheckIcon size={10} /> Ready</>) : "Not ready"}
                         </span>
                       );
                     }
@@ -320,11 +457,8 @@ export function UploadPage() {
                           e.stopPropagation();
                           setOpenMenu((m) => (m === t.id ? null : t.id));
                         }}
-                        title={many ? "Choose where to post" : undefined}
                       >
-                        {dest.avatar && (
-                          <img src={dest.avatar} alt="" referrerPolicy="no-referrer" />
-                        )}
+                        {dest.avatar && <img src={dest.avatar} alt="" referrerPolicy="no-referrer" />}
                         <span className="up-target__acctname">{dest.name}</span>
                         {many && <span className="up-target__caret">▾</span>}
                         {many && openMenu === t.id && (
@@ -352,74 +486,14 @@ export function UploadPage() {
                   })()}
                 </span>
                 {t.ready && (
-                  <span className={`up-target__mark ${selected.has(t.id) ? "up-target__mark--on" : ""}`.trim()}>
-                    {selected.has(t.id) && <CheckIcon size={12} />}
+                  <span className={`up-target__mark ${isSel ? "up-target__mark--on" : ""}`.trim()}>
+                    {isSel && <CheckIcon size={12} />}
                   </span>
                 )}
               </button>
             );
           })}
         </div>
-
-        {telegramChosen && (
-          <div className="tg-picker">
-            <div className="tg-picker__head">
-              <span className="tg-picker__title">Telegram destinations</span>
-              {tgSelected.size > 0 && (
-                <button
-                  type="button"
-                  className="btn btn--ghost btn--sm"
-                  onClick={() => setTgSelected(new Set())}
-                >
-                  Clear
-                </button>
-              )}
-            </div>
-            <input
-              className="tg-field__input"
-              style={{ marginBottom: 8 }}
-              placeholder="Search groups & channels…"
-              value={tgSearch}
-              onChange={(e) => setTgSearch(e.target.value)}
-            />
-            <div className="tg-picker__list">
-              {tgChats === null && <div className="up-menu__note">Loading your chats…</div>}
-              {tgChats === "error" && (
-                <div className="up-menu__note">Couldn't load chats. Reconnect Telegram on its page.</div>
-              )}
-              {Array.isArray(tgChats) && tgChats.length === 0 && (
-                <div className="up-menu__note">No groups or channels found.</div>
-              )}
-              {Array.isArray(tgChats) &&
-                tgChats
-                  .filter((c) => c.title.toLowerCase().includes(tgSearch.trim().toLowerCase()))
-                  .map((c) => {
-                    const on = tgSelected.has(c.id);
-                    return (
-                      <button
-                        key={c.id}
-                        type="button"
-                        className={`tg-picker__item ${on ? "tg-picker__item--on" : ""}`.trim()}
-                        onClick={() =>
-                          setTgSelected((prev) => {
-                            const next = new Set(prev);
-                            if (next.has(c.id)) next.delete(c.id);
-                            else next.add(c.id);
-                            return next;
-                          })
-                        }
-                      >
-                        <span className={`tg-picker__check ${on ? "tg-picker__check--on" : ""}`}>
-                          {on && <CheckIcon size={12} />}
-                        </span>
-                        <span className="tg-picker__kind">{c.kind === "channel" ? "📢" : "👥"}</span>
-                        <span className="tg-picker__name">{c.title}</span>
-                      </button>
-                    );
-                  })}
-            </div>
-          </div>
-        )}
 
         {youtubeChosen && channels === "none" && (
           <div className="notice notice--danger" style={{ margin: "12px 0 0" }}>
@@ -599,6 +673,27 @@ function MediaThumb({ path, kind }: { path: string; kind: "video" | "photo" }) {
     <div className={`up-thumb-fallback ${tried ? "" : "up-thumb-fallback--load"}`.trim()}>
       <UploadIcon size={16} />
     </div>
+  );
+}
+
+/** Lazily-loaded profile photo for a Telegram chat; emoji fallback. */
+function TgAvatar({ chatId, kind, size = 22 }: { chatId: string; kind: "group" | "channel"; size?: number }) {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    telegramChatAvatar(chatId)
+      .then((u) => alive && setUrl(u))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [chatId]);
+  return url ? (
+    <img className="tg-av" src={url} alt="" style={{ width: size, height: size }} />
+  ) : (
+    <span className="tg-av tg-av--ph" style={{ width: size, height: size, fontSize: size * 0.55 }}>
+      {kind === "channel" ? "📢" : "👥"}
+    </span>
   );
 }
 
