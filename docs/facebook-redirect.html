@@ -30,11 +30,23 @@
     // this redirect from https without mixed-content blocking.
     (function () {
       var PORT = 8721; // must match FACEBOOK_CALLBACK_PORT in the app
-      var qs = window.location.search || "";
-      var target = "http://127.0.0.1:" + PORT + "/callback" + qs;
+      var params = new URLSearchParams(window.location.search || "");
+      var hasCode = params.has("code") || params.has("error");
+
+      // Opened directly, with no login result to forward. Say so rather than
+      // sending an empty request to the app (which answers "Missing
+      // parameters"). This is not part of the flow unless Facebook sent us here.
+      if (!hasCode) {
+        document.querySelector(".spin").style.display = "none";
+        document.querySelector("h2").textContent = "Nothing to do here";
+        document.getElementById("msg").textContent =
+          "This page only works during Facebook sign-in. Start the sign-in from the app (Accounts → Facebook → Connect).";
+        return;
+      }
+
+      var target = "http://127.0.0.1:" + PORT + "/callback?" + params.toString();
       document.getElementById("manual").innerHTML =
         'If nothing happens, open: <a href="' + target + '">' + target + "</a>";
-      // Small delay so the message renders before we navigate away.
       setTimeout(function () { window.location.replace(target); }, 400);
     })();
   </script>
