@@ -122,7 +122,7 @@ export function JobCard({
         {job.status === "failed" && (
           <div className="job__status job__status--bad">
             <AlertIcon size={13} />
-            {downloadMessage(job.error_code, job.error_message ?? "Download failed.")}
+            {downloadMessage(job.error_code, job.error_message ?? "Download failed.", job.source)}
           </div>
         )}
       </div>

@@ -129,8 +129,13 @@ impl AuthManager {
         }
 
         // Bind the listener *before* building the URL: the redirect URI has to
-        // carry the port the OS just handed us.
-        let listener = CallbackListener::bind().await?;
+        // carry the port. A provider with a hosted redirect page (Facebook)
+        // needs a fixed port the page can forward to; everyone else gets an
+        // ephemeral one.
+        let listener = match provider.fixed_callback_port() {
+            Some(port) => CallbackListener::bind_fixed(port).await?,
+            None => CallbackListener::bind().await?,
+        };
         let flow = provider.authorize(listener.redirect_uri())?;
 
         let _ = app.emit(events::STARTED, AuthStartedEvent { provider: id });

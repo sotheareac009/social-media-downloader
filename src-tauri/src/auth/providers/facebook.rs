@@ -30,7 +30,20 @@ use crate::auth::{AccountInfo, AuthResult, CallbackData, Credential, ProviderId}
 use crate::errors::{AppError, Result};
 
 const GRAPH_VERSION: &str = "v21.0";
-const SCOPES: &[&str] = &["public_profile"];
+/// The port the hosted redirect page forwards the callback to. Fixed, because
+/// the page needs a known address. Overridable if it clashes with something.
+const CALLBACK_PORT: u16 = 8721;
+
+/// `public_profile` to identify the account, plus the Page-publishing scopes
+/// the upload feature needs. In development mode these work for the app's own
+/// admins/testers without review; publishing for other users needs Meta's app
+/// review of `pages_manage_posts`.
+const SCOPES: &[&str] = &[
+    "public_profile",
+    "pages_show_list",
+    "pages_read_engagement",
+    "pages_manage_posts",
+];
 
 pub struct FacebookProvider {
     client_id: Option<String>,
@@ -102,6 +115,14 @@ impl AuthProvider for FacebookProvider {
 
     /// `_loopback_redirect_uri` is ignored on purpose: Facebook will not accept
     /// a `127.0.0.1` redirect, so the configured URI is used instead.
+    fn fixed_callback_port(&self) -> Option<u16> {
+        Some(
+            config::read("FACEBOOK_CALLBACK_PORT")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(CALLBACK_PORT),
+        )
+    }
+
     fn authorize(&self, _loopback_redirect_uri: &str) -> Result<PendingFlow> {
         let (client_id, _, redirect_uri) = self.require()?;
         let state = PendingFlow::new_state();

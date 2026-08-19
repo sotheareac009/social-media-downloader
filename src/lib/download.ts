@@ -297,7 +297,17 @@ export async function subscribeToDownloadEvents(
  * Copy for a person. `media_not_public` is the one people will hit most, so it
  * says plainly that connecting an account would not help — because it wouldn't.
  */
-export function downloadMessage(code: string | null, fallback: string): string {
+export function downloadMessage(
+  code: string | null,
+  fallback: string,
+  source?: Source,
+): string {
+  // For platforms with a session login, a "not public" failure usually means
+  // "you're not signed in", not "impossible" — so say the useful thing.
+  if (code === "media_not_public" && (source === "instagram" || source === "facebook")) {
+    const name = source === "instagram" ? "Instagram" : "Facebook";
+    return `This needs a login. Connect your ${name} account on the Accounts page, then try again — private posts and stories download once you're signed in.`;
+  }
   switch (code) {
     case "unsupported_url":
       return "That isn't a supported video link. Instagram profiles and stories aren't supported — only /reel/, /p/ and /tv/ posts.";
@@ -307,6 +317,8 @@ export function downloadMessage(code: string | null, fallback: string): string {
       return "This post isn't public, so it can't be downloaded. Signing in wouldn't change that — this app only fetches posts anyone can already view.";
     case "no_media_found":
       return "No video was found at that link.";
+    case "facebook_stories_unsupported":
+      return "Facebook Stories can't be downloaded — no downloader (yt-dlp or gallery-dl) supports them. Regular Facebook videos, reels and posts do work, including private ones once you're signed in.";
     case "instagram_profile_unsupported":
       return "That Instagram page can't be listed — stories and explore pages have no listing path. Profile and /reels/ links do work.";
     case "lister_missing":

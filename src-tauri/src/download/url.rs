@@ -80,6 +80,16 @@ fn normalise_host(host: &str) -> &str {
     host
 }
 
+/// Instagram Stories, which yt-dlp's `InstagramStoryIE` handles with a session:
+/// `/stories/<user>`, `/stories/<user>/<id>`, `/stories/highlights/<id>`.
+fn is_instagram_story(url: &Url) -> bool {
+    let segments: Vec<&str> = url
+        .path_segments()
+        .map(|s| s.filter(|p| !p.is_empty()).collect())
+        .unwrap_or_default();
+    matches!(segments.as_slice(), ["stories", rest @ ..] if !rest.is_empty())
+}
+
 /// Instagram post shapes that carry media: `/reel/<code>`, `/reels/<code>`,
 /// `/p/<code>`, `/tv/<code>`, and the same nested under a handle.
 fn is_instagram_post(url: &Url) -> bool {
@@ -130,6 +140,7 @@ pub fn classify_target(raw: &str) -> Result<(Source, Url, TargetKind)> {
     match source {
         Source::TikTok if is_tiktok_profile(&url) => Ok((source, url, TargetKind::Profile)),
         Source::YouTube => Ok(classify_youtube(url)),
+        Source::Instagram if is_instagram_story(&url) => Ok((source, url, TargetKind::Single)),
         Source::Instagram if is_instagram_profile(&url) => {
             Ok((source, url, TargetKind::Profile))
         }
@@ -223,6 +234,17 @@ pub fn classify(raw: &str) -> Result<(Source, Url)> {
     let host = normalise_host(&host);
 
     if FACEBOOK_HOSTS.contains(&host) {
+        // Ephemeral Stories (`/stories/<id>/<token>/`) are a different feature
+        // from a permanent `story.php?story_fbid=` post. No extractor - yt-dlp
+        // or gallery-dl - supports them, so refuse with a clear reason rather
+        // than letting the engine emit "Unsupported URL".
+        if parsed
+            .path_segments()
+            .map(|mut s| s.next() == Some("stories"))
+            .unwrap_or(false)
+        {
+            return Err(AppError::FacebookStoriesUnsupported);
+        }
         Ok((Source::Facebook, parsed))
     } else if TIKTOK_HOSTS.contains(&host) {
         Ok((Source::TikTok, parsed))
@@ -232,7 +254,7 @@ pub fn classify(raw: &str) -> Result<(Source, Url)> {
         // Only single-post shapes are accepted. yt-dlp's `instagram:user`
         // extractor is marked CURRENTLY BROKEN, so a bare profile link is
         // refused here rather than queued to fail later with a worse message.
-        if is_instagram_post(&parsed) {
+        if is_instagram_post(&parsed) || is_instagram_story(&parsed) {
             Ok((Source::Instagram, parsed))
         } else if is_instagram_profile(&parsed) {
             Ok((Source::Instagram, parsed))
@@ -336,6 +358,15 @@ mod tests {
     }
 
     #[test]
+    fn facebook_ephemeral_stories_are_refused_clearly() {
+        let err = classify("https://www.facebook.com/stories/122103258638400320/UzpfSVND=/?view_single=1").unwrap_err();
+        assert!(matches!(err, AppError::FacebookStoriesUnsupported), "{err}");
+        // A permanent story.php post is a different thing and still accepted.
+        let (src, _) = classify("https://www.facebook.com/story.php?story_fbid=1&id=2").unwrap();
+        assert_eq!(src, Source::Facebook);
+    }
+
+    #[test]
     fn instagram_post_shapes_are_accepted() {
         for raw in [
             "https://www.instagram.com/reel/Cabc123XYZ/",
@@ -343,6 +374,19 @@ mod tests {
             "https://www.instagram.com/p/Cabc123XYZ/",
             "https://www.instagram.com/tv/Cabc123XYZ/",
             "https://www.instagram.com/someone/reel/Cabc123XYZ/",
+        ] {
+            let (source, _, kind) = classify_target(raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
+            assert_eq!(source, Source::Instagram, "{raw}");
+            assert_eq!(kind, TargetKind::Single, "{raw}");
+        }
+    }
+
+    #[test]
+    fn instagram_stories_are_single_downloads() {
+        for raw in [
+            "https://www.instagram.com/stories/fruits_zipper/3570766765028588805/",
+            "https://www.instagram.com/stories/fruits_zipper",
+            "https://www.instagram.com/stories/highlights/18090946048123978/",
         ] {
             let (source, _, kind) = classify_target(raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
             assert_eq!(source, Source::Instagram, "{raw}");
@@ -370,7 +414,6 @@ mod tests {
         for raw in [
             "https://www.instagram.com/",
             "https://www.instagram.com/explore/tags/cats/",
-            "https://www.instagram.com/stories/someone/",
             "https://www.instagram.com/accounts/login/",
         ] {
             let err = classify_target(raw).unwrap_err();

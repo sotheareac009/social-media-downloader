@@ -46,6 +46,20 @@ impl CallbackListener {
         })
     }
 
+    /// Bind a *fixed* loopback port, for providers whose real redirect is a
+    /// hosted https page that forwards the callback here. The page has to know
+    /// where to forward, so the port cannot be random. Fails clearly if the
+    /// port is already in use.
+    pub async fn bind_fixed(port: u16) -> Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", port))
+            .await
+            .map_err(|_| AppError::CallbackListener)?;
+        Ok(Self {
+            listener,
+            redirect_uri: format!("http://127.0.0.1:{port}/callback"),
+        })
+    }
+
     /// The exact redirect URI to send in the authorization request and to echo
     /// back during the token exchange.
     pub fn redirect_uri(&self) -> &str {

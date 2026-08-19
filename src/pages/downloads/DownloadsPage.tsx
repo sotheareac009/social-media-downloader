@@ -166,7 +166,7 @@ export function DownloadsPage() {
         if (jobCount.current <= BATCH_TOAST_LIMIT) {
           toast(
             "error",
-            downloadMessage(job.error_code, job.error_message ?? "Download failed."),
+            downloadMessage(job.error_code, job.error_message ?? "Download failed.", job.source),
           );
         }
       },

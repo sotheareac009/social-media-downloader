@@ -49,6 +49,14 @@ pub trait AuthProvider: Send + Sync {
     /// port is only known once the listener has bound.
     fn authorize(&self, redirect_uri: &str) -> Result<PendingFlow>;
 
+    /// A fixed loopback port this provider's callback must arrive on, or `None`
+    /// for the usual ephemeral port. Only providers with a hosted redirect
+    /// page that forwards to loopback (Facebook) need a fixed port, so the
+    /// page has a known address to forward to.
+    fn fixed_callback_port(&self) -> Option<u16> {
+        None
+    }
+
     /// Validate the callback and exchange it for a credential + account info.
     ///
     /// Implementations must assume `callback` is attacker-controlled. State

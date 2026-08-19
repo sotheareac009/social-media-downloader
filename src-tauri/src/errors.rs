@@ -70,6 +70,10 @@ pub enum AppError {
     #[error("that link isn't a supported Facebook or TikTok video URL")]
     UnsupportedUrl,
 
+    /// Facebook ephemeral Stories - no extractor supports them.
+    #[error("Facebook Stories can't be downloaded — no downloader supports them. Regular videos, reels and posts work.")]
+    FacebookStoriesUnsupported,
+
     /// An Instagram profile or tab, which yt-dlp cannot currently list.
     /// Separated from `UnsupportedUrl` because the answer is "not yet, and
     /// here is the workaround" rather than "wrong kind of link".
@@ -142,6 +146,7 @@ impl AppError {
             Self::CallbackListener => "callback_listener",
             Self::BrowserLaunch => "browser_launch",
             Self::UnsupportedUrl => "unsupported_url",
+            Self::FacebookStoriesUnsupported => "facebook_stories_unsupported",
             Self::InstagramProfileUnsupported => "instagram_profile_unsupported",
             Self::EngineMissing => "engine_missing",
             Self::ListerMissing => "lister_missing",
