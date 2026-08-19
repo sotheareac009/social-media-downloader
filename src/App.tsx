@@ -2,19 +2,21 @@ import { useEffect, useState } from "react";
 import { AccountsPage } from "@/pages/accounts/AccountsPage";
 import { DownloadsPage } from "@/pages/downloads/DownloadsPage";
 import { HomePage } from "@/pages/home/HomePage";
+import { TelegramPage } from "@/pages/telegram/TelegramPage";
 import { ToastProvider } from "@/components/ui/Toast";
 import {
   BoltIcon,
   DownloadIcon,
   HomeIcon,
   MoonIcon,
+  SendIcon,
   SlidersIcon,
   SunIcon,
   UsersIcon,
 } from "@/components/ui/icons";
 
 type Theme = "light" | "dark";
-type Route = "home" | "accounts" | "downloads";
+type Route = "home" | "accounts" | "downloads" | "telegram";
 const THEME_KEY = "md.theme";
 
 export default function App() {
@@ -46,6 +48,7 @@ export default function App() {
             {route === "home" && <HomePage onNavigate={setRoute} />}
             {route === "downloads" && <DownloadsPage />}
             {route === "accounts" && <AccountsPage />}
+            {route === "telegram" && <TelegramPage />}
           </div>
         </main>
       </div>
@@ -107,6 +110,16 @@ function Sidebar({
             <UsersIcon size={16} />
           </span>
           Accounts
+        </button>
+        <button
+          className={`navitem ${route === "telegram" ? "navitem--active" : ""}`}
+          type="button"
+          onClick={() => onNavigate("telegram")}
+        >
+          <span className="navitem__icon">
+            <SendIcon size={16} />
+          </span>
+          Telegram
         </button>
 
         <button className="navitem" type="button" disabled>

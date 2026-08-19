@@ -136,3 +136,9 @@ export const HomeIcon = ({ size = 16, className }: P) => (
     <path d="M9.5 20.5v-6h5v6" />
   </svg>
 );
+
+export const SendIcon = ({ size = 16, className }: P) => (
+  <svg {...base(size)} className={className}>
+    <path d="M21.5 4.5 3 11.2l6.4 2.4M21.5 4.5 18 20l-8.6-6.4M21.5 4.5 9.4 13.6M9.4 13.6V19l3-3.2" />
+  </svg>
+);

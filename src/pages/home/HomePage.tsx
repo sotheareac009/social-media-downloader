@@ -56,6 +56,11 @@ const PLATFORMS: Platform[] = [
     name: "Instagram",
     supports: ["Reels", "Whole profiles", "Posts & IGTV", "Sign-in required"],
   },
+  {
+    id: "telegram",
+    name: "Telegram",
+    supports: ["Reels", "Whole profiles", "Posts & IGTV", "Sign-in required"],
+  },
 ];
 
 interface Feature {

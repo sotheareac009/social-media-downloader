@@ -550,3 +550,42 @@ image to update it:
 ```bash
 docker compose build --no-cache app
 ```
+
+---
+
+## Telegram
+
+The **Telegram** item in the sidebar signs into a Telegram account via GramJS
+(the MTProto client), with the standard three-step flow: phone number → login
+code → 2FA password if the account has one.
+
+It needs an application `api_id` / `api_hash`, which identify *this app* to
+Telegram (like an OAuth client ID, not a user secret). Create them once at
+<https://my.telegram.org> → API development tools, and put them in `.env`:
+
+```dotenv
+TELEGRAM_API_ID=1234567
+TELEGRAM_API_HASH=abc123...
+```
+
+Your phone number, the code and any 2FA password are used to sign in and never
+stored. The resulting **session string** is written to
+`telegram-session.txt` in the app data directory, owner-only (`0600` on
+macOS/Linux; user-scoped `%APPDATA%` on Windows) — the same storage as the
+Instagram session.
+
+### Why the login runs in the webview
+
+MTProto is not reimplemented in Rust; GramJS handles it in JavaScript, so the
+login and reconnection run in the frontend. Two consequences follow, and both
+are deliberate:
+
+- The CSP is opened to `wss://*.web.telegram.org` so GramJS can reach
+  Telegram's data centres. Nothing else new is allowed.
+- The session string is handed back to the webview on each launch to
+  reconnect, unlike the Instagram cookie which never crosses into JavaScript.
+  This is inherent to a JS MTProto client; Rust still owns where it is stored.
+
+GramJS assumes a Node environment (`Buffer`, `process`), so the Vite build
+includes `vite-plugin-node-polyfills`. Without it the app compiles but throws
+the moment the Telegram client is constructed.

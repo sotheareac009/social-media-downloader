@@ -13,6 +13,9 @@ export const BRAND_COLOR: Record<ProviderId, string> = {
   tiktok: "#FE2C55",
   // The midpoint of Instagram's gradient, for the flat hairline accent.
   instagram: "#DD2A7B",
+  // Telegram's tile is blue, so the card hairline uses its accent cyan instead —
+  // blue would read as "no accent" against either theme.
+  telegram: "#25F4EE",
 };
 
 export function ProviderLogo({ provider }: { provider: ProviderId }) {
@@ -32,6 +35,7 @@ const MARKS: Record<ProviderId, ReactNode> = {
   facebook: <FacebookMark />,
   tiktok: <TikTokMark />,
   instagram: <InstagramMark />,
+  telegram: <TelegramMark />,
 };
 
 function GoogleMark() {
@@ -94,6 +98,14 @@ function InstagramMark() {
       <rect x="3" y="3" width="18" height="18" rx="5.2" />
       <circle cx="12" cy="12" r="4.1" />
       <circle cx="17.2" cy="6.8" r="1.15" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+function TelegramMark() {
+  return (
+    <svg width="21" height="21" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M9.5 15.5l-.4 4.3c.6 0 .9-.3 1.2-.6l2.8-2.7 5.8 4.3c1.1.6 1.9.3 2.2-1l3.9-18.3c.3-1.4-.5-2-1.4-1.6L1.7 9c-1 .4-1 .9-.2 1.2l5 1.6L17 4c.8-.4 1.5-.2.9.3L9.5 15.5z" />
     </svg>
   );
 }

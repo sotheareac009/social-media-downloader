@@ -1,7 +1,7 @@
 import { ProviderLogo } from "@/components/accounts/ProviderLogo";
 
 /** Platforms this build can fetch public media from. */
-export type SourceId = "youtube" | "tiktok" | "facebook" | "instagram";
+export type SourceId = "youtube" | "tiktok" | "facebook" | "instagram" | "telegram";
 
 export const SOURCE_COLOR: Record<SourceId, string> = {
   youtube: "#FF0033",
@@ -9,6 +9,9 @@ export const SOURCE_COLOR: Record<SourceId, string> = {
   facebook: "#0866FF",
   // The midpoint of Instagram's gradient, matching the Accounts page.
   instagram: "#DD2A7B",
+  // Telegram's tile is blue, so the card hairline uses its accent cyan instead —
+  // blue would read as "no accent" against either theme.
+  telegram: "#25F4EE",
 };
 
 /**

@@ -73,7 +73,13 @@ export class TelegramLogin {
       new StringSession(""),
       this.config.api_id,
       this.config.api_hash,
-      { connectionRetries: 3, baseLogger: new Logger(LogLevel.NONE) },
+      {
+        connectionRetries: 3,
+        useWSS: true,
+        // Give up rather than hang forever when a DC can't be reached.
+        timeout: 15,
+        baseLogger: new Logger(LogLevel.NONE),
+      },
     );
 
     try {
@@ -171,7 +177,7 @@ export async function telegramValidateSession(
     new StringSession(saved),
     config.api_id,
     config.api_hash,
-    { connectionRetries: 2, baseLogger: new Logger(LogLevel.NONE) },
+    { connectionRetries: 2, useWSS: true, timeout: 15, baseLogger: new Logger(LogLevel.NONE) },
   );
   try {
     await client.connect();

@@ -1,11 +1,22 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { nodePolyfills } from "vite-plugin-node-polyfills";
 import { fileURLToPath, URL } from "node:url";
 
 const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    // GramJS (Telegram MTProto) assumes a Node environment: it uses `Buffer`
+    // and `process` as globals, which Vite does not provide in a browser
+    // build. Without these shims the app compiles but throws at runtime the
+    // moment the Telegram client is constructed.
+    nodePolyfills({
+      globals: { Buffer: true, process: true, global: true },
+      protocolImports: true,
+    }),
+  ],
   resolve: {
     alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
   },
