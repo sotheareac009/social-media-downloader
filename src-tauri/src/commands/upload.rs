@@ -60,27 +60,28 @@ pub async fn upload_targets(manager: State<'_, AuthManager>) -> Result<Vec<Uploa
     ])
 }
 
-/// Pick a file to upload. `kind` is "video", "photo", or "any".
+/// Pick one or more files to upload. `kind` is "video", "photo", or "any".
+/// Returns every selected path (empty when the picker is dismissed).
 #[tauri::command]
-pub async fn upload_pick_file(app: AppHandle, kind: String) -> Result<Option<String>> {
+pub async fn upload_pick_files(app: AppHandle, kind: String) -> Result<Vec<String>> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let mut dialog = app.dialog().file().set_title("Choose a file to upload");
+    let mut dialog = app.dialog().file().set_title("Choose files to upload");
     dialog = match kind.as_str() {
         "video" => dialog.add_filter("Videos", &["mp4", "mov", "webm", "mkv", "avi", "m4v"]),
         "photo" => dialog.add_filter("Images", &["jpg", "jpeg", "png", "gif", "webp"]),
         _ => dialog.add_filter("Media", &["mp4", "mov", "webm", "jpg", "jpeg", "png", "gif", "webp"]),
     };
-    dialog.pick_file(move |f| {
+    dialog.pick_files(move |f| {
         let _ = tx.send(f);
     });
     let picked = rx.await.map_err(|_| AppError::Internal("picker closed".into()))?;
-    match picked {
-        Some(p) => Ok(Some(
-            p.into_path().map_err(|e| AppError::DownloadPath(e.to_string()))?.display().to_string(),
-        )),
-        None => Ok(None),
+    let paths = picked.unwrap_or_default();
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
+        out.push(p.into_path().map_err(|e| AppError::DownloadPath(e.to_string()))?.display().to_string());
     }
+    Ok(out)
 }
 
 /// Which YouTube channel(s) the connected Google account will upload to.
@@ -88,6 +89,45 @@ pub async fn upload_pick_file(app: AppHandle, kind: String) -> Result<Option<Str
 pub async fn upload_youtube_channels(manager: State<'_, AuthManager>) -> Result<Vec<Channel>> {
     let cred = manager.access_token(ProviderId::Google).await?;
     youtube::my_channels(&reqwest::Client::new(), &cred.access_token).await
+}
+
+/// Extract a poster frame from a video, as a base64 `data:` URL.
+///
+/// A `<video>` element in the webview shows a black frame until it plays, so a
+/// real thumbnail needs a decoded frame. ffmpeg (already required for the
+/// download pipeline) grabs one cheaply. Returns `None` when ffmpeg is missing
+/// or the grab fails - the UI then falls back to a plain placeholder.
+#[tauri::command]
+pub async fn upload_video_thumbnail(path: String) -> Result<Option<String>> {
+    use base64::Engine;
+
+    let Some(ffmpeg) = crate::download::ytdlp::locate_ffmpeg() else {
+        return Ok(None);
+    };
+
+    // Seek ~1s in (past black intro frames), grab one frame, scale to a
+    // thumbnail, and write JPEG to stdout.
+    let out = tokio::process::Command::new(ffmpeg)
+        .args(["-ss", "1", "-i"])
+        .arg(&path)
+        .args([
+            "-frames:v", "1",
+            "-vf", "scale=320:-2",
+            "-f", "image2pipe",
+            "-vcodec", "mjpeg",
+            "-",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .await
+        .map_err(|_| AppError::EngineMissing)?;
+
+    if !out.status.success() || out.stdout.is_empty() {
+        return Ok(None);
+    }
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&out.stdout);
+    Ok(Some(format!("data:image/jpeg;base64,{b64}")))
 }
 
 /// Upload a video to the user's YouTube channel. Returns the video id.

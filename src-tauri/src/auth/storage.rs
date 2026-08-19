@@ -27,56 +27,95 @@ pub trait CredentialStore: Send + Sync {
 // prompt - and callers reached for it to render UI. Connection state for the
 // UI comes from the metadata database instead; see `AuthManager::account_view`.
 
-/// The real implementation, backed by the `keyring` crate.
-pub struct OsCredentialStore;
-
-impl OsCredentialStore {
-    pub fn new() -> Self {
-        Self
-    }
-
-    fn entry(provider: ProviderId) -> Result<keyring::Entry> {
-        keyring::Entry::new(KEYRING_SERVICE, provider.as_str())
-            .map_err(|e| AppError::Keychain(e.to_string()))
-    }
+/// The real implementation: owner-only files in the app data directory.
+///
+/// Not the OS keychain. On macOS, reading a keychain item from an *unsigned*
+/// build pops a login-password prompt on every read, because the code
+/// signature changes each rebuild and the item's ACL no longer recognises the
+/// app. That made connected accounts unusable - a password prompt every time a
+/// token was read to list Pages or show a channel.
+///
+/// Files carry the same trade-off already accepted for the download sessions
+/// (see `crate::download::session`): `0600` on macOS/Linux, user-scoped
+/// `%APPDATA%` on Windows, written atomically. An access token is revocable and
+/// short-lived; a usable app without constant prompts is worth more here than
+/// encryption at rest. A credential stored in the old keychain is migrated to a
+/// file the first time it is read - one final prompt, then never again.
+pub struct OsCredentialStore {
+    dir: std::path::PathBuf,
 }
 
-impl Default for OsCredentialStore {
-    fn default() -> Self {
-        Self::new()
+impl OsCredentialStore {
+    pub fn new(dir: std::path::PathBuf) -> Self {
+        Self { dir }
+    }
+
+    fn file(&self, provider: ProviderId) -> std::path::PathBuf {
+        self.dir.join(format!("cred-{}.json", provider.as_str()))
+    }
+
+    /// One-time move of a credential stored by an earlier keychain version.
+    fn migrate_from_keychain(&self, provider: ProviderId) -> Option<Credential> {
+        let entry = keyring::Entry::new(KEYRING_SERVICE, provider.as_str()).ok()?;
+        let blob = entry.get_password().ok()?;
+        let cred: Credential = serde_json::from_str(&blob).ok()?;
+        if self.save(provider, &cred).is_ok() {
+            let _ = entry.delete_credential();
+        }
+        Some(cred)
     }
 }
 
 impl CredentialStore for OsCredentialStore {
     fn save(&self, provider: ProviderId, credential: &Credential) -> Result<()> {
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|e| AppError::Keychain(format!("credential dir: {e}")))?;
         let blob = serde_json::to_string(credential)
             .map_err(|_| AppError::Internal("credential encode failed".into()))?;
-        Self::entry(provider)?
-            .set_password(&blob)
-            .map_err(|e| AppError::Keychain(e.to_string()))
+
+        let target = self.file(provider);
+        let temp = target.with_extension("json.tmp");
+
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        {
+            use std::io::Write;
+            let mut f = options
+                .open(&temp)
+                .map_err(|e| AppError::Keychain(format!("credential file: {e}")))?;
+            f.write_all(blob.as_bytes())
+                .map_err(|e| AppError::Keychain(format!("credential file: {e}")))?;
+        }
+        std::fs::rename(&temp, &target).map_err(|e| {
+            let _ = std::fs::remove_file(&temp);
+            AppError::Keychain(format!("credential file: {e}"))
+        })
     }
 
     fn get(&self, provider: ProviderId) -> Result<Option<Credential>> {
-        match Self::entry(provider)?.get_password() {
-            Ok(blob) => {
-                let cred: Credential = serde_json::from_str(&blob)
-                    // A corrupt or older-format blob is treated as absent rather
-                    // than fatal; the user simply reconnects.
-                    .map_err(|_| AppError::Internal("stored credential unreadable".into()))?;
-                Ok(Some(cred))
-            }
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(AppError::Keychain(e.to_string())),
+        if let Ok(blob) = std::fs::read_to_string(self.file(provider)) {
+            // Corrupt/old-format is treated as absent; the user reconnects.
+            return Ok(serde_json::from_str(&blob).ok());
         }
+        Ok(self.migrate_from_keychain(provider))
     }
 
     fn delete(&self, provider: ProviderId) -> Result<()> {
-        match Self::entry(provider)?.delete_credential() {
-            Ok(()) => Ok(()),
-            // Deleting something already gone is success, not an error.
-            Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(AppError::Keychain(e.to_string())),
+        match std::fs::remove_file(self.file(provider)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(AppError::Keychain(format!("credential file: {e}"))),
         }
+        // Drop any lingering keychain entry too, so disconnect really clears it.
+        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, provider.as_str()) {
+            let _ = entry.delete_credential();
+        }
+        Ok(())
     }
 }
 

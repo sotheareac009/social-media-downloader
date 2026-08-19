@@ -44,7 +44,7 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let db = Arc::new(AccountDb::open(&data_dir.join("accounts.sqlite3"))?);
-            let store = Arc::new(OsCredentialStore::new());
+            let store = Arc::new(OsCredentialStore::new(data_dir.clone()));
 
             app.manage(AuthManager::new(store, db));
 
@@ -98,7 +98,8 @@ pub fn run() {
             commands::facebook::facebook_upload_photo,
             commands::facebook::facebook_recent_downloads,
             commands::upload::upload_targets,
-            commands::upload::upload_pick_file,
+            commands::upload::upload_pick_files,
+            commands::upload::upload_video_thumbnail,
             commands::upload::upload_youtube,
             commands::upload::upload_youtube_channels,
             commands::telegram::telegram_get_config,

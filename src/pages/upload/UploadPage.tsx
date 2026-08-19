@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
-  uploadPickFile,
+  uploadPickFiles,
+  uploadVideoThumbnail,
   uploadTargets,
   uploadYoutube,
   uploadYoutubeChannels,
@@ -10,24 +12,34 @@ import {
 } from "@/lib/upload";
 import { Button } from "@/components/ui/Button";
 import { useToast } from "@/components/ui/Toast";
-import { AlertIcon, CheckIcon, UploadIcon } from "@/components/ui/icons";
+import { AlertIcon, CheckIcon, UploadIcon, XIcon } from "@/components/ui/icons";
+import { SourceLogo, SOURCE_COLOR, type SourceId } from "@/components/home/SourceLogo";
 
-/**
- * One screen to publish an asset to a chosen platform. Common fields (file,
- * title, description) plus a platform selector; platform-specific options
- * (YouTube privacy) show conditionally. Only YouTube uploads today; the others
- * appear but say why they're not ready.
- */
+type ItemStatus = "pending" | "uploading" | "done" | "failed";
+interface Item {
+  path: string;
+  title: string;
+  description: string;
+  status: ItemStatus;
+  error?: string;
+}
+
+/** Filename without its extension, used as each video's default title. */
+function baseName(path: string): string {
+  const name = path.split("/").pop() ?? path;
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(0, dot) : name;
+}
+
 export function UploadPage() {
   const toast = useToast();
   const [targets, setTargets] = useState<UploadTarget[] | null>(null);
   const [targetId, setTargetId] = useState("youtube");
-  const [file, setFile] = useState<string | null>(null);
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
+  const [items, setItems] = useState<Item[]>([]);
   const [privacy, setPrivacy] = useState<Privacy>("unlisted");
   const [channel, setChannel] = useState<YoutubeChannel | null | "none">(null);
   const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState<string | null>(null);
 
   const mounted = useRef(true);
   useEffect(() => {
@@ -67,37 +79,73 @@ export function UploadPage() {
     };
   }, [target?.id, target?.ready]);
 
-  const pick = useCallback(async () => {
+  const addFiles = useCallback(async () => {
     try {
-      const p = await uploadPickFile(accepts as "video" | "photo");
-      if (p) setFile(p);
+      const paths = await uploadPickFiles(accepts as "video" | "photo");
+      if (paths.length === 0) return;
+      setItems((prev) => {
+        const seen = new Set(prev.map((i) => i.path));
+        const added = paths
+          .filter((p) => !seen.has(p))
+          .map((p): Item => ({
+            path: p,
+            title: baseName(p),
+            description: "",
+            status: "pending",
+          }));
+        return [...prev, ...added];
+      });
     } catch (e) {
       toast("error", messageOf(e));
     }
   }, [accepts, toast]);
 
-  const publish = useCallback(async () => {
-    if (!target?.ready || !file) return;
-    setBusy(true);
-    try {
-      if (target.id === "youtube") {
-        const id = await uploadYoutube(file, title, description, privacy);
-        toast("success", `Uploaded to YouTube. Video id: ${id}`);
-        setFile(null);
-        setTitle("");
-        setDescription("");
-      } else {
-        toast("info", "That platform isn't available yet.");
-      }
-    } catch (e) {
-      toast("error", messageOf(e));
-    } finally {
-      if (mounted.current) setBusy(false);
-    }
-  }, [target, file, title, description, privacy, toast]);
+  const removeItem = useCallback((path: string) => {
+    setItems((prev) => prev.filter((i) => i.path !== path));
+  }, []);
 
-  const fileName = file?.split("/").pop() ?? null;
-  const canPublish = target?.ready === true && !!file && !busy;
+  const editItem = useCallback((path: string, patch: Partial<Item>) => {
+    setItems((prev) => prev.map((i) => (i.path === path ? { ...i, ...patch } : i)));
+  }, []);
+
+  const publish = useCallback(async () => {
+    if (!target?.ready || items.length === 0) return;
+    setBusy(true);
+    // Reset any previous outcomes so a re-run reads cleanly.
+    setItems((prev) => prev.map((i) => ({ ...i, status: "pending", error: undefined })));
+
+    let ok = 0;
+    for (const item of items) {
+      setItems((prev) =>
+        prev.map((i) => (i.path === item.path ? { ...i, status: "uploading" } : i)),
+      );
+      try {
+        if (target.id === "youtube") {
+          const perTitle = item.title.trim() || baseName(item.path);
+          await uploadYoutube(item.path, perTitle, item.description, privacy);
+        } else {
+          throw new Error("That platform isn't available yet.");
+        }
+        ok += 1;
+        setItems((prev) =>
+          prev.map((i) => (i.path === item.path ? { ...i, status: "done" } : i)),
+        );
+      } catch (e) {
+        setItems((prev) =>
+          prev.map((i) =>
+            i.path === item.path ? { ...i, status: "failed", error: messageOf(e) } : i,
+          ),
+        );
+      }
+    }
+
+    if (mounted.current) setBusy(false);
+    const failed = items.length - ok;
+    if (failed === 0) toast("success", `Uploaded ${ok} ${ok === 1 ? "video" : "videos"}.`);
+    else toast(ok > 0 ? "info" : "error", `${ok} uploaded, ${failed} failed.`);
+  }, [target, items, privacy, toast]);
+
+  const canPublish = target?.ready === true && items.length > 0 && !busy;
 
   return (
     <div className="page">
@@ -106,37 +154,54 @@ export function UploadPage() {
           <UploadIcon size={12} />
           Upload
         </span>
-        <h1 className="page__title">Upload &amp; publish</h1>
+        <h1 className="page__title">
+          Upload &amp; <span className="up-accent">publish</span>
+        </h1>
         <p className="page__lede">
-          Pick a file, add the details, choose where to post it.
+          Add one or more files, set the details, choose where to post them.
         </p>
       </header>
 
-      <div className="fbpost rise" style={{ maxWidth: 620 }}>
+      <div className="fbpost rise" style={{ maxWidth: 640 }}>
         <label className="tg-field__label">Post to</label>
         <div className="up-targets">
-          {(targets ?? []).map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              className={`up-target ${targetId === t.id ? "up-target--active" : ""} ${
-                t.ready ? "" : "up-target--off"
-              }`.trim()}
-              onClick={() => setTargetId(t.id)}
-              title={t.reason ?? undefined}
-            >
-              <span className="up-target__name">{t.name}</span>
-              <span className="up-target__state">
-                {t.ready ? (
-                  <>
-                    <CheckIcon size={11} /> Ready
-                  </>
-                ) : (
-                  "Not ready"
+          {(targets ?? []).map((t) => {
+            const brand = SOURCE_COLOR[t.id as SourceId] ?? "var(--accent)";
+            return (
+              <button
+                key={t.id}
+                type="button"
+                className={`up-target ${targetId === t.id ? "up-target--active" : ""} ${
+                  t.ready ? "" : "up-target--off"
+                }`.trim()}
+                style={{ ["--brand" as string]: brand }}
+                onClick={() => setTargetId(t.id)}
+                title={t.reason ?? undefined}
+              >
+                <span className="up-target__edge" />
+                <SourceLogo source={t.id as SourceId} />
+                <span className="up-target__text">
+                  <span className="up-target__name">{t.name}</span>
+                  <span
+                    className={`up-target__pill ${t.ready ? "up-target__pill--ok" : "up-target__pill--off"}`}
+                  >
+                    {t.ready ? (
+                      <>
+                        <CheckIcon size={10} /> Ready
+                      </>
+                    ) : (
+                      "Not ready"
+                    )}
+                  </span>
+                </span>
+                {targetId === t.id && (
+                  <span className="up-target__check">
+                    <CheckIcon size={13} />
+                  </span>
                 )}
-              </span>
-            </button>
-          ))}
+              </button>
+            );
+          })}
         </div>
 
         {target && !target.ready && target.reason && (
@@ -161,44 +226,86 @@ export function UploadPage() {
           </div>
         )}
 
-        <label className="tg-field__label" style={{ marginTop: 18 }}>
-          {accepts === "video" ? "Video" : "Photo"}
-        </label>
-        <div className="fbpost__file">
-          <button className="btn btn--ghost" type="button" onClick={() => void pick()} disabled={busy}>
-            {fileName ? "Change file" : "Choose file"}
-          </button>
-          {fileName && (
-            <span className="fbpost__filename">
-              <CheckIcon size={13} /> {fileName}
-            </span>
-          )}
+        {/* Files */}
+        <div className="up-files-head">
+          <label className="tg-field__label" style={{ margin: 0 }}>
+            {accepts === "video" ? "Videos" : "Photos"}
+            {items.length > 0 && <span className="up-count"> ({items.length})</span>}
+          </label>
+          <div className="up-files-actions">
+            {items.length > 0 && !busy && (
+              <button className="btn btn--ghost btn--sm" type="button" onClick={() => setItems([])}>
+                Clear all
+              </button>
+            )}
+            <button className="btn btn--ghost btn--sm" type="button" onClick={() => void addFiles()} disabled={busy}>
+              Add files
+            </button>
+          </div>
         </div>
 
-        <label className="tg-field__label" htmlFor="up-title" style={{ marginTop: 16 }}>
-          Title
-        </label>
-        <input
-          id="up-title"
-          className="tg-field__input"
-          placeholder="A title for your upload"
-          value={title}
-          disabled={busy}
-          onChange={(e) => setTitle(e.target.value)}
-        />
-
-        <label className="tg-field__label" htmlFor="up-desc" style={{ marginTop: 16 }}>
-          Description
-        </label>
-        <textarea
-          id="up-desc"
-          className="tg-field__input"
-          style={{ minHeight: 90, resize: "vertical" }}
-          placeholder="Say more about this…"
-          value={description}
-          disabled={busy}
-          onChange={(e) => setDescription(e.target.value)}
-        />
+        {items.length === 0 ? (
+          <p className="up-empty">No files added yet. Click “Add files” to choose one or more.</p>
+        ) : (
+          <ul className="up-list">
+            {items.map((item) => (
+              <li key={item.path} className={`up-item up-item--${item.status}`}>
+                <button
+                  type="button"
+                  className="up-item__thumb"
+                  onClick={() => setPreview(item.path)}
+                  title="Preview"
+                  aria-label="Preview"
+                >
+                  <MediaThumb path={item.path} kind={accepts as "video" | "photo"} />
+                  <span className="up-item__play">▶</span>
+                </button>
+                <div className="up-item__body">
+                  <div className="up-item__row">
+                    <span className="up-item__name" title={item.path.split("/").pop()}>
+                      {item.path.split("/").pop()}
+                    </span>
+                    {!busy && (
+                      <button
+                        className="up-item__remove"
+                        type="button"
+                        onClick={() => removeItem(item.path)}
+                        aria-label="Remove"
+                        title="Remove"
+                      >
+                        <XIcon size={14} />
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    className="tg-field__input up-item__field"
+                    placeholder="Title"
+                    value={item.title}
+                    disabled={busy}
+                    onChange={(e) => editItem(item.path, { title: e.target.value })}
+                  />
+                  <textarea
+                    className="tg-field__input up-item__field"
+                    style={{ minHeight: 52, resize: "vertical" }}
+                    placeholder="Description (optional)"
+                    value={item.description}
+                    disabled={busy}
+                    onChange={(e) => editItem(item.path, { description: e.target.value })}
+                  />
+                  <div className="up-item__status">
+                    {item.status === "uploading" && "Uploading…"}
+                    {item.status === "done" && (
+                      <span className="up-item__ok"><CheckIcon size={11} /> Uploaded</span>
+                    )}
+                    {item.status === "failed" && (
+                      <span className="up-item__bad">{item.error ?? "Failed"}</span>
+                    )}
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
 
         {target?.id === "youtube" && (
           <>
@@ -227,10 +334,66 @@ export function UploadPage() {
             icon={<UploadIcon size={15} />}
             onClick={() => void publish()}
           >
-            {busy ? "Uploading…" : `Upload to ${target?.name ?? "…"}`}
+            {busy
+              ? "Uploading…"
+              : `Upload ${items.length > 1 ? `${items.length} to` : "to"} ${target?.name ?? "…"}`}
           </Button>
         </div>
       </div>
+
+      {preview && (
+        <div
+          className="up-modal"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setPreview(null)}
+        >
+          <div className="up-modal__inner" onClick={(e) => e.stopPropagation()}>
+            <button
+              className="up-modal__close"
+              type="button"
+              onClick={() => setPreview(null)}
+              aria-label="Close preview"
+            >
+              <XIcon size={18} />
+            </button>
+            {accepts === "video" ? (
+              <video src={convertFileSrc(preview)} controls autoPlay playsInline />
+            ) : (
+              <img src={convertFileSrc(preview)} alt="Preview" />
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Thumbnail for a list item: a real poster frame for videos, the image itself
+ *  for photos. Falls back to a placeholder while (or if) no frame is available. */
+function MediaThumb({ path, kind }: { path: string; kind: "video" | "photo" }) {
+  const [poster, setPoster] = useState<string | null>(null);
+  const [tried, setTried] = useState(false);
+
+  useEffect(() => {
+    if (kind !== "video") return;
+    let alive = true;
+    uploadVideoThumbnail(path)
+      .then((p) => alive && setPoster(p))
+      .catch(() => {})
+      .finally(() => alive && setTried(true));
+    return () => {
+      alive = false;
+    };
+  }, [path, kind]);
+
+  if (kind === "photo") {
+    return <img src={convertFileSrc(path)} alt="" />;
+  }
+  if (poster) return <img src={poster} alt="" />;
+  return (
+    <div className={`up-thumb-fallback ${tried ? "" : "up-thumb-fallback--load"}`.trim()}>
+      <UploadIcon size={16} />
     </div>
   );
 }
@@ -239,5 +402,6 @@ function messageOf(e: unknown): string {
   if (typeof e === "object" && e && "message" in e) {
     return String((e as { message: unknown }).message);
   }
+  if (e instanceof Error) return e.message;
   return "Something went wrong.";
 }

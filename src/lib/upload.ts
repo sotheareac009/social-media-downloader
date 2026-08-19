@@ -23,8 +23,12 @@ export const uploadTargets = () => invoke<UploadTarget[]>("upload_targets");
 export const uploadYoutubeChannels = () =>
   invoke<YoutubeChannel[]>("upload_youtube_channels");
 
-export const uploadPickFile = (kind: "video" | "photo" | "any") =>
-  invoke<string | null>("upload_pick_file", { kind });
+export const uploadPickFiles = (kind: "video" | "photo" | "any") =>
+  invoke<string[]>("upload_pick_files", { kind });
+
+/** A base64 data-URL poster frame for a video, or null if unavailable. */
+export const uploadVideoThumbnail = (path: string) =>
+  invoke<string | null>("upload_video_thumbnail", { path });
 
 /** Upload a video to YouTube. Resolves to the new video id. */
 export const uploadYoutube = (
