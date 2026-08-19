@@ -21,9 +21,18 @@ use crate::download::quality::Quality;
 use crate::download::settings::Settings;
 use crate::download::compat;
 use crate::download::cookies::CookieFile;
-use crate::download::session::{self, InstagramSession, SessionStatus};
+use crate::download::session::{self, SessionKind, SessionStatus, WebSession};
 use crate::download::slideshow;
 use crate::download::url::{classify, classify_target, Source, TargetKind};
+
+/// Which sessions apply to which sources. Only these two use a login.
+fn session_kind_for(source: Source) -> Option<SessionKind> {
+    match source {
+        Source::Instagram => Some(SessionKind::Instagram),
+        Source::Facebook => Some(SessionKind::Facebook),
+        _ => None,
+    }
+}
 use crate::download::ytdlp::{
     self, FormatReport, MediaInfo, Progress, ProfileListing, YOUTUBE_CLIENTS,
 };
@@ -180,16 +189,14 @@ pub struct DownloadManager {
     order: Mutex<Vec<String>>,
     dest_dir: Mutex<PathBuf>,
     quality: Mutex<Quality>,
-    /// Non-secret marker mirroring the keychain entry; see `settings`.
-    instagram_connected_at: Mutex<Option<i64>>,
     prefer_compatible: Mutex<bool>,
-    /// The Instagram session, held after its first successful read.
-    ///
-    /// Without this, every job decrypts the keychain entry again — and macOS
-    /// asks for the login password each time, so downloading a ten-reel
-    /// profile meant ten password prompts. Reading once per app run is the
-    /// difference between usable and infuriating.
-    instagram_cache: Mutex<Option<Arc<session::InstagramSession>>>,
+    /// When each platform's session was captured, or absent. Mirrors the
+    /// non-secret markers in `settings`, so the UI never reads a session file
+    /// just to answer "connected?".
+    session_markers: Mutex<HashMap<SessionKind, i64>>,
+    /// Each platform's session, held after its first read from disk so a
+    /// large batch does not re-read the file per job.
+    session_cache: Mutex<HashMap<SessionKind, Arc<WebSession>>>,
     /// Where the app would save with no preference set.
     default_dir: PathBuf,
     /// Where `downloader-settings.json` lives.
@@ -209,9 +216,18 @@ impl DownloadManager {
             order: Mutex::new(Vec::new()),
             dest_dir: Mutex::new(active),
             quality: Mutex::new(saved.quality),
-            instagram_connected_at: Mutex::new(saved.instagram_connected_at),
             prefer_compatible: Mutex::new(saved.prefer_compatible),
-            instagram_cache: Mutex::new(None),
+            session_markers: Mutex::new({
+                let mut m = HashMap::new();
+                if let Some(at) = saved.instagram_connected_at {
+                    m.insert(SessionKind::Instagram, at);
+                }
+                if let Some(at) = saved.facebook_connected_at {
+                    m.insert(SessionKind::Facebook, at);
+                }
+                m
+            }),
+            session_cache: Mutex::new(HashMap::new()),
             default_dir,
             config_dir,
             slots: Arc::new(Semaphore::new(MAX_CONCURRENT)),
@@ -263,43 +279,76 @@ impl DownloadManager {
         Ok(self.destination_view())
     }
 
-    /// Whether Instagram is connected, answered without touching the keychain.
-    pub fn instagram_status(&self) -> SessionStatus {
-        let at = *self
-            .instagram_connected_at
-            .lock()
-            .expect("instagram marker lock");
+    fn marker(&self, kind: SessionKind) -> Option<i64> {
+        self.session_markers.lock().expect("marker lock").get(&kind).copied()
+    }
+
+    /// Whether a platform is connected, answered without reading the session.
+    /// Also carries the display profile (name/avatar) captured at login, which
+    /// is non-secret metadata stored separately from the cookies.
+    pub fn session_status(&self, kind: SessionKind) -> SessionStatus {
+        let at = self.marker(kind);
+        let profile = at
+            .and(session::load_profile(&self.config_dir, kind))
+            .unwrap_or_default();
         SessionStatus {
             connected: at.is_some(),
             captured_at: at,
+            display_name: profile.display_name,
+            avatar_url: profile.avatar_url,
         }
     }
 
     /// Store a captured session and record that one exists.
-    pub fn instagram_remember(&self, captured: &InstagramSession) -> Result<SessionStatus> {
-        session::save(&self.config_dir, captured)?;
-        *self.instagram_cache.lock().expect("ig cache lock") =
-            Some(Arc::new(captured.clone()));
-        *self
-            .instagram_connected_at
+    pub fn session_remember(&self, kind: SessionKind, captured: &WebSession) -> Result<SessionStatus> {
+        session::save(&self.config_dir, kind, captured)?;
+        self.session_cache
             .lock()
-            .expect("instagram marker lock") = Some(captured.captured_at);
+            .expect("session cache lock")
+            .insert(kind, Arc::new(captured.clone()));
+        self.session_markers
+            .lock()
+            .expect("marker lock")
+            .insert(kind, captured.captured_at);
         self.persist(self.saved_destination())?;
-        Ok(self.instagram_status())
+        Ok(self.session_status(kind))
     }
 
-    /// Forget the session. The marker is cleared even if the keychain delete
-    /// fails, so the UI can never claim a connection the app cannot use.
-    pub fn instagram_forget(&self) -> Result<SessionStatus> {
-        let cleared = session::clear(&self.config_dir);
-        *self.instagram_cache.lock().expect("ig cache lock") = None;
-        *self
-            .instagram_connected_at
-            .lock()
-            .expect("instagram marker lock") = None;
+    /// Store the display profile captured at login (best-effort metadata).
+    pub fn session_set_profile(
+        &self,
+        kind: SessionKind,
+        profile: &session::SessionProfile,
+    ) -> Result<()> {
+        session::save_profile(&self.config_dir, kind, profile)
+    }
+
+    /// Forget a session. The marker is cleared even if the file delete fails,
+    /// so the UI can never claim a connection the app cannot use.
+    pub fn session_forget(&self, kind: SessionKind) -> Result<SessionStatus> {
+        let cleared = session::clear(&self.config_dir, kind);
+        session::clear_profile(&self.config_dir, kind);
+        self.session_cache.lock().expect("session cache lock").remove(&kind);
+        self.session_markers.lock().expect("marker lock").remove(&kind);
         self.persist(self.saved_destination())?;
         cleared?;
-        Ok(self.instagram_status())
+        Ok(self.session_status(kind))
+    }
+
+    // Thin per-platform wrappers, so command and frontend names stay stable.
+    pub fn instagram_status(&self) -> SessionStatus { self.session_status(SessionKind::Instagram) }
+    pub fn instagram_remember(&self, s: &WebSession) -> Result<SessionStatus> {
+        self.session_remember(SessionKind::Instagram, s)
+    }
+    pub fn instagram_forget(&self) -> Result<SessionStatus> {
+        self.session_forget(SessionKind::Instagram)
+    }
+    pub fn facebook_status(&self) -> SessionStatus { self.session_status(SessionKind::Facebook) }
+    pub fn facebook_remember(&self, s: &WebSession) -> Result<SessionStatus> {
+        self.session_remember(SessionKind::Facebook, s)
+    }
+    pub fn facebook_forget(&self) -> Result<SessionStatus> {
+        self.session_forget(SessionKind::Facebook)
     }
 
     pub fn prefer_compatible(&self) -> bool {
@@ -339,10 +388,8 @@ impl DownloadManager {
         Settings {
             destination,
             quality: self.quality(),
-            instagram_connected_at: *self
-                .instagram_connected_at
-                .lock()
-                .expect("instagram marker lock"),
+            instagram_connected_at: self.marker(SessionKind::Instagram),
+            facebook_connected_at: self.marker(SessionKind::Facebook),
             prefer_compatible: self.prefer_compatible(),
         }
         .save(&self.config_dir)
@@ -398,34 +445,33 @@ impl DownloadManager {
 
     /// A cookie jar for this source, or `None`.
     ///
-    /// Instagram is the only source that ever gets one, and only when the user
-    /// has explicitly signed in through the app's own login window. Every
-    /// other source downloads with no session, exactly as before.
+    /// Only Instagram and Facebook ever get one, and only when the user has
+    /// signed in through the app's own login window. Every other source
+    /// downloads with no session at all.
     fn cookie_jar(&self, source: Source) -> Option<CookieFile> {
-        if source != Source::Instagram {
-            return None;
-        }
-        let stored = self.instagram_session()?;
-        if !stored.is_usable() {
+        let kind = session_kind_for(source)?;
+        let stored = self.cached_session(kind)?;
+        if !stored.is_usable_for(kind) {
             return None;
         }
         CookieFile::write(&stored.cookies).ok()
     }
 
-    /// The session, from memory when possible. Only the first call in an app
-    /// run can trigger a keychain prompt.
-    fn instagram_session(&self) -> Option<Arc<session::InstagramSession>> {
-        if let Some(cached) = self.instagram_cache.lock().expect("ig cache lock").clone() {
+    /// A platform's session, from memory when possible. The first call per run
+    /// reads the file; the marker gate means an unconnected platform never
+    /// touches disk.
+    fn cached_session(&self, kind: SessionKind) -> Option<Arc<WebSession>> {
+        if let Some(cached) = self.session_cache.lock().expect("session cache lock").get(&kind).cloned() {
             return Some(cached);
         }
-        // Nothing recorded means nothing to decrypt, so do not even ask.
-        self.instagram_connected_at
-            .lock()
-            .expect("instagram marker lock")
-            .as_ref()?;
+        // Nothing recorded means nothing to read.
+        self.marker(kind)?;
 
-        let loaded = Arc::new(session::load(&self.config_dir).ok().flatten()?);
-        *self.instagram_cache.lock().expect("ig cache lock") = Some(loaded.clone());
+        let loaded = Arc::new(session::load(&self.config_dir, kind).ok().flatten()?);
+        self.session_cache
+            .lock()
+            .expect("session cache lock")
+            .insert(kind, loaded.clone());
         Some(loaded)
     }
 

@@ -2369,3 +2369,65 @@
   color: var(--text-primary);
   white-space: pre;
 }
+
+/* --- settings ------------------------------------------------------------ */
+
+.settings-card {
+  padding: 20px;
+  border-radius: var(--r-xl);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-sm);
+  max-width: 560px;
+}
+
+.settings-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-card__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 640;
+  color: var(--text-primary);
+}
+
+.settings-card__lede {
+  margin: 6px 0 16px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.settings-card__lede code,
+.settings-card__actions + * code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.settings-card__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+/* Telegram brand tile — the app's blue circle with a white plane. */
+.logo--telegram {
+  background: linear-gradient(180deg, #2aabee, #229ed9);
+}
+
+/* Telegram-branded accents on its own page. */
+.page__eyebrow--telegram {
+  color: #229ed9;
+  border-color: color-mix(in srgb, #229ed9 40%, transparent);
+}
+
+.tg-connected__icon--brand {
+  border-color: color-mix(in srgb, #229ed9 45%, transparent);
+  background: color-mix(in srgb, #229ed9 12%, var(--surface-1));
+  color: #229ed9;
+}

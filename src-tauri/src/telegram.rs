@@ -29,9 +29,52 @@ use serde::Serialize;
 use crate::errors::{AppError, Result};
 
 const FILE_NAME: &str = "telegram-session.txt";
+const CONFIG_FILE: &str = "telegram-config.json";
 
 fn path(dir: &Path) -> PathBuf {
     dir.join(FILE_NAME)
+}
+
+fn config_path(dir: &Path) -> PathBuf {
+    dir.join(CONFIG_FILE)
+}
+
+/// App credentials (api_id / api_hash) the user entered in Settings.
+///
+/// Persisted because a packaged build does not read `.env` - the file is
+/// discovered relative to the working directory, which for a double-clicked
+/// app is not the project. Storing them here is what lets a shipped build be
+/// configured without a rebuild. These identify the *application* to Telegram,
+/// not the user, so a plain JSON file is the right home - unlike the session.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct TelegramCredentials {
+    #[serde(default)]
+    pub api_id: String,
+    #[serde(default)]
+    pub api_hash: String,
+}
+
+pub fn load_credentials(dir: &Path) -> Option<TelegramCredentials> {
+    let raw = std::fs::read_to_string(config_path(dir)).ok()?;
+    let creds: TelegramCredentials = serde_json::from_str(&raw).ok()?;
+    (!creds.api_id.trim().is_empty() && !creds.api_hash.trim().is_empty()).then_some(creds)
+}
+
+pub fn save_credentials(dir: &Path, creds: &TelegramCredentials) -> Result<()> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| AppError::DownloadPath(format!("config directory: {e}")))?;
+    let json = serde_json::to_string_pretty(creds)
+        .map_err(|_| AppError::Internal("config encode failed".into()))?;
+    std::fs::write(config_path(dir), json)
+        .map_err(|e| AppError::DownloadPath(format!("config file: {e}")))
+}
+
+pub fn clear_credentials(dir: &Path) -> Result<()> {
+    match std::fs::remove_file(config_path(dir)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(AppError::DownloadPath(format!("config file: {e}"))),
+    }
 }
 
 /// Non-secret marker for the UI: connected or not, and since when. The session
@@ -120,6 +163,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn credentials_round_trip_and_require_both_fields() {
+        let dir = scratch("creds");
+        // A half-filled config counts as unset.
+        save_credentials(&dir, &TelegramCredentials { api_id: "123".into(), api_hash: "".into() }).unwrap();
+        assert!(load_credentials(&dir).is_none(), "half-config must not count");
+
+        save_credentials(&dir, &TelegramCredentials {
+            api_id: "38837128".into(),
+            api_hash: "5bbe60bb99e8319216ffb68f745d7283".into(),
+        }).unwrap();
+        let got = load_credentials(&dir).expect("should load");
+        assert_eq!(got.api_id, "38837128");
+        assert_eq!(got.api_hash, "5bbe60bb99e8319216ffb68f745d7283");
+
+        clear_credentials(&dir).unwrap();
+        assert!(load_credentials(&dir).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

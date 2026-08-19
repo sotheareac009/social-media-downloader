@@ -35,6 +35,8 @@ pub struct Settings {
     /// keychain and is read only when a download actually needs it.
     #[serde(default)]
     pub instagram_connected_at: Option<i64>,
+    #[serde(default)]
+    pub facebook_connected_at: Option<i64>,
     /// Prefer H.264 so downloads open in QuickTime and Photos.
     ///
     /// Defaults to on, including for settings files written before this field
@@ -54,6 +56,7 @@ impl Default for Settings {
             destination: None,
             quality: Quality::default(),
             instagram_connected_at: None,
+            facebook_connected_at: None,
             prefer_compatible: true,
         }
     }
@@ -117,6 +120,7 @@ mod tests {
             destination: Some(PathBuf::from("/tmp/somewhere")),
             quality: Quality::P1080,
             instagram_connected_at: Some(1_700_000_000),
+            facebook_connected_at: None,
             prefer_compatible: false,
         };
         s.save(&dir).unwrap();

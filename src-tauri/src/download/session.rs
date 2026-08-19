@@ -36,13 +36,51 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{AppError, Result};
 
-/// Filename inside the app data directory.
-const FILE_NAME: &str = "instagram-session.json";
-
-/// Legacy keychain location, read once so an existing sign-in survives the
-/// move to file storage. Written to only by versions before that change.
+/// Legacy keychain location, read once so an existing Instagram sign-in
+/// survives the move to file storage. Written to only by versions before that.
 const LEGACY_KEYRING_SERVICE: &str = "com.reach.mediadownloader.download";
 const LEGACY_KEYRING_ACCOUNT: &str = "instagram-session";
+
+/// Which platform a captured session belongs to.
+///
+/// The storage, capture and cookie-jar machinery is identical across
+/// platforms; only three things differ per platform, and they live here: the
+/// filename, which cookie proves a real login, and the cookie domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SessionKind {
+    Instagram,
+    Facebook,
+}
+
+impl SessionKind {
+    fn file_name(self) -> &'static str {
+        match self {
+            SessionKind::Instagram => "instagram-session.json",
+            SessionKind::Facebook => "facebook-session.json",
+        }
+    }
+
+    /// A session is "usable" only when the cookie(s) that prove a real login
+    /// are present. Anonymous visitors get other cookies (csrftoken, datr),
+    /// so their presence means nothing.
+    fn required_cookies(self) -> &'static [&'static str] {
+        match self {
+            // Instagram's login cookie.
+            SessionKind::Instagram => &["sessionid"],
+            // Facebook needs both: c_user is the account id, xs the secret.
+            SessionKind::Facebook => &["c_user", "xs"],
+        }
+    }
+
+    /// Whether a cookie domain belongs to this platform.
+    pub fn domain_matches(self, domain: &str) -> bool {
+        let d = domain.trim_start_matches('.').to_ascii_lowercase();
+        match self {
+            SessionKind::Instagram => d == "instagram.com" || d.ends_with(".instagram.com"),
+            SessionKind::Facebook => d == "facebook.com" || d.ends_with(".facebook.com"),
+        }
+    }
+}
 
 /// One cookie, reduced to the fields a Netscape cookie file needs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,22 +94,29 @@ pub struct StoredCookie {
     pub expires: i64,
 }
 
-/// A captured Instagram login.
+/// A captured web login: the cookies plus when they were taken.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InstagramSession {
+pub struct WebSession {
     pub cookies: Vec<StoredCookie>,
     pub captured_at: i64,
 }
 
-impl InstagramSession {
-    /// Whether this looks like a real logged-in session.
-    ///
-    /// `sessionid` is the one that matters; without it Instagram treats the
-    /// request as anonymous and the download fails exactly as before.
+/// The original name, kept so existing Instagram code reads unchanged.
+pub type InstagramSession = WebSession;
+
+impl WebSession {
+    /// Whether this looks like a real logged-in session for `kind`.
+    pub fn is_usable_for(&self, kind: SessionKind) -> bool {
+        kind.required_cookies().iter().all(|needed| {
+            self.cookies
+                .iter()
+                .any(|c| c.name == *needed && !c.value.is_empty())
+        })
+    }
+
+    /// Back-compat shorthand for the Instagram check.
     pub fn is_usable(&self) -> bool {
-        self.cookies
-            .iter()
-            .any(|c| c.name == "sessionid" && !c.value.is_empty())
+        self.is_usable_for(SessionKind::Instagram)
     }
 }
 
@@ -82,6 +127,72 @@ pub struct SessionStatus {
     pub connected: bool,
     /// Unix seconds, so the UI can say how old the session is.
     pub captured_at: Option<i64>,
+    /// The logged-in account's display name, when it could be fetched.
+    pub display_name: Option<String>,
+    /// A profile-picture URL (https), when available. Not secret — it is the
+    /// same avatar anyone sees, and the CSP already permits https images.
+    pub avatar_url: Option<String>,
+}
+
+/// Non-secret display metadata for a connected account.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionProfile {
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+}
+
+const PROFILES_FILE: &str = "session-profiles.json";
+
+fn profiles_path(dir: &Path) -> PathBuf {
+    dir.join(PROFILES_FILE)
+}
+
+fn profile_key(kind: SessionKind) -> &'static str {
+    match kind {
+        SessionKind::Instagram => "instagram",
+        SessionKind::Facebook => "facebook",
+    }
+}
+
+/// Load the stored display profile for a platform, if any. Never fails hard:
+/// a missing or corrupt file just means "no profile", and the account still
+/// shows as connected.
+pub fn load_profile(dir: &Path, kind: SessionKind) -> Option<SessionProfile> {
+    let raw = std::fs::read_to_string(profiles_path(dir)).ok()?;
+    let map: std::collections::HashMap<String, SessionProfile> =
+        serde_json::from_str(&raw).ok()?;
+    map.get(profile_key(kind)).cloned()
+}
+
+/// Merge a platform's profile into the shared profiles file.
+pub fn save_profile(dir: &Path, kind: SessionKind, profile: &SessionProfile) -> Result<()> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| AppError::DownloadPath(format!("profiles directory: {e}")))?;
+    let mut map: std::collections::HashMap<String, SessionProfile> =
+        std::fs::read_to_string(profiles_path(dir))
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+    map.insert(profile_key(kind).to_string(), profile.clone());
+    let json = serde_json::to_string_pretty(&map)
+        .map_err(|_| AppError::Internal("profile encode failed".into()))?;
+    std::fs::write(profiles_path(dir), json)
+        .map_err(|e| AppError::DownloadPath(format!("profiles file: {e}")))
+}
+
+pub fn clear_profile(dir: &Path, kind: SessionKind) {
+    if let Ok(raw) = std::fs::read_to_string(profiles_path(dir)) {
+        if let Ok(mut map) =
+            serde_json::from_str::<std::collections::HashMap<String, SessionProfile>>(&raw)
+        {
+            map.remove(profile_key(kind));
+            if let Ok(json) = serde_json::to_string_pretty(&map) {
+                let _ = std::fs::write(profiles_path(dir), json);
+            }
+        }
+    }
 }
 
 /// Whether a cookie's domain belongs to Instagram.
@@ -93,12 +204,15 @@ pub struct SessionStatus {
 /// Asking for *all* cookies and matching the domain here is the only way to
 /// see a session at all.
 pub fn is_instagram_domain(domain: &str) -> bool {
-    let d = domain.trim_start_matches('.').to_ascii_lowercase();
-    d == "instagram.com" || d.ends_with(".instagram.com")
+    SessionKind::Instagram.domain_matches(domain)
 }
 
-fn path(dir: &Path) -> PathBuf {
-    dir.join(FILE_NAME)
+pub fn is_facebook_domain(domain: &str) -> bool {
+    SessionKind::Facebook.domain_matches(domain)
+}
+
+fn path(dir: &Path, kind: SessionKind) -> PathBuf {
+    dir.join(kind.file_name())
 }
 
 /// Write the session so only the owner can read it.
@@ -110,11 +224,11 @@ fn path(dir: &Path) -> PathBuf {
 /// (`%APPDATA%\com.reach.mediadownloader`) is already scoped to the user
 /// account by its inherited ACL, which is the same protection `~/.aws` and
 /// `%USERPROFILE%\.ssh` rely on there.
-pub fn save(dir: &Path, session: &InstagramSession) -> Result<()> {
+pub fn save(dir: &Path, kind: SessionKind, session: &WebSession) -> Result<()> {
     std::fs::create_dir_all(dir)
         .map_err(|e| AppError::DownloadPath(format!("session directory: {e}")))?;
 
-    let target = path(dir);
+    let target = path(dir, kind);
     // Replace atomically so a crash mid-write cannot leave a truncated file
     // where a valid session used to be.
     let temp = target.with_extension("json.tmp");
@@ -148,34 +262,41 @@ pub fn save(dir: &Path, session: &InstagramSession) -> Result<()> {
 ///
 /// A corrupt or hand-edited file is treated as "no session" rather than an
 /// error: the worst outcome is being asked to sign in again.
-pub fn load(dir: &Path) -> Result<Option<InstagramSession>> {
-    if let Ok(blob) = std::fs::read_to_string(path(dir)) {
+pub fn load(dir: &Path, kind: SessionKind) -> Result<Option<WebSession>> {
+    if let Ok(blob) = std::fs::read_to_string(path(dir, kind)) {
         return Ok(serde_json::from_str(&blob).ok());
     }
-    Ok(migrate_from_keychain(dir))
+    // Only Instagram ever lived in the keychain; nothing to migrate otherwise.
+    if kind == SessionKind::Instagram {
+        return Ok(migrate_from_keychain(dir));
+    }
+    Ok(None)
 }
 
 /// One-time move of a session stored by an earlier version.
 ///
 /// Costs a single keychain prompt, then never again - which is the whole point
 /// of the change. Failure is silent: the user simply signs in once more.
-fn migrate_from_keychain(dir: &Path) -> Option<InstagramSession> {
+fn migrate_from_keychain(dir: &Path) -> Option<WebSession> {
     let entry = keyring::Entry::new(LEGACY_KEYRING_SERVICE, LEGACY_KEYRING_ACCOUNT).ok()?;
     let blob = entry.get_password().ok()?;
-    let session: InstagramSession = serde_json::from_str(&blob).ok()?;
+    let session: WebSession = serde_json::from_str(&blob).ok()?;
 
-    if save(dir, &session).is_ok() {
+    if save(dir, SessionKind::Instagram, &session).is_ok() {
         // Only remove the old copy once the new one is safely written.
         let _ = entry.delete_credential();
     }
     Some(session)
 }
 
-pub fn clear(dir: &Path) -> Result<()> {
-    match std::fs::remove_file(path(dir)) {
+pub fn clear(dir: &Path, kind: SessionKind) -> Result<()> {
+    match std::fs::remove_file(path(dir, kind)) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(AppError::DownloadPath(format!("session file: {e}"))),
+    }
+    if kind != SessionKind::Instagram {
+        return Ok(());
     }
     // Also drop any legacy entry, so signing out really signs out.
     if let Ok(entry) = keyring::Entry::new(LEGACY_KEYRING_SERVICE, LEGACY_KEYRING_ACCOUNT) {
@@ -223,8 +344,8 @@ mod tests {
     #[test]
     fn a_session_round_trips_through_the_file() {
         let dir = scratch("roundtrip");
-        save(&dir, &session()).unwrap();
-        let back = load(&dir).unwrap().expect("session should load");
+        save(&dir, SessionKind::Instagram, &session()).unwrap();
+        let back = load(&dir, SessionKind::Instagram).unwrap().expect("session should load");
         assert!(back.is_usable());
         assert_eq!(back.captured_at, 42);
         let _ = std::fs::remove_dir_all(&dir);
@@ -236,8 +357,8 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let dir = scratch("perms");
-            save(&dir, &session()).unwrap();
-            let mode = std::fs::metadata(dir.join(FILE_NAME)).unwrap().permissions().mode();
+            save(&dir, SessionKind::Instagram, &session()).unwrap();
+            let mode = std::fs::metadata(path(&dir, SessionKind::Instagram)).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "a session cookie must not be world-readable");
             let _ = std::fs::remove_dir_all(&dir);
         }
@@ -246,26 +367,26 @@ mod tests {
     #[test]
     fn clearing_removes_the_file_and_is_idempotent() {
         let dir = scratch("clear");
-        save(&dir, &session()).unwrap();
-        clear(&dir).unwrap();
-        assert!(!dir.join(FILE_NAME).exists());
+        save(&dir, SessionKind::Instagram, &session()).unwrap();
+        clear(&dir, SessionKind::Instagram).unwrap();
+        assert!(!path(&dir, SessionKind::Instagram).exists());
         // Signing out twice must not error.
-        clear(&dir).unwrap();
+        clear(&dir, SessionKind::Instagram).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_corrupt_file_reads_as_no_session_rather_than_an_error() {
         let dir = scratch("corrupt");
-        std::fs::write(dir.join(FILE_NAME), "{ not json").unwrap();
-        assert!(load(&dir).unwrap().is_none());
+        std::fs::write(path(&dir, SessionKind::Instagram), "{ not json").unwrap();
+        assert!(load(&dir, SessionKind::Instagram).unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn no_temp_file_is_left_behind_after_a_write() {
         let dir = scratch("temp");
-        save(&dir, &session()).unwrap();
+        save(&dir, SessionKind::Instagram, &session()).unwrap();
         let leftovers: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()
@@ -322,6 +443,27 @@ mod tests {
     }
 
     #[test]
+    fn facebook_needs_both_c_user_and_xs() {
+        let only_id = WebSession { cookies: vec![cookie("c_user", "100")], captured_at: 0 };
+        assert!(!only_id.is_usable_for(SessionKind::Facebook), "c_user alone is not a login");
+        let full = WebSession {
+            cookies: vec![cookie("c_user", "100"), cookie("xs", "secret")],
+            captured_at: 0,
+        };
+        assert!(full.is_usable_for(SessionKind::Facebook));
+        // The Instagram check must not accept a Facebook jar.
+        assert!(!full.is_usable_for(SessionKind::Instagram));
+    }
+
+    #[test]
+    fn facebook_domain_matching() {
+        assert!(is_facebook_domain(".facebook.com"));
+        assert!(is_facebook_domain("www.facebook.com"));
+        assert!(!is_facebook_domain("notfacebook.com"));
+        assert!(!is_facebook_domain("facebook.com.evil.test"));
+    }
+
+    #[test]
     fn a_real_session_is_usable() {
         let real = InstagramSession {
             cookies: vec![cookie("csrftoken", "abc"), cookie("sessionid", "1234%3Aabcd")],
@@ -338,6 +480,8 @@ mod tests {
         let json = serde_json::to_string(&SessionStatus {
             connected: true,
             captured_at: Some(42),
+            display_name: None,
+            avatar_url: None,
         })
         .unwrap();
         assert!(!json.contains("cookie"), "{json}");

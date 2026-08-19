@@ -142,3 +142,10 @@ export const SendIcon = ({ size = 16, className }: P) => (
     <path d="M21.5 4.5 3 11.2l6.4 2.4M21.5 4.5 18 20l-8.6-6.4M21.5 4.5 9.4 13.6M9.4 13.6V19l3-3.2" />
   </svg>
 );
+
+// A solid Telegram paper plane, for the Telegram page header and connected tile.
+export const TelegramIcon = ({ size = 16, className }: P) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden>
+    <path d="M21.94 4.4 18.9 19.1c-.23 1.02-.84 1.27-1.7.79l-4.7-3.47-2.27 2.19c-.25.25-.46.46-.94.46l.34-4.8L18.4 6.9c.38-.34-.08-.53-.6-.19L6.98 13.7l-4.64-1.45c-1.01-.32-1.03-1.01.21-1.5l18.15-7c.84-.3 1.58.2 1.24 1.65Z" />
+  </svg>
+);

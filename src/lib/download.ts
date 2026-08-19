@@ -219,6 +219,16 @@ export const instagramConnect = () =>
 export const instagramDisconnect = () =>
   invoke<SessionStatus>("download_instagram_disconnect");
 
+export const facebookStatus = () =>
+  invoke<SessionStatus>("download_facebook_status");
+
+/** Opens a dedicated Facebook login window; resolves once a session is captured. */
+export const facebookConnect = () =>
+  invoke<SessionStatus>("download_facebook_connect");
+
+export const facebookDisconnect = () =>
+  invoke<SessionStatus>("download_facebook_disconnect");
+
 export const downloadGetQuality = () =>
   invoke<QualitySettings>("download_get_quality");
 

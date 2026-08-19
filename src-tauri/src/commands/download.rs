@@ -10,7 +10,7 @@ use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::download::manager::{run_job, Destination, DownloadManager, EngineStatus, JobView};
 use crate::download::quality::Quality;
-use crate::download::session::{self, InstagramSession, SessionStatus, StoredCookie};
+use crate::download::session::{SessionKind, SessionStatus, StoredCookie, WebSession};
 use crate::download::url::{classify_target, TargetKind};
 use crate::download::ytdlp::{FormatReport, MediaInfo, ProfileListing};
 use crate::errors::{AppError, Result};
@@ -212,53 +212,82 @@ pub struct QualitySettings {
     pub prefer_compatible: bool,
 }
 
-const IG_LOGIN_LABEL: &str = "instagram-login";
 const IG_LOGIN_URL: &str = "https://www.instagram.com/accounts/login/";
+const FB_LOGIN_URL: &str = "https://www.facebook.com/login/";
 
-/// Open a dedicated Instagram login window and capture its session.
+/// Static per-platform login details.
+struct LoginTarget {
+    kind: SessionKind,
+    label: &'static str,
+    url: &'static str,
+    title: &'static str,
+    /// Fallback cookie domain when the webview omits one.
+    default_domain: &'static str,
+    /// For the timeout diagnostic.
+    platform: &'static str,
+}
+
+const INSTAGRAM_TARGET: LoginTarget = LoginTarget {
+    kind: SessionKind::Instagram,
+    label: "instagram-login",
+    url: IG_LOGIN_URL,
+    title: "Sign in to Instagram",
+    default_domain: ".instagram.com",
+    platform: "Instagram",
+};
+
+const FACEBOOK_TARGET: LoginTarget = LoginTarget {
+    kind: SessionKind::Facebook,
+    label: "facebook-login",
+    url: FB_LOGIN_URL,
+    title: "Sign in to Facebook",
+    default_domain: ".facebook.com",
+    platform: "Facebook",
+};
+
+/// Open a dedicated login window for `target` and capture its session.
 ///
 /// A separate window rather than `--cookies-from-browser`: that flag would
-/// hand yt-dlp the user's entire browser profile - every site they are signed
-/// into. This reads cookies from one window, scoped to one URL, that the user
-/// opened deliberately for this purpose.
+/// hand the engine the user's entire browser profile - every site they are
+/// signed into. This reads cookies from one window, that the user opened
+/// deliberately, and keeps only this platform's.
 ///
-/// Resolves when a `sessionid` cookie appears, which is the moment login
-/// actually succeeded. Closing the window first cancels the flow.
-#[tauri::command]
-pub async fn download_instagram_connect(
-    app: AppHandle,
-    manager: State<'_, Arc<DownloadManager>>,
+/// Resolves when the platform's login cookie(s) appear. Closing the window
+/// first cancels the flow.
+async fn capture_session(
+    app: &AppHandle,
+    manager: &Arc<DownloadManager>,
+    target: LoginTarget,
 ) -> Result<SessionStatus> {
     // Reusing a stale window would show a page from a previous attempt.
-    if let Some(existing) = app.get_webview_window(IG_LOGIN_LABEL) {
+    if let Some(existing) = app.get_webview_window(target.label) {
         let _ = existing.close();
     }
 
-    let url = IG_LOGIN_URL
+    let url = target
+        .url
         .parse()
         .map_err(|_| AppError::Internal("bad login url".into()))?;
 
-    let window = WebviewWindowBuilder::new(&app, IG_LOGIN_LABEL, WebviewUrl::External(url))
-        .title("Sign in to Instagram")
+    let window = WebviewWindowBuilder::new(app, target.label, WebviewUrl::External(url))
+        .title(target.title)
         .inner_size(480.0, 760.0)
         .resizable(true)
         .focused(true)
         .build()
         .map_err(|e| AppError::Internal(format!("could not open the login window: {e}")))?;
 
-    // Poll rather than hook navigation: Instagram's login is a single-page app
-    // that finishes without a page load we could listen for, and the cookie
-    // appearing is the only reliable signal that it worked.
+    // Poll rather than hook navigation: these logins are single-page apps that
+    // finish without a page load we could listen for, and the cookie appearing
+    // is the only reliable signal that it worked.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
-    // Kept so a timeout can say what went wrong instead of just giving up.
     let mut last_error: Option<String> = None;
     let mut seen_cookie_names: Vec<String> = Vec::new();
 
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
 
-        // Closed by the user - a cancelled sign-in, not a failure.
-        if app.get_webview_window(IG_LOGIN_LABEL).is_none() {
+        if app.get_webview_window(target.label).is_none() {
             return Err(AppError::Cancelled);
         }
         if std::time::Instant::now() > deadline {
@@ -266,7 +295,8 @@ pub async fn download_instagram_connect(
             // Names only - never values - so a failure is diagnosable without
             // a session cookie ending up in a log or an error message.
             return Err(AppError::Internal(format!(
-                "signed-in session not detected after 5 minutes. Instagram cookies seen: [{}].{}",
+                "signed-in session not detected after 5 minutes. {} cookies seen: [{}].{}",
+                target.platform,
                 seen_cookie_names.join(", "),
                 last_error
                     .map(|e| format!(" Last cookie-read error: {e}"))
@@ -274,11 +304,11 @@ pub async fn download_instagram_connect(
             )));
         }
 
-        // Deliberately NOT `cookies_for_url`: on macOS that compares the
-        // cookie's domain to the URL's host by exact string equality, so a
-        // `.instagram.com` cookie never matches `www.instagram.com` and the
-        // jar comes back empty every single time. Ask for everything and do
-        // the domain match here, where a leading dot is handled.
+        // Deliberately NOT `cookies_for_url`: on macOS wry compares the
+        // cookie's domain to the URL host by exact equality, so a `.x.com`
+        // cookie never matches `www.x.com` and the jar comes back empty. Ask
+        // for everything and match the domain here, where a leading dot is
+        // handled.
         let jar = match window.cookies() {
             Ok(jar) => jar,
             Err(e) => {
@@ -289,17 +319,14 @@ pub async fn download_instagram_connect(
 
         let cookies: Vec<StoredCookie> = jar
             .iter()
-            .filter(|c| c.domain().map(session::is_instagram_domain).unwrap_or(false))
+            .filter(|c| c.domain().map(|d| target.kind.domain_matches(d)).unwrap_or(false))
             .map(|c| StoredCookie {
                 name: c.name().to_string(),
                 value: c.value().to_string(),
                 domain: c
                     .domain()
-                    .map(|d| {
-                        // Netscape files want the leading dot for domain cookies.
-                        if d.starts_with('.') { d.to_string() } else { format!(".{d}") }
-                    })
-                    .unwrap_or_else(|| ".instagram.com".to_string()),
+                    .map(|d| if d.starts_with('.') { d.to_string() } else { format!(".{d}") })
+                    .unwrap_or_else(|| target.default_domain.to_string()),
                 path: c.path().unwrap_or("/").to_string(),
                 secure: c.secure().unwrap_or(true),
                 expires: c
@@ -312,25 +339,63 @@ pub async fn download_instagram_connect(
 
         seen_cookie_names = cookies.iter().map(|c| c.name.clone()).collect();
 
-        let candidate = InstagramSession {
+        let candidate = WebSession {
             cookies,
             captured_at: crate::auth::now_unix(),
         };
-        if candidate.is_usable() {
-            let status = manager.instagram_remember(&candidate)?;
+        if candidate.is_usable_for(target.kind) {
+            manager.session_remember(target.kind, &candidate)?;
+            // Best-effort: fetch the display name/avatar. A failure here leaves
+            // the account connected but nameless, never blocks the login.
+            if let Some(profile) =
+                crate::download::profile::fetch(target.kind, &candidate.cookies).await
+            {
+                let _ = manager.session_set_profile(target.kind, &profile);
+            }
+            let status = manager.session_status(target.kind);
             let _ = window.close();
             return Ok(status);
         }
     }
 }
 
+#[tauri::command]
+pub async fn download_instagram_connect(
+    app: AppHandle,
+    manager: State<'_, Arc<DownloadManager>>,
+) -> Result<SessionStatus> {
+    capture_session(&app, &manager, INSTAGRAM_TARGET).await
+}
+
+#[tauri::command]
+pub async fn download_facebook_connect(
+    app: AppHandle,
+    manager: State<'_, Arc<DownloadManager>>,
+) -> Result<SessionStatus> {
+    capture_session(&app, &manager, FACEBOOK_TARGET).await
+}
+
 /// Cheap by design: reads a non-secret marker, so rendering a page never
-/// triggers a keychain authorization prompt.
+/// touches the session file.
 #[tauri::command]
 pub async fn download_instagram_status(
     manager: State<'_, Arc<DownloadManager>>,
 ) -> Result<SessionStatus> {
     Ok(manager.instagram_status())
+}
+
+#[tauri::command]
+pub async fn download_facebook_status(
+    manager: State<'_, Arc<DownloadManager>>,
+) -> Result<SessionStatus> {
+    Ok(manager.facebook_status())
+}
+
+#[tauri::command]
+pub async fn download_facebook_disconnect(
+    manager: State<'_, Arc<DownloadManager>>,
+) -> Result<SessionStatus> {
+    manager.facebook_forget()
 }
 
 /// Forget the stored session. The window's own cookies are not this app's to

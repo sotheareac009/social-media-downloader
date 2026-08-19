@@ -11,7 +11,7 @@ import {
 } from "@/lib/telegram";
 import { Button } from "@/components/ui/Button";
 import { useToast } from "@/components/ui/Toast";
-import { AlertIcon, CheckIcon, LinkIcon, ShieldIcon, XIcon } from "@/components/ui/icons";
+import { AlertIcon, CheckIcon, ShieldIcon, TelegramIcon, XIcon } from "@/components/ui/icons";
 
 type Step = "phone" | "code" | "password";
 
@@ -138,8 +138,8 @@ export function TelegramPage() {
   return (
     <div className="page">
       <header className="page__header rise">
-        <span className="page__eyebrow">
-          <LinkIcon size={12} />
+        <span className="page__eyebrow page__eyebrow--telegram">
+          <TelegramIcon size={12} />
           Telegram
         </span>
         <h1 className="page__title">Connect Telegram</h1>
@@ -311,7 +311,7 @@ function Connected({
   return (
     <div className="tg-card tg-card--ok rise">
       <div className="tg-connected">
-        <span className="tg-connected__icon"><CheckIcon size={18} /></span>
+        <span className="tg-connected__icon tg-connected__icon--brand"><TelegramIcon size={18} /></span>
         <div>
           <div className="tg-connected__title">Telegram is connected</div>
           <div className="tg-connected__sub">

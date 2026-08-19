@@ -15,6 +15,67 @@ import { computeCheck } from "telegram/Password";
 import { Logger } from "telegram/extensions";
 import { LogLevel } from "telegram/extensions/Logger";
 
+/**
+ * Route GramJS's one PBKDF2 call through the webview's native WebCrypto.
+ *
+ * GramJS computes the 2FA (SRP) password hash with `crypto.pbkdf2Sync(…,
+ * "sha512")`. WKWebView's `crypto.subtle` does PBKDF2-SHA512 natively and is
+ * verified byte-identical to Node's reference, so this removes any doubt about
+ * the bundled pure-JS pbkdf2. GramJS `await`s the result, so returning a
+ * Promise is fine.
+ *
+ * Done lazily and defensively: a dynamic import inside a try/catch, run only
+ * just before a 2FA check. Nothing here touches module load, so a failure to
+ * patch can never blank the app — at worst 2FA falls back to GramJS's own
+ * implementation.
+ */
+let pbkdf2Patched = false;
+async function ensurePbkdf2Patched(): Promise<void> {
+  if (pbkdf2Patched) return;
+  try {
+    const mod = await import("telegram/CryptoFile");
+    const cf = (mod.default ?? mod) as { pbkdf2Sync?: unknown };
+    cf.pbkdf2Sync = async (
+      password: ArrayBufferView | string,
+      salt: ArrayBufferView | string,
+      iterations: number,
+      keylen: number,
+    ): Promise<Uint8Array> => {
+      const toBytes = (v: ArrayBufferView | string): Uint8Array =>
+        typeof v === "string"
+          ? new TextEncoder().encode(v)
+          : new Uint8Array(
+              (v.buffer as ArrayBuffer).slice(
+                v.byteOffset,
+                v.byteOffset + v.byteLength,
+              ),
+            );
+
+      const key = await crypto.subtle.importKey(
+        "raw",
+        toBytes(password) as BufferSource,
+        "PBKDF2",
+        false,
+        ["deriveBits"],
+      );
+      const bits = await crypto.subtle.deriveBits(
+        {
+          name: "PBKDF2",
+          salt: toBytes(salt) as BufferSource,
+          iterations,
+          hash: "SHA-512",
+        },
+        key,
+        keylen * 8,
+      );
+      return new Uint8Array(bits);
+    };
+    pbkdf2Patched = true;
+  } catch {
+    // Leave GramJS's own pbkdf2 in place; the app must still work.
+  }
+}
+
 export interface TelegramConfig {
   configured: boolean;
   api_id: number;
@@ -30,6 +91,12 @@ export interface TelegramStatus {
 
 export const telegramGetConfig = () =>
   invoke<TelegramConfig>("telegram_get_config");
+
+export const telegramSetConfig = (apiId: string, apiHash: string) =>
+  invoke<TelegramConfig>("telegram_set_config", { apiId, apiHash });
+
+export const telegramClearConfig = () =>
+  invoke<TelegramConfig>("telegram_clear_config");
 
 export const telegramStatus = () => invoke<TelegramStatus>("telegram_status");
 
@@ -125,6 +192,7 @@ export class TelegramLogin {
   async submitPassword(password: string): Promise<"done"> {
     const client = this.expectClient();
     try {
+      await ensurePbkdf2Patched();
       const pwd = await client.invoke(new Api.account.GetPassword());
       const check = await computeCheck(pwd, password);
       await client.invoke(new Api.auth.CheckPassword({ password: check }));

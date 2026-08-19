@@ -16,7 +16,7 @@ import {
   type IconProps,
 } from "@/components/ui/icons";
 
-export type Route = "home" | "downloads" | "accounts";
+export type Route = "home" | "downloads" | "accounts" | "telegram" | "settings";
 
 type Tone = "ok" | "warn" | "muted";
 
@@ -25,6 +25,8 @@ interface Platform {
   name: string;
   /** Exactly what this build handles — no aspirational entries. */
   supports: string[];
+  /** Where the card leads. Most go to Downloads; Telegram to its own page. */
+  goto: Route;
   /** Live state, for the one platform whose availability can change. */
   note?: { label: string; tone: Tone };
 }
@@ -40,26 +42,31 @@ const PLATFORMS: Platform[] = [
     id: "youtube",
     name: "YouTube",
     supports: ["Videos", "Shorts", "Channels & playlists", "Up to 8K"],
+    goto: "downloads",
   },
   {
     id: "tiktok",
     name: "TikTok",
     supports: ["Videos", "Whole profiles", "Photo posts"],
+    goto: "downloads",
   },
   {
     id: "facebook",
     name: "Facebook",
     supports: ["Videos", "Reels", "Share links"],
+    goto: "downloads",
   },
   {
     id: "instagram",
     name: "Instagram",
     supports: ["Reels", "Whole profiles", "Posts & IGTV", "Sign-in required"],
+    goto: "downloads",
   },
   {
     id: "telegram",
     name: "Telegram",
-    supports: ["Reels", "Whole profiles", "Posts & IGTV", "Sign-in required"],
+    supports: ["Sign in by phone", "2FA supported", "Media coming soon"],
+    goto: "telegram",
   },
 ];
 
@@ -206,7 +213,7 @@ export function HomePage({ onNavigate }: { onNavigate: (r: Route) => void }) {
                   ["--brand" as string]: SOURCE_COLOR[p.id],
                   animationDelay: `${i * 60}ms`,
                 }}
-                onClick={() => onNavigate("downloads")}
+                onClick={() => onNavigate(p.goto)}
               >
                 <span className="platform__edge" />
                 <SourceLogo source={p.id} />

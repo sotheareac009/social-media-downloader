@@ -9,7 +9,7 @@ use tauri::Manager;
 
 use crate::config;
 use crate::errors::{AppError, Result};
-use crate::telegram::{self, TelegramStatus};
+use crate::telegram::{self, TelegramCredentials, TelegramStatus};
 
 /// The app credentials GramJS needs, plus whether this build has them.
 #[derive(serde::Serialize)]
@@ -22,12 +22,20 @@ pub struct TelegramConfig {
 
 /// Non-secret: identifies the application to Telegram, not the user. Safe to
 /// hand the frontend, which is where GramJS runs.
+///
+/// Values saved in Settings win over `.env`, because a packaged build does not
+/// read `.env` at all - which is the whole reason the Settings form exists.
 #[tauri::command]
-pub async fn telegram_get_config() -> Result<TelegramConfig> {
-    let api_id_raw = config::read("TELEGRAM_API_ID");
-    let api_hash = config::read("TELEGRAM_API_HASH");
+pub async fn telegram_get_config(app: tauri::AppHandle) -> Result<TelegramConfig> {
+    let dir = data_dir(&app)?;
 
-    let api_id = api_id_raw.as_deref().and_then(|s| s.parse::<i32>().ok());
+    let (api_id_raw, api_hash) = match telegram::load_credentials(&dir) {
+        Some(c) => (Some(c.api_id), Some(c.api_hash)),
+        None => (config::read("TELEGRAM_API_ID"), config::read("TELEGRAM_API_HASH")),
+    };
+
+    let api_id = api_id_raw.as_deref().map(str::trim).and_then(|s| s.parse::<i32>().ok());
+    let api_hash = api_hash.map(|h| h.trim().to_string());
 
     match (api_id, api_hash) {
         (Some(id), Some(hash)) if id > 0 && !hash.is_empty() => Ok(TelegramConfig {
@@ -41,6 +49,45 @@ pub async fn telegram_get_config() -> Result<TelegramConfig> {
             api_hash: String::new(),
         }),
     }
+}
+
+/// Save api_id / api_hash entered in Settings, so a packaged build can be
+/// configured without editing `.env`. Rejects a non-numeric api_id up front.
+#[tauri::command]
+pub async fn telegram_set_config(
+    app: tauri::AppHandle,
+    api_id: String,
+    api_hash: String,
+) -> Result<TelegramConfig> {
+    let id_trimmed = api_id.trim();
+    let hash_trimmed = api_hash.trim();
+
+    if id_trimmed.parse::<i32>().map(|n| n <= 0).unwrap_or(true) {
+        return Err(AppError::Internal(
+            "api_id must be a positive number — it's the shorter value on my.telegram.org".into(),
+        ));
+    }
+    if hash_trimmed.len() < 8 {
+        return Err(AppError::Internal(
+            "api_hash looks wrong — it's the long hex string on my.telegram.org".into(),
+        ));
+    }
+
+    telegram::save_credentials(
+        &data_dir(&app)?,
+        &TelegramCredentials {
+            api_id: id_trimmed.to_string(),
+            api_hash: hash_trimmed.to_string(),
+        },
+    )?;
+    telegram_get_config(app).await
+}
+
+/// Forget saved credentials (falls back to `.env`, if any).
+#[tauri::command]
+pub async fn telegram_clear_config(app: tauri::AppHandle) -> Result<TelegramConfig> {
+    telegram::clear_credentials(&data_dir(&app)?)?;
+    telegram_get_config(app).await
 }
 
 fn data_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf> {

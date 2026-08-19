@@ -13,6 +13,8 @@ import {
 } from "@/lib/auth";
 import { AccountCard } from "@/components/accounts/AccountCard";
 import {
+  facebookConnect,
+  facebookStatus,
   instagramConnect,
   instagramStatus,
   type SessionStatus,
@@ -34,6 +36,8 @@ export function AccountsPage() {
   // account sign-in; shown here so the two states stop looking contradictory.
   const [igDownload, setIgDownload] = useState<SessionStatus | null>(null);
   const [igBusy, setIgBusy] = useState(false);
+  const [fbDownload, setFbDownload] = useState<SessionStatus | null>(null);
+  const [fbBusy, setFbBusy] = useState(false);
 
   // Guards a state update landing after unmount when a flow is abandoned.
   const mounted = useRef(true);
@@ -62,6 +66,9 @@ export function AccountsPage() {
         setProviders(descriptors);
         instagramStatus()
           .then((st) => mounted.current && setIgDownload(st))
+          .catch(() => {});
+        facebookStatus()
+          .then((st) => mounted.current && setFbDownload(st))
           .catch(() => {});
       } catch (e) {
         if (!mounted.current) return;
@@ -151,6 +158,19 @@ export function AccountsPage() {
     }
   }, [toast]);
 
+  const signInFacebook = useCallback(async () => {
+    setFbBusy(true);
+    try {
+      setFbDownload(await facebookConnect());
+      toast("success", "Facebook connected. Your account's videos can now be downloaded.");
+    } catch (e) {
+      const err = toAuthError(e);
+      if (err.code !== "cancelled") toast("error", friendlyMessage(err));
+    } finally {
+      if (mounted.current) setFbBusy(false);
+    }
+  }, [toast]);
+
   const connectedCount = Object.values(accounts).filter((a) => a.connected).length;
 
   return (
@@ -193,18 +213,23 @@ export function AccountsPage() {
                     descriptor={descriptor}
                     account={account}
                     downloadConnected={
-                      descriptor.id === "instagram" && igDownload?.connected === true
+                      (descriptor.id === "instagram" && igDownload?.connected === true) ||
+                      (descriptor.id === "facebook" && fbDownload?.connected === true)
                     }
                     onDownloadSignIn={
                       descriptor.id === "instagram" && !descriptor.configured
                         ? () => void signInForDownloads()
-                        : undefined
+                        : descriptor.id === "facebook"
+                          ? () => void signInFacebook()
+                          : undefined
                     }
-                    downloadBusy={igBusy}
+                    downloadBusy={descriptor.id === "facebook" ? fbBusy : igBusy}
                     downloadNote={
                       descriptor.id === "instagram" && igDownload?.connected
                         ? "Reels and posts will download using this session. Connecting an account below is optional — it only adds your name and avatar, and is not needed for downloading."
-                        : null
+                        : descriptor.id === "facebook" && fbDownload?.connected
+                          ? "Your Facebook videos will download using this session — including ones that need a login. Signing in for an account below is separate and optional."
+                          : null
                     }
                     busy={busy === descriptor.id}
                     blocked={busy !== null && busy !== descriptor.id}

@@ -3,6 +3,7 @@ import { AccountsPage } from "@/pages/accounts/AccountsPage";
 import { DownloadsPage } from "@/pages/downloads/DownloadsPage";
 import { HomePage } from "@/pages/home/HomePage";
 import { TelegramPage } from "@/pages/telegram/TelegramPage";
+import { SettingsPage } from "@/pages/settings/SettingsPage";
 import { ToastProvider } from "@/components/ui/Toast";
 import {
   BoltIcon,
@@ -16,7 +17,7 @@ import {
 } from "@/components/ui/icons";
 
 type Theme = "light" | "dark";
-type Route = "home" | "accounts" | "downloads" | "telegram";
+type Route = "home" | "accounts" | "downloads" | "telegram" | "settings";
 const THEME_KEY = "md.theme";
 
 export default function App() {
@@ -49,6 +50,7 @@ export default function App() {
             {route === "downloads" && <DownloadsPage />}
             {route === "accounts" && <AccountsPage />}
             {route === "telegram" && <TelegramPage />}
+            {route === "settings" && <SettingsPage />}
           </div>
         </main>
       </div>
@@ -102,6 +104,16 @@ function Sidebar({
           Downloads
         </button>
         <button
+          className={`navitem ${route === "telegram" ? "navitem--active" : ""}`}
+          type="button"
+          onClick={() => onNavigate("telegram")}
+        >
+          <span className="navitem__icon">
+            <SendIcon size={16} />
+          </span>
+          Telegram
+        </button>
+        <button
           className={`navitem ${route === "accounts" ? "navitem--active" : ""}`}
           type="button"
           onClick={() => onNavigate("accounts")}
@@ -112,22 +124,14 @@ function Sidebar({
           Accounts
         </button>
         <button
-          className={`navitem ${route === "telegram" ? "navitem--active" : ""}`}
+          className={`navitem ${route === "settings" ? "navitem--active" : ""}`}
           type="button"
-          onClick={() => onNavigate("telegram")}
+          onClick={() => onNavigate("settings")}
         >
-          <span className="navitem__icon">
-            <SendIcon size={16} />
-          </span>
-          Telegram
-        </button>
-
-        <button className="navitem" type="button" disabled>
           <span className="navitem__icon">
             <SlidersIcon size={16} />
           </span>
           Settings
-          <span className="navitem__soon">Soon</span>
         </button>
       </nav>
 
