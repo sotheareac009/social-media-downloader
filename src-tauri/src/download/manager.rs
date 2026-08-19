@@ -1088,9 +1088,16 @@ mod tests {
     #[test]
     fn an_uncreatable_destination_is_refused_before_any_download() {
         let m = manager();
-        // Root is not writable, so neither the folder nor the probe can be made.
-        let err = m.set_destination(PathBuf::from("/definitely/not/here")).unwrap_err();
+        let blocker = std::env::temp_dir().join(format!(
+            "md-manager-blocker-{}",
+            std::process::id()
+        ));
+        std::fs::write(&blocker, b"not a directory").unwrap();
+
+        let err = m.set_destination(blocker.join("child")).unwrap_err();
         assert!(matches!(err, AppError::DownloadPath(_)), "{err}");
+
+        let _ = std::fs::remove_file(&blocker);
     }
 
     #[test]
