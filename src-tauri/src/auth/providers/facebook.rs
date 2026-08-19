@@ -34,16 +34,15 @@ const GRAPH_VERSION: &str = "v21.0";
 /// the page needs a known address. Overridable if it clashes with something.
 const CALLBACK_PORT: u16 = 8721;
 
-/// `public_profile` to identify the account, plus the Page-publishing scopes
-/// the upload feature needs. In development mode these work for the app's own
-/// admins/testers without review; publishing for other users needs Meta's app
-/// review of `pages_manage_posts`.
-const SCOPES: &[&str] = &[
-    "public_profile",
-    "pages_show_list",
-    "pages_read_engagement",
-    "pages_manage_posts",
-];
+/// Only `public_profile` for now — enough to identify and connect the account.
+///
+/// The Page-publishing scopes the upload feature will need
+/// (`pages_show_list`, `pages_read_engagement`, `pages_manage_posts`) are added
+/// back when that feature is built. Requesting them before they are added to
+/// the app under "Use cases -> Permissions and features" makes Facebook reject
+/// the whole login with "Invalid Scopes", so they stay out until they're both
+/// enabled in the dashboard and actually used.
+const SCOPES: &[&str] = &["public_profile"];
 
 pub struct FacebookProvider {
     client_id: Option<String>,
