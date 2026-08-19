@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Signing you in…</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; background:#0b0d12;
+           color:#e8ebf0; display:grid; place-items:center; min-height:100vh; margin:0; }
+    .card { text-align:center; max-width:360px; padding:28px; }
+    .spin { width:34px; height:34px; margin:0 auto 16px; border:3px solid #2a2f3a;
+            border-top-color:#2aabee; border-radius:50%; animation:s 0.8s linear infinite; }
+    @keyframes s { to { transform:rotate(360deg); } }
+    code { font-size:12px; color:#8b93a3; word-break:break-all; }
+    a { color:#2aabee; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="spin"></div>
+    <h2>Finishing sign-in…</h2>
+    <p id="msg">Returning you to the app. You can close this tab if it doesn't happen automatically.</p>
+    <p><code id="manual"></code></p>
+  </div>
+  <script>
+    // This page exists only to hand the OAuth result back to the desktop app.
+    // Facebook redirects here (an https page it will accept); the app is
+    // listening on a fixed loopback port, so we forward the code + state there.
+    // http://127.0.0.1 is a "potentially trustworthy" origin, so browsers allow
+    // this redirect from https without mixed-content blocking.
+    (function () {
+      var PORT = 8721; // must match FACEBOOK_CALLBACK_PORT in the app
+      var qs = window.location.search || "";
+      var target = "http://127.0.0.1:" + PORT + "/callback" + qs;
+      document.getElementById("manual").innerHTML =
+        'If nothing happens, open: <a href="' + target + '">' + target + "</a>";
+      // Small delay so the message renders before we navigate away.
+      setTimeout(function () { window.location.replace(target); }, 400);
+    })();
+  </script>
+</body>
+</html>
