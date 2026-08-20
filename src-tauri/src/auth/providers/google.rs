@@ -129,7 +129,7 @@ impl AuthProvider for GoogleProvider {
             .append_pair("code_challenge_method", pkce.method())
             // Needed to receive a refresh token for an installed app.
             .append_pair("access_type", "offline")
-            .append_pair("prompt", "consent");
+            .append_pair("prompt", "select_account consent");
 
         Ok(PendingFlow {
             provider: ProviderId::Google,

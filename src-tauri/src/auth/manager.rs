@@ -19,7 +19,7 @@ use url::Url;
 use crate::auth::callback::CallbackListener;
 use crate::auth::providers::{build_registry, AuthProvider, ProviderDescriptor};
 use crate::auth::storage::CredentialStore;
-use crate::auth::{Credential, ProviderId, EXPIRY_SKEW_SECS};
+use crate::auth::{AuthResult, Credential, ProviderId, EXPIRY_SKEW_SECS};
 use crate::db::{AccountDb, AccountView, CredentialMeta};
 use crate::errors::{AppError, Result};
 
@@ -128,7 +128,11 @@ impl AuthManager {
         result
     }
 
-    async fn run_flow(&self, app: &AppHandle, id: ProviderId) -> Result<AccountView> {
+    /// The browser half of a flow: bind loopback, open the consent page, wait
+    /// for the callback, and exchange it — returning the fresh credential and
+    /// account **without persisting anything**. Both the normal single-account
+    /// connect and the multi-account YouTube "add account" build on this.
+    async fn run_flow_raw(&self, app: &AppHandle, id: ProviderId) -> Result<AuthResult> {
         let provider = self.provider(id)?;
         if !provider.is_configured() {
             return Err(AppError::ProviderNotConfigured(id.to_string()));
@@ -169,13 +173,42 @@ impl AuthManager {
         }
 
         let auth = provider.handle_callback(&flow, callback).await?;
+        Ok(auth)
+    }
 
-        // Secret half -> OS keychain. Public half (plus the non-secret facts
-        // needed to render the card) -> SQLite.
+    /// Normal single-account connect: run the flow, then persist into the one
+    /// slot for this provider (OS-file credential + SQLite metadata row).
+    async fn run_flow(&self, app: &AppHandle, id: ProviderId) -> Result<AccountView> {
+        let auth = self.run_flow_raw(app, id).await?;
+        let provider = self.provider(id)?;
         let meta = CredentialMeta::new(&auth.credential, provider.can_refresh(&auth.credential));
         self.store.save(id, &auth.credential)?;
         let view = self.db.upsert(&auth.account, meta)?;
         Ok(view)
+    }
+
+    /// Run an OAuth flow for an *additional* account of `id`, returning the
+    /// fresh credential + account without touching the single-account slot.
+    /// The caller (e.g. the multi-account YouTube store) persists it elsewhere.
+    pub async fn connect_additional(&self, app: &AppHandle, id: ProviderId) -> Result<AuthResult> {
+        let _guard = self
+            .flow_guard
+            .try_lock()
+            .map_err(|_| AppError::FlowAlreadyRunning)?;
+        self.run_flow_raw(app, id).await
+    }
+
+    /// Return a usable credential, refreshing `cred` first if it has expired.
+    /// Stateless: the caller owns persistence of the refreshed value.
+    pub async fn ensure_fresh(&self, id: ProviderId, cred: Credential) -> Result<Credential> {
+        let provider = self.provider(id)?;
+        if !cred.is_expired(EXPIRY_SKEW_SECS) {
+            return Ok(cred);
+        }
+        if !provider.can_refresh(&cred) {
+            return Err(AppError::CredentialNotFound(id.to_string()));
+        }
+        provider.refresh(&cred).await
     }
 
     /// Snapshot of every provider, connected or not, for the Accounts page.

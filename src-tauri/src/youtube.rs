@@ -131,9 +131,24 @@ pub async fn upload_video(
     }
     let mime = guess_mime(file_path);
 
+    // YouTube rejects a title that is empty, over 100 characters, or contains
+    // '<' or '>'. Sanitise rather than fail: strip the forbidden characters,
+    // cap the length, and fall back to a placeholder when nothing is left.
+    let cleaned: String = title
+        .trim()
+        .chars()
+        .filter(|c| *c != '<' && *c != '>')
+        .take(100)
+        .collect();
+    let sent_title = if cleaned.trim().is_empty() {
+        "Untitled".to_string()
+    } else {
+        cleaned.trim().to_string()
+    };
+
     let metadata = serde_json::json!({
         "snippet": {
-            "title": if title.trim().is_empty() { "Untitled" } else { title.trim() },
+            "title": sent_title,
             "description": description,
         },
         "status": { "privacyStatus": privacy.as_str() },
@@ -151,7 +166,17 @@ pub async fn upload_video(
         .map_err(|_| AppError::Network)?;
 
     if !start.status().is_success() {
-        return Err(api_error(start).await);
+        // Include the title we actually sent, so a title-related rejection is
+        // diagnosable instead of a guessing game.
+        let base = api_error(start).await;
+        if let AppError::ProviderDenied(m) = &base {
+            if m.to_lowercase().contains("title") {
+                return Err(AppError::ProviderDenied(format!(
+                    "{m} (title sent: {sent_title:?})"
+                )));
+            }
+        }
+        return Err(base);
     }
     let upload_url = start
         .headers()

@@ -37,8 +37,14 @@ pub async fn upload_targets(
         .map(|d| crate::telegram::status(&d).connected)
         .unwrap_or(false);
 
-    // YouTube is ready when Google is connected.
-    let youtube_ready = manager.access_token(ProviderId::Google).await.is_ok();
+    // YouTube is ready when at least one uploader account has been added on the
+    // Upload page. These are separate from the single-account slot used by the
+    // Accounts page — a creator can push one video to several channels.
+    let youtube_ready = app
+        .path()
+        .app_data_dir()
+        .map(|d| !crate::youtube_accounts::list(&d).is_empty())
+        .unwrap_or(false);
 
     // TikTok needs more than a connection. Login grants `user.info.basic`,
     // which reads a profile and nothing else; posting goes through the Content
@@ -65,7 +71,7 @@ pub async fn upload_targets(
             reason: if youtube_ready {
                 None
             } else {
-                Some("Connect Google on the Accounts page (with YouTube upload enabled).".into())
+                Some("Add a YouTube account below to upload.".into())
             },
         },
         UploadTarget {

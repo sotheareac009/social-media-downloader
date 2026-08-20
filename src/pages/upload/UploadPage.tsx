@@ -11,16 +11,20 @@ import {
   uploadVideoThumbnail,
   uploadTargets,
   uploadVideoMeta,
-  uploadYoutube,
-  uploadYoutubeChannels,
   type Privacy,
   type UploadTarget,
-  type YoutubeChannel,
   uploadTiktok,
 } from "@/lib/upload";
+import {
+  youtubeAccountAdd,
+  youtubeAccountRemove,
+  youtubeAccountUpload,
+  youtubeAccountsList,
+  type YoutubeAccount,
+} from "@/lib/youtube";
 import { Button } from "@/components/ui/Button";
 import { useToast } from "@/components/ui/Toast";
-import { AlertIcon, CheckIcon, UploadIcon, XIcon } from "@/components/ui/icons";
+import { CheckIcon, UploadIcon, XIcon } from "@/components/ui/icons";
 import { SourceLogo, SOURCE_COLOR, type SourceId } from "@/components/home/SourceLogo";
 
 type ItemStatus = "pending" | "uploading" | "done" | "failed";
@@ -52,8 +56,9 @@ export function UploadPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [items, setItems] = useState<Item[]>([]);
   const [privacy, setPrivacy] = useState<Privacy>("unlisted");
-  const [channels, setChannels] = useState<YoutubeChannel[] | null | "none">(null);
-  const [chosenChannel, setChosenChannel] = useState<string | null>(null);
+  const [ytAccounts, setYtAccounts] = useState<YoutubeAccount[] | null>(null);
+  const [ytSelected, setYtSelected] = useState<Set<string>>(new Set());
+  const [ytAdding, setYtAdding] = useState(false);
   // Which platform's destination dropdown is open (null = none).
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [tgChats, setTgChats] = useState<TelegramChat[] | null | "error">(null);
@@ -63,6 +68,7 @@ export function UploadPage() {
   const [preview, setPreview] = useState<string | null>(null);
 
   const mounted = useRef(true);
+  const ytPreselected = useRef(false);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -88,12 +94,91 @@ export function UploadPage() {
     })();
   }, []);
 
+  const loadYtAccounts = useCallback(async () => {
+    const list = await youtubeAccountsList().catch(() => []);
+    if (!mounted.current) return;
+    setYtAccounts(list);
+    setYtSelected((prev) => {
+      // Drop selections for accounts that no longer exist.
+      const kept = new Set([...prev].filter((id) => list.some((a) => a.id === id)));
+      // Convenience: on the very first load, pre-check the first account so a
+      // single-account user can just upload. Never re-selects after that.
+      if (!ytPreselected.current && list.length > 0) {
+        ytPreselected.current = true;
+        if (kept.size === 0) kept.add(list[0].id);
+      }
+      return kept;
+    });
+  }, []);
+  useEffect(() => {
+    void loadYtAccounts();
+  }, [loadYtAccounts]);
+
   const chosen = useMemo(
     () => (targets ?? []).filter((t) => selected.has(t.id) && t.ready),
     [targets, selected],
   );
-  const youtubeChosen = chosen.some((t) => t.id === "youtube");
+  const youtubeChosen = ytSelected.size > 0;
   const telegramChosen = chosen.some((t) => t.id === "telegram");
+  // Keep the "youtube" platform in the selected set in lockstep with whether
+  // any account is checked, so the rest of the flow (publish, summary) treats
+  // it like the other platforms.
+  useEffect(() => {
+    setSelected((prev) => {
+      const has = prev.has("youtube");
+      if (youtubeChosen && !has) {
+        const n = new Set(prev);
+        n.add("youtube");
+        return n;
+      }
+      if (!youtubeChosen && has) {
+        const n = new Set(prev);
+        n.delete("youtube");
+        return n;
+      }
+      return prev;
+    });
+  }, [youtubeChosen]);
+
+  // Add another Google account as an uploader (Google shows its chooser).
+  const addYtAccount = useCallback(async () => {
+    setYtAdding(true);
+    try {
+      const acct = await youtubeAccountAdd();
+      await loadYtAccounts();
+      if (mounted.current) {
+        setYtSelected((prev) => new Set(prev).add(acct.id));
+        // The youtube target flips to ready once an account exists.
+        const list = await uploadTargets().catch(() => null);
+        if (list && mounted.current) setTargets(list);
+        toast("success", `Added ${acct.channel_title ?? acct.display_name}.`);
+      }
+    } catch (e) {
+      const msg = messageOf(e);
+      toast(/cancel/i.test(msg) ? "info" : "error", msg);
+    } finally {
+      if (mounted.current) setYtAdding(false);
+    }
+  }, [loadYtAccounts, toast]);
+
+  const removeYtAccount = useCallback(
+    async (id: string) => {
+      try {
+        await youtubeAccountRemove(id);
+        setYtSelected((prev) => {
+          const n = new Set(prev);
+          n.delete(id);
+          return n;
+        });
+        await loadYtAccounts();
+        const list = await uploadTargets().catch(() => null);
+        if (list && mounted.current) setTargets(list);
+      } catch (e) {
+        toast("error", messageOf(e));
+      }
+    },
+    [loadYtAccounts, toast],
+  );
   // File kind: video if any chosen platform takes video, else photo.
   const accepts =
     chosen.length === 0 || chosen.some((t) => t.accepts.includes("video"))
@@ -109,28 +194,6 @@ export function UploadPage() {
       return next;
     });
   }, []);
-
-  useEffect(() => {
-    if (!youtubeChosen) {
-      setChannels(null);
-      return;
-    }
-    let alive = true;
-    uploadYoutubeChannels()
-      .then((cs) => {
-        if (!alive) return;
-        if (cs.length === 0) {
-          setChannels("none");
-        } else {
-          setChannels(cs);
-          setChosenChannel((prev) => prev ?? cs[0].id);
-        }
-      })
-      .catch(() => alive && setChannels(null));
-    return () => {
-      alive = false;
-    };
-  }, [youtubeChosen]);
 
   const [tgRefreshing, setTgRefreshing] = useState(false);
   const loadTgChats = useCallback(async (showLoading: boolean) => {
@@ -157,24 +220,6 @@ export function UploadPage() {
     if (openMenu === "telegram") void loadTgChats(false);
   }, [openMenu, loadTgChats]);
 
-  // Per-platform destination list + the chosen one, keyed by platform id.
-  const destinations = useMemo(
-    (): Record<string, { id: string; name: string; avatar: string | null }[]> => ({
-      youtube:
-        Array.isArray(channels)
-          ? channels.map((c) => ({ id: c.id, name: c.title, avatar: c.thumbnail }))
-          : [],
-    }),
-    [channels],
-  );
-  const chosenId: Record<string, string | null> = { youtube: chosenChannel };
-  const setChosen: Record<string, (id: string) => void> = { youtube: setChosenChannel };
-
-  function activeDest(platform: string) {
-    const list = destinations[platform] ?? [];
-    return list.find((d) => d.id === chosenId[platform]) ?? list[0] ?? null;
-  }
-
   const addFiles = useCallback(async () => {
     try {
       const paths = await uploadPickFiles(accepts as "video" | "photo");
@@ -185,7 +230,7 @@ export function UploadPage() {
           .filter((p) => !seen.has(p))
           .map((p): Item => ({
             path: p,
-            title: baseName(p),
+            title: baseName(p).slice(0, 100),
             description: "",
             status: "pending",
           }));
@@ -222,7 +267,17 @@ export function UploadPage() {
       for (const t of chosen) {
         try {
           if (t.id === "youtube") {
-            await uploadYoutube(item.path, perTitle, item.description, privacy);
+            if (ytSelected.size === 0) throw new Error("pick at least one YouTube account");
+            const errs: string[] = [];
+            for (const accountId of ytSelected) {
+              try {
+                await youtubeAccountUpload(accountId, item.path, perTitle, item.description, privacy);
+              } catch (e) {
+                const acct = (ytAccounts ?? []).find((a) => a.id === accountId);
+                errs.push(`${acct?.channel_title ?? acct?.display_name ?? "account"}: ${messageOf(e)}`);
+              }
+            }
+            if (errs.length > 0) throw new Error(errs.join(" · "));
           } else if (t.id === "tiktok") {
             // Rust reads the file and handles TikTok's chunking rules; sending
             // the bytes through the webview would copy a large video twice for
@@ -264,7 +319,7 @@ export function UploadPage() {
     const dests = chosen.map((t) => t.name).join(", ");
     if (failed === 0) toast("success", `Uploaded ${ok} to ${dests}.`);
     else toast(ok > 0 ? "info" : "error", `${ok} done, ${failed} with errors.`);
-  }, [chosen, items, privacy, tgSelected, toast]);
+  }, [chosen, items, privacy, tgSelected, ytSelected, ytAccounts, toast]);
 
   const canPublish = chosen.length > 0 && items.length > 0 && !busy;
 
@@ -428,6 +483,93 @@ export function UploadPage() {
               );
             }
 
+            // YouTube is a container card holding one or more uploader accounts,
+            // each independently selectable; "Add account" runs a Google login.
+            if (t.id === "youtube") {
+              const accounts = ytAccounts ?? [];
+              return (
+                <div
+                  key={t.id}
+                  className={`up-target up-target--box ${youtubeChosen ? "up-target--active up-target--wide" : ""}`.trim()}
+                  style={{ ["--brand" as string]: brand }}
+                >
+                  <span className="up-target__edge" />
+                  <div className="up-target__head" style={{ cursor: "default" }}>
+                    <SourceLogo source="youtube" />
+                    <span className="up-target__text">
+                      <span className="up-target__name">YouTube</span>
+                      <span className={`up-target__pill ${accounts.length > 0 ? "up-target__pill--ok" : "up-target__pill--off"}`}>
+                        {ytSelected.size > 0
+                          ? `${ytSelected.size} account${ytSelected.size === 1 ? "" : "s"}`
+                          : accounts.length > 0
+                            ? (<><CheckIcon size={10} /> Pick account(s)</>)
+                            : "No account yet"}
+                      </span>
+                    </span>
+                    {youtubeChosen && (
+                      <span className="up-target__mark up-target__mark--on">
+                        <CheckIcon size={12} />
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="up-tg">
+                    {accounts.length > 0 && (
+                      <div className="up-tg__list" style={{ maxHeight: 220 }}>
+                        {accounts.map((a) => {
+                          const on = ytSelected.has(a.id);
+                          return (
+                            <div key={a.id} className={`up-tg__item ${on ? "up-tg__item--on" : ""}`.trim()}>
+                              <button
+                                type="button"
+                                className="up-yt__pick"
+                                onClick={() =>
+                                  setYtSelected((prev) => {
+                                    const n = new Set(prev);
+                                    if (n.has(a.id)) n.delete(a.id);
+                                    else n.add(a.id);
+                                    return n;
+                                  })
+                                }
+                              >
+                                <span className={`tg-picker__check ${on ? "tg-picker__check--on" : ""}`}>{on && <CheckIcon size={12} />}</span>
+                                {a.channel_avatar || a.avatar_url ? (
+                                  <img className="tg-av" src={(a.channel_avatar || a.avatar_url)!} alt="" referrerPolicy="no-referrer" style={{ width: 26, height: 26 }} />
+                                ) : (
+                                  <span className="tg-av tg-av--ph" style={{ width: 26, height: 26, fontSize: 13 }}>▶</span>
+                                )}
+                                <span className="up-yt__meta">
+                                  <span className="tg-picker__name">{a.channel_title ?? a.display_name}</span>
+                                  {a.email && <span className="up-yt__sub">{a.email}</span>}
+                                </span>
+                              </button>
+                              <button
+                                type="button"
+                                className="up-tg__chipx"
+                                aria-label="Remove account"
+                                title="Remove account"
+                                onClick={() => void removeYtAccount(a.id)}
+                              >
+                                <XIcon size={12} />
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      className="btn btn--ghost btn--sm up-yt__add"
+                      disabled={ytAdding}
+                      onClick={() => void addYtAccount()}
+                    >
+                      {ytAdding ? "Opening Google…" : accounts.length > 0 ? "+ Add another account" : "+ Add a YouTube account"}
+                    </button>
+                  </div>
+                </div>
+              );
+            }
+
             // Other platforms: single-select button cards.
             return (
               <button
@@ -443,53 +585,9 @@ export function UploadPage() {
                 <SourceLogo source={t.id as SourceId} />
                 <span className="up-target__text">
                   <span className="up-target__name">{t.name}</span>
-                  {(() => {
-                    const list = destinations[t.id] ?? [];
-                    const dest = activeDest(t.id);
-                    const many = list.length > 1;
-                    if (!dest) {
-                      return (
-                        <span className={`up-target__pill ${t.ready ? "up-target__pill--ok" : "up-target__pill--off"}`}>
-                          {t.ready ? (<><CheckIcon size={10} /> Ready</>) : "Not ready"}
-                        </span>
-                      );
-                    }
-                    return (
-                      <span
-                        className={`up-target__acct ${many ? "up-target__acct--menu" : ""}`.trim()}
-                        role={many ? "button" : undefined}
-                        onClick={(e) => {
-                          if (!many) return;
-                          e.stopPropagation();
-                          setOpenMenu((m) => (m === t.id ? null : t.id));
-                        }}
-                      >
-                        {dest.avatar && <img src={dest.avatar} alt="" referrerPolicy="no-referrer" />}
-                        <span className="up-target__acctname">{dest.name}</span>
-                        {many && <span className="up-target__caret">▾</span>}
-                        {many && openMenu === t.id && (
-                          <span className="up-menu" onClick={(e) => e.stopPropagation()}>
-                            {list.map((d) => (
-                              <button
-                                key={d.id}
-                                type="button"
-                                className={`up-menu__item ${d.id === dest.id ? "up-menu__item--on" : ""}`.trim()}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setChosen[t.id]?.(d.id);
-                                  setOpenMenu(null);
-                                }}
-                              >
-                                {d.avatar && <img src={d.avatar} alt="" referrerPolicy="no-referrer" />}
-                                <span>{d.name}</span>
-                                {d.id === dest.id && <CheckIcon size={12} />}
-                              </button>
-                            ))}
-                          </span>
-                        )}
-                      </span>
-                    );
-                  })()}
+                  <span className={`up-target__pill ${t.ready ? "up-target__pill--ok" : "up-target__pill--off"}`}>
+                    {t.ready ? (<><CheckIcon size={10} /> Ready</>) : "Not ready"}
+                  </span>
                 </span>
                 {t.ready && (
                   <span className={`up-target__mark ${isSel ? "up-target__mark--on" : ""}`.trim()}>
@@ -500,13 +598,6 @@ export function UploadPage() {
             );
           })}
         </div>
-
-        {youtubeChosen && channels === "none" && (
-          <div className="notice notice--danger" style={{ margin: "12px 0 0" }}>
-            <span className="notice__icon"><AlertIcon size={14} /></span>
-            <div>This Google account has no YouTube channel yet. Create one on youtube.com first.</div>
-          </div>
-        )}
 
         {/* Files */}
         <div className="up-files-head">

@@ -26,6 +26,7 @@ pub mod process;
 pub mod telegram;
 pub mod tools;
 pub mod youtube;
+pub mod youtube_accounts;
 
 use std::sync::Arc;
 
@@ -132,6 +133,10 @@ pub fn run() {
             commands::net::net_ping,
             commands::tools::tools_status,
             commands::tools::tools_install,
+            commands::youtube_accounts::youtube_accounts_list,
+            commands::youtube_accounts::youtube_account_add,
+            commands::youtube_accounts::youtube_account_remove,
+            commands::youtube_accounts::youtube_account_upload,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
