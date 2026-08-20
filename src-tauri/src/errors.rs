@@ -121,6 +121,25 @@ pub enum AppError {
     #[error("could not write to the download folder: {0}")]
     DownloadPath(String),
 
+    // --- licensing ---
+    // Distinct variants rather than one "bad licence": the UI has to say
+    // something different for each, and "expired" in particular must not read
+    // as "you typed it wrong".
+    #[error("this build has no licence key configured")]
+    LicenseNotConfigured,
+
+    #[error("that doesn't look like a licence key")]
+    LicenseMalformed,
+
+    #[error("that licence key isn't valid")]
+    LicenseInvalid,
+
+    #[error("that licence key has expired")]
+    LicenseExpired,
+
+    #[error("that licence key needs a newer version of the app")]
+    LicenseUnsupported,
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -157,6 +176,11 @@ impl AppError {
             Self::ClientRefused => "client_refused",
             Self::JobNotFound => "job_not_found",
             Self::DownloadPath(_) => "download_path",
+            Self::LicenseNotConfigured => "license_not_configured",
+            Self::LicenseMalformed => "license_malformed",
+            Self::LicenseInvalid => "license_invalid",
+            Self::LicenseExpired => "license_expired",
+            Self::LicenseUnsupported => "license_unsupported",
             Self::Internal(_) => "internal",
         }
     }

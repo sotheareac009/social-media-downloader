@@ -19,6 +19,7 @@ pub mod config;
 pub mod db;
 pub mod download;
 pub mod errors;
+pub mod license;
 pub mod facebook;
 pub mod process;
 pub mod telegram;
@@ -76,6 +77,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::license::license_status,
+            commands::license::license_activate,
+            commands::license::license_deactivate,
             commands::auth::auth_connect,
             commands::auth::auth_get_accounts,
             commands::auth::auth_get_account,

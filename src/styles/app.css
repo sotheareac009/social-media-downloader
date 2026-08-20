@@ -3686,3 +3686,112 @@
 
 /* auto-install button in the engine notice */
 .engine__auto { margin: 4px 0 12px; }
+
+/* --- Licence activation gate ---------------------------------------------- */
+
+.gate {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  background: var(--bg-base);
+  /* The window is frameless, so the whole backdrop stays draggable. */
+  -webkit-app-region: drag;
+}
+
+.gate__panel {
+  width: 100%;
+  max-width: 480px;
+  padding: 34px 32px 28px;
+  border-radius: var(--r-2xl);
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-lg);
+  /* ...but the panel itself must stay clickable. */
+  -webkit-app-region: no-drag;
+}
+
+.gate__mark {
+  width: 46px;
+  height: 46px;
+  display: grid;
+  place-items: center;
+  border-radius: 14px;
+  margin-bottom: 20px;
+  color: #fff;
+  background: linear-gradient(150deg, var(--accent-hover), var(--accent-active));
+  box-shadow: var(--shadow-glow);
+}
+
+.gate__title {
+  font-size: 20px;
+  font-weight: 660;
+  letter-spacing: -0.022em;
+  line-height: 1.25;
+}
+
+.gate__lede {
+  margin-top: 8px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.gate__error {
+  margin: 18px 0 0;
+}
+
+.gate__label {
+  display: block;
+  margin: 22px 0 7px;
+  font-size: 11px;
+  font-weight: 620;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.gate__input {
+  width: 100%;
+  padding: 12px 13px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-default);
+  background: var(--surface-2);
+  color: var(--text-primary);
+  /* Monospace so a mistyped or truncated key is visible at a glance. */
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  letter-spacing: 0.02em;
+  resize: none;
+  user-select: text;
+  cursor: text;
+  transition:
+    border-color var(--t-fast) var(--ease-out),
+    box-shadow var(--t-fast) var(--ease-out);
+}
+
+.gate__input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.gate__input:disabled {
+  opacity: 0.6;
+}
+
+.gate__submit {
+  width: 100%;
+  min-height: 40px;
+  margin-top: 16px;
+}
+
+.gate__hint {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 12px;
+  color: var(--text-tertiary);
+  text-align: center;
+}

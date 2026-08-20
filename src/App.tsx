@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { AccountsPage } from "@/pages/accounts/AccountsPage";
 import { DownloadsPage } from "@/pages/downloads/DownloadsPage";
 import { HomePage } from "@/pages/home/HomePage";
@@ -12,6 +12,8 @@ import {
   useNetStatus,
 } from "@/components/ui/NetStatusProvider";
 import { EngineStatusProvider } from "@/components/ui/EngineStatusProvider";
+import { ActivationScreen } from "@/components/license/ActivationScreen";
+import { licenseStatus, type LicenseStatus } from "@/lib/license";
 import { SetupOverlay } from "@/components/setup/SetupOverlay";
 import {
   DownloadIcon,
@@ -73,6 +75,7 @@ export default function App() {
     <ToastProvider>
       <NetStatusProvider>
       <EngineStatusProvider>
+      <LicenseGate>
       <SetupOverlay />
       <div className="app">
         <Sidebar
@@ -97,10 +100,44 @@ export default function App() {
           </div>
         </main>
       </div>
+      </LicenseGate>
       </EngineStatusProvider>
       </NetStatusProvider>
     </ToastProvider>
   );
+}
+
+/**
+ * Blocks the app until a valid licence is present.
+ *
+ * Renders nothing while the first check is in flight. That matters: defaulting
+ * to "not activated" would flash the activation screen at every launch for
+ * people who are already activated.
+ *
+ * A build with no public key compiled in reports `enforced: false`, so
+ * `npm run tauri dev` is never gated.
+ */
+function LicenseGate({ children }: { children: ReactNode }) {
+  const [status, setStatus] = useState<LicenseStatus | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    licenseStatus()
+      .then((s) => alive && setStatus(s))
+      // If the check itself cannot run, do not lock the user out of software
+      // they paid for; a broken check is our fault, not theirs.
+      .catch(() => alive && setFailed(true));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  if (failed) return <>{children}</>;
+  if (status === null) return null;
+  if (!status.enforced || status.activated) return <>{children}</>;
+
+  return <ActivationScreen onActivated={setStatus} />;
 }
 
 function Sidebar({

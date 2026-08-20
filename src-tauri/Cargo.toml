@@ -40,6 +40,11 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 # Non-sensitive account metadata
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# Licence keys: Ed25519 signatures verified offline. Only the PUBLIC key is
+# ever compiled into the app.
+ed25519-dalek = "2"
+data-encoding = "2"
+
 dotenvy = "0.15"
 
 time = { version = "0.3", features = ["serde", "formatting", "parsing"] }

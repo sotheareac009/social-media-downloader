@@ -68,4 +68,16 @@ fn main() {
             println!("  [{}] {key:<24} ({tag})", if set { "x" } else { " " });
         }
     }
+
+    // Licensing is not a provider: an unset key does not mean "not configured",
+    // it means the build ships UNGATED. Saying "READY" there would be actively
+    // misleading right before a release.
+    println!();
+    match config::read("LICENSE_PUBLIC_KEY") {
+        Some(_) => println!("Licensing  ENFORCED  (users must enter a key)"),
+        None => println!(
+            "Licensing  OFF       (no LICENSE_PUBLIC_KEY - fine for dev, \n\
+             \x20                    but a release built like this is ungated)"
+        ),
+    }
 }
