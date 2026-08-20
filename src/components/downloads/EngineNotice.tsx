@@ -1,4 +1,4 @@
-import { TerminalIcon, AlertIcon, CheckIcon } from "@/components/ui/icons";
+import { TerminalIcon, AlertIcon, CheckIcon, DownloadIcon } from "@/components/ui/icons";
 import type { EngineStatus } from "@/lib/download";
 
 /**
@@ -11,10 +11,17 @@ export function EngineNotice({
   status,
   onRecheck,
   rechecking,
+  onAutoInstall,
+  autoInstalling = false,
+  canAutoInstall = false,
 }: {
   status: EngineStatus;
   onRecheck: () => void;
   rechecking: boolean;
+  /** Run the built-in downloader for yt-dlp + ffmpeg (macOS). */
+  onAutoInstall?: () => void;
+  autoInstalling?: boolean;
+  canAutoInstall?: boolean;
 }) {
   if (status.available) {
     return (
@@ -33,7 +40,13 @@ export function EngineNotice({
             {status.path && <code className="engine__path">{status.path}</code>}
           </div>
         </div>
-        {!status.has_ffmpeg && <FfmpegHint />}
+        {!status.has_ffmpeg && (
+          <FfmpegHint
+            onAutoInstall={onAutoInstall}
+            autoInstalling={autoInstalling}
+            canAutoInstall={canAutoInstall}
+          />
+        )}
         {!status.has_lister && <ListerHint />}
       </>
     );
@@ -48,8 +61,14 @@ export function EngineNotice({
         <div className="engine__title">yt-dlp isn't installed</div>
         <p className="engine__lede">
           Downloads use <strong>yt-dlp</strong> to read the public page and
-          fetch the video file. Install it once, then re-check:
+          fetch the video file.
+          {canAutoInstall && onAutoInstall
+            ? " Install it automatically, or do it yourself:"
+            : " Install it once, then re-check:"}
         </p>
+        {canAutoInstall && onAutoInstall && (
+          <AutoInstall onClick={onAutoInstall} busy={autoInstalling} />
+        )}
         <div className="engine__cmds">
           <Cmd label="macOS" cmd="brew install yt-dlp" />
           <Cmd label="Windows" cmd="winget install yt-dlp.yt-dlp" />
@@ -84,7 +103,15 @@ export function EngineNotice({
  * cares about. Measured on a real video — 360p progressive versus 1080p
  * merged. Facebook and TikTok serve progressive files, so they're unaffected.
  */
-function FfmpegHint() {
+function FfmpegHint({
+  onAutoInstall,
+  autoInstalling = false,
+  canAutoInstall = false,
+}: {
+  onAutoInstall?: () => void;
+  autoInstalling?: boolean;
+  canAutoInstall?: boolean;
+}) {
   return (
     <div className="engine engine--hint">
       <span className="engine__icon">
@@ -97,6 +124,9 @@ function FfmpegHint() {
           have to be merged. Install <strong>FFmpeg</strong> to get full quality
           — Facebook and TikTok are unaffected either way.
         </p>
+        {canAutoInstall && onAutoInstall && (
+          <AutoInstall onClick={onAutoInstall} busy={autoInstalling} />
+        )}
         <div className="engine__cmds">
           <Cmd label="macOS" cmd="brew install ffmpeg" />
           <Cmd label="Windows" cmd="winget install Gyan.FFmpeg" />
@@ -144,6 +174,22 @@ function ListerHint() {
         </p>
       </div>
     </div>
+  );
+}
+
+/** One-click setup that downloads the tools without a package manager. */
+function AutoInstall({ onClick, busy }: { onClick: () => void; busy: boolean }) {
+  return (
+    <button
+      className="btn btn--primary engine__auto"
+      type="button"
+      onClick={onClick}
+      disabled={busy}
+      aria-busy={busy || undefined}
+    >
+      {busy ? <span className="btn__spinner" /> : <DownloadIcon size={14} />}
+      {busy ? "Installing…" : "Install automatically"}
+    </button>
   );
 }
 

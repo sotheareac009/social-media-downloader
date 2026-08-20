@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter};
+use url::Url;
 
 use crate::auth::callback::CallbackListener;
 use crate::auth::providers::{build_registry, AuthProvider, ProviderDescriptor};
@@ -21,6 +22,11 @@ use crate::auth::storage::CredentialStore;
 use crate::auth::{Credential, ProviderId, EXPIRY_SKEW_SECS};
 use crate::db::{AccountDb, AccountView, CredentialMeta};
 use crate::errors::{AppError, Result};
+
+/// How long to spend confirming the provider is reachable before sending the
+/// user to their browser. Short: this is a "is there a network at all" probe,
+/// not a health check.
+const PREFLIGHT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub mod events {
     pub const STARTED: &str = "auth://started";
@@ -138,6 +144,15 @@ impl AuthManager {
         };
         let flow = provider.authorize(listener.redirect_uri())?;
 
+        // Fail fast when there is no network.
+        //
+        // Opening the browser always "succeeds" - the opener only launches the
+        // application, it cannot know the page will not load. Without this
+        // check an offline user watches "Waiting for browser" for the full
+        // five-minute flow timeout and is then told the sign-in timed out,
+        // which points at the wrong problem entirely.
+        ensure_reachable(&flow.authorize_url).await?;
+
         let _ = app.emit(events::STARTED, AuthStartedEvent { provider: id });
 
         // The user authenticates with the platform directly, in their own
@@ -243,6 +258,30 @@ impl AuthManager {
     }
 }
 
+/// Probe that the authorization host accepts a TCP connection.
+///
+/// Deliberately not an HTTP request: no data is sent, nothing is logged, and a
+/// bare connect distinguishes "no DNS / no route" from everything else without
+/// touching the provider's API. A captive portal will pass this and then show
+/// its own page in the browser, which is the right outcome.
+async fn ensure_reachable(authorize_url: &str) -> Result<()> {
+    let url = Url::parse(authorize_url).map_err(|_| AppError::Internal("bad authorize url".into()))?;
+    let host = url.host_str().ok_or_else(|| AppError::Internal("no host".into()))?;
+    let port = url.port_or_known_default().unwrap_or(443);
+
+    match tokio::time::timeout(
+        PREFLIGHT_TIMEOUT,
+        tokio::net::TcpStream::connect((host, port)),
+    )
+    .await
+    {
+        Ok(Ok(_stream)) => Ok(()),
+        // Refused, unresolvable, or no route - all mean "cannot start a login".
+        Ok(Err(_)) => Err(AppError::Network),
+        Err(_elapsed) => Err(AppError::Network),
+    }
+}
+
 fn open_in_system_browser(app: &AppHandle, url: &str) -> Result<()> {
     use tauri_plugin_opener::OpenerExt;
     app.opener()
@@ -320,6 +359,44 @@ mod tests {
             "a UI read path opened the keychain; each read can cost the user an \
              OS authorization prompt"
         );
+    }
+
+    /// Hermetic: bind a real listener and connect to it, so the "reachable"
+    /// case is proven without depending on the machine having internet.
+    #[tokio::test]
+    async fn reachable_host_passes_preflight() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(ensure_reachable(&format!("http://127.0.0.1:{port}/authorize"))
+            .await
+            .is_ok());
+    }
+
+    /// The offline case. Port 1 on loopback is closed, so connect is refused
+    /// immediately - the same class of failure as having no network.
+    #[tokio::test]
+    async fn unreachable_host_fails_as_a_network_error_not_a_timeout() {
+        let err = ensure_reachable("http://127.0.0.1:1/authorize")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code(),
+            "network",
+            "an offline user must be told to check their connection, not that \
+             their sign-in timed out"
+        );
+    }
+
+    /// It must fail fast rather than make the user wait out the flow timeout.
+    #[tokio::test]
+    async fn preflight_returns_promptly() {
+        let started = std::time::Instant::now();
+        let _ = ensure_reachable("http://127.0.0.1:1/authorize").await;
+        assert!(
+            started.elapsed() < PREFLIGHT_TIMEOUT,
+            "preflight should refuse immediately on a closed port"
+        );
+        assert!(PREFLIGHT_TIMEOUT < crate::auth::callback::FLOW_TIMEOUT);
     }
 
     #[test]

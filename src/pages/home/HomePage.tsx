@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState, type ReactElement } from "react";
 import {
-  downloadEngineStatus,
   instagramStatus,
-  type EngineStatus,
   type SessionStatus,
 } from "@/lib/download";
 import { authGetAccounts, type AccountView } from "@/lib/auth";
+import { useEngineStatus } from "@/components/ui/EngineStatusProvider";
 import { SourceLogo, SOURCE_COLOR, type SourceId } from "@/components/home/SourceLogo";
 import {
   BoltIcon,
@@ -80,7 +79,8 @@ interface Feature {
 }
 
 export function HomePage({ onNavigate }: { onNavigate: (r: Route) => void }) {
-  const [engine, setEngine] = useState<EngineStatus | null>(null);
+  // Shared with the Downloads page: one probe per launch, not one per visit.
+  const { engine } = useEngineStatus();
   const [accounts, setAccounts] = useState<AccountView[] | null>(null);
   const [instagram, setInstagram] = useState<SessionStatus | null>(null);
 
@@ -94,13 +94,11 @@ export function HomePage({ onNavigate }: { onNavigate: (r: Route) => void }) {
 
   useEffect(() => {
     void (async () => {
-      const [e, a, ig] = await Promise.allSettled([
-        downloadEngineStatus(),
+      const [a, ig] = await Promise.allSettled([
         authGetAccounts(),
         instagramStatus(),
       ]);
       if (!mounted.current) return;
-      if (e.status === "fulfilled") setEngine(e.value);
       if (a.status === "fulfilled") setAccounts(a.value);
       if (ig.status === "fulfilled") setInstagram(ig.value);
     })();

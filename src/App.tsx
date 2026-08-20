@@ -6,10 +6,14 @@ import { TelegramPage } from "@/pages/telegram/TelegramPage";
 import { FacebookPage } from "@/pages/facebook/FacebookPage";
 import { UploadPage } from "@/pages/upload/UploadPage";
 import { authGetAccounts, subscribeToAuthEvents } from "@/lib/auth";
-import { netPing, type NetStatus } from "@/lib/net";
 import { ToastProvider } from "@/components/ui/Toast";
 import {
-  BoltIcon,
+  NetStatusProvider,
+  useNetStatus,
+} from "@/components/ui/NetStatusProvider";
+import { EngineStatusProvider } from "@/components/ui/EngineStatusProvider";
+import { SetupOverlay } from "@/components/setup/SetupOverlay";
+import {
   DownloadIcon,
   GlobeIcon,
   HomeIcon,
@@ -67,6 +71,9 @@ export default function App() {
 
   return (
     <ToastProvider>
+      <NetStatusProvider>
+      <EngineStatusProvider>
+      <SetupOverlay />
       <div className="app">
         <Sidebar
           theme={theme}
@@ -90,6 +97,8 @@ export default function App() {
           </div>
         </main>
       </div>
+      </EngineStatusProvider>
+      </NetStatusProvider>
     </ToastProvider>
   );
 }
@@ -109,7 +118,8 @@ function Sidebar({
     <aside className="sidebar">
       <div className="sidebar__brand" data-tauri-drag-region>
         <div className="sidebar__mark">
-          <BoltIcon size={16} />
+          {/* Decorative: the product name sits next to it, so alt is empty. */}
+          <img src="/logo.png" alt="" width={30} height={30} />
         </div>
         <div>
           <div className="sidebar__title">Media Downloader</div>
@@ -181,30 +191,9 @@ function Sidebar({
 
 /** Live internet status + ping, polled from the Rust backend. */
 function NetIndicator() {
-  const [net, setNet] = useState<NetStatus | null>(null);
-  const [checking, setChecking] = useState(false);
-
-  const probe = () => {
-    setChecking(true);
-    netPing()
-      .then(setNet)
-      .catch(() => setNet({ online: false, ms: null, host: null }))
-      .finally(() => setChecking(false));
-  };
-
-  useEffect(() => {
-    probe();
-    // Re-probe on a timer, and immediately when the OS reports a change.
-    const id = window.setInterval(probe, 15_000);
-    const onChange = () => probe();
-    window.addEventListener("online", onChange);
-    window.addEventListener("offline", onChange);
-    return () => {
-      window.clearInterval(id);
-      window.removeEventListener("online", onChange);
-      window.removeEventListener("offline", onChange);
-    };
-  }, []);
+  // Shared with the Downloads page, so the badge and the download gate can
+  // never disagree about whether there is a connection.
+  const { net, checking, probe } = useNetStatus();
 
   const online = net?.online === true;
   const ms = net?.ms ?? null;

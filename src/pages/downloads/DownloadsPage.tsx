@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   downloadCancel,
   downloadClearFinished,
-  downloadEngineStatus,
   downloadGetDestination,
   downloadGetQuality,
   downloadInspectFormats,
@@ -20,7 +19,6 @@ import {
   isTerminal,
   subscribeToDownloadEvents,
   type Destination,
-  type EngineStatus,
   type JobView,
   type FormatReport,
   type ProfileListing,
@@ -28,6 +26,7 @@ import {
   type QualitySettings,
 } from "@/lib/download";
 import { toAuthError } from "@/lib/auth";
+import { toolsInstall, toolsStatus } from "@/lib/tools";
 import { DestinationBar } from "@/components/downloads/DestinationBar";
 import { EngineNotice } from "@/components/downloads/EngineNotice";
 import { JobCard } from "@/components/downloads/JobCard";
@@ -40,6 +39,9 @@ import {
   type QueueFilter,
 } from "@/components/downloads/QueueSummary";
 import { UrlBar } from "@/components/downloads/UrlBar";
+import { OfflineNotice } from "@/components/downloads/OfflineNotice";
+import { useNetStatus } from "@/components/ui/NetStatusProvider";
+import { useEngineStatus } from "@/components/ui/EngineStatusProvider";
 import { useToast } from "@/components/ui/Toast";
 import { DownloadIcon, GlobeIcon, ShieldIcon } from "@/components/ui/icons";
 
@@ -51,8 +53,21 @@ const BATCH_TOAST_LIMIT = 5;
 
 export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") => void }) {
   const toast = useToast();
-  const [engine, setEngine] = useState<EngineStatus | null>(null);
-  const [rechecking, setRechecking] = useState(false);
+  // Probed once per app launch and shared, so navigating here does not
+  // re-run tool detection every single time.
+  const {
+    engine,
+    ready: engineReady,
+    missing: engineMissing,
+    rechecking,
+    recheck: recheckEngine,
+  } = useEngineStatus();
+  // Connectivity gates the whole page: without a network the engine cannot
+  // reach the platform at all, so submitting a link can only fail.
+  const { offline, checking: netChecking, probe: netProbe } = useNetStatus();
+
+  const [autoInstalling, setAutoInstalling] = useState(false);
+  const [canAuto, setCanAuto] = useState(false);
   const [jobs, setJobs] = useState<JobView[]>([]);
   const [dest, setDest] = useState<Destination | null>(null);
   // A folder the user has browsed to but not yet committed.
@@ -101,38 +116,47 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
     });
   }, []);
 
-  const refreshEngine = useCallback(async () => {
-    const status = await downloadEngineStatus();
-    if (mounted.current) setEngine(status);
-    return status;
+  useEffect(() => {
+    toolsStatus()
+      .then((st) => mounted.current && setCanAuto(st.can_install))
+      .catch(() => {});
   }, []);
+
+  // The same download the first-launch screen runs, offered in-context so a
+  // failed or skipped setup can be retried right where the block appears.
+  const autoInstall = useCallback(async () => {
+    setAutoInstalling(true);
+    try {
+      const st = await toolsInstall();
+      await recheckEngine();
+      if (st.ready) {
+        window.dispatchEvent(new CustomEvent("tools-ready"));
+        toast("success", "Tools installed. You're ready to download.");
+      } else {
+        toast("info", "Some tools couldn't be installed. See the notes below.");
+      }
+    } catch (e) {
+      toast("error", toAuthError(e).message);
+    } finally {
+      if (mounted.current) setAutoInstalling(false);
+    }
+  }, [recheckEngine, toast]);
 
   useEffect(() => {
     void (async () => {
       try {
-        const [status, list, destination, q] = await Promise.all([
-          downloadEngineStatus(),
+        const [list, destination, q] = await Promise.all([
           downloadList(),
           downloadGetDestination(),
           downloadGetQuality(),
         ]);
         if (!mounted.current) return;
-        setEngine(status);
         setJobs(list);
         setDest(destination);
         setQuality(q);
       } catch {
-        if (mounted.current) {
-          setEngine({
-            available: false,
-            path: null,
-            version: null,
-            has_ffmpeg: false,
-            ffmpeg_path: null,
-            has_lister: false,
-            lister_version: null,
-          });
-        }
+        // The engine status is owned by EngineStatusProvider; a failure here
+        // only means the queue/destination could not be read.
       }
     })();
   }, []);
@@ -218,7 +242,7 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
         }
         if (result.rejected.length > 0) {
           if (result.rejected.some((r) => r.code === "engine_missing")) {
-            void refreshEngine();
+            void recheckEngine();
           }
           // Identical reasons collapse: ten non-Facebook links are one complaint.
           const unique = [
@@ -241,7 +265,7 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
         if (mounted.current) setSubmitting(false);
       }
     },
-    [upsert, toast, refreshEngine],
+    [upsert, toast, recheckEngine],
   );
 
   /** Queue every video from a confirmed profile. */
@@ -471,22 +495,18 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
   }, [jobs, toast]);
 
   const recheck = useCallback(async () => {
-    setRechecking(true);
-    try {
-      const status = await refreshEngine();
-      downloadGetQuality()
-        .then((q) => mounted.current && setQuality(q))
-        .catch(() => {});
-      toast(
-        status.available ? "success" : "info",
-        status.available
-          ? `Found yt-dlp ${status.version ?? ""}`.trim()
-          : "Still not finding yt-dlp.",
-      );
-    } finally {
-      if (mounted.current) setRechecking(false);
-    }
-  }, [refreshEngine, toast]);
+    // The provider owns the `rechecking` flag, so this only reports the result.
+    const status = await recheckEngine();
+    downloadGetQuality()
+      .then((q) => mounted.current && setQuality(q))
+      .catch(() => {});
+    toast(
+      status.available ? "success" : "info",
+      status.available
+        ? `Found yt-dlp ${status.version ?? ""}`.trim()
+        : "Still not finding yt-dlp.",
+    );
+  }, [recheckEngine, toast]);
 
   /**
    * Retrying while other downloads are still running would put the retries
@@ -515,7 +535,6 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
   }, [retryWhenIdle, retrying, jobs, retryFailed]);
 
   const finishedCount = jobs.filter((j) => isTerminal(j.status)).length;
-  const engineReady = engine?.available === true;
   const counts = countJobs(jobs);
   const visibleJobs = jobs.filter((j) => {
     if (filter === "all") return true;
@@ -540,12 +559,21 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
         </p>
       </header>
 
+      {offline && (
+        <div className="rise" style={{ marginBottom: 16 }}>
+          <OfflineNotice onRecheck={netProbe} checking={netChecking} />
+        </div>
+      )}
+
       {engine && (
         <div className="rise" style={{ marginBottom: 16 }}>
           <EngineNotice
             status={engine}
             onRecheck={() => void recheck()}
             rechecking={rechecking}
+            onAutoInstall={() => void autoInstall()}
+            autoInstalling={autoInstalling}
+            canAutoInstall={canAuto}
           />
         </div>
       )}
@@ -555,7 +583,7 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
           onDraftChange={onDraftChange}
           onSubmit={(urls) => void start(urls)}
           busy={submitting}
-          disabled={!engineReady}
+          disabled={engineMissing || offline}
         />
       </div>
 

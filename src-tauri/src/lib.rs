@@ -22,6 +22,7 @@ pub mod errors;
 pub mod facebook;
 pub mod process;
 pub mod telegram;
+pub mod tools;
 pub mod youtube;
 
 use std::sync::Arc;
@@ -44,6 +45,16 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
+
+            // Make first-launch-installed tools discoverable: their folder goes
+            // on PATH before anything tries to locate yt-dlp or ffmpeg.
+            {
+                let bin = data_dir.join("bin");
+                let _ = std::fs::create_dir_all(&bin);
+                let prev = std::env::var("PATH").unwrap_or_default();
+                std::env::set_var("PATH", format!("{}:{}", bin.display(), prev));
+            }
+
             let db = Arc::new(AccountDb::open(&data_dir.join("accounts.sqlite3"))?);
             let store = Arc::new(OsCredentialStore::new(data_dir.clone()));
 
@@ -113,6 +124,8 @@ pub fn run() {
             commands::telegram::telegram_set_display_name,
             commands::telegram::telegram_clear_session,
             commands::net::net_ping,
+            commands::tools::tools_status,
+            commands::tools::tools_install,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
