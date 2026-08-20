@@ -16,6 +16,7 @@ import {
   type Privacy,
   type UploadTarget,
   type YoutubeChannel,
+  uploadTiktok,
 } from "@/lib/upload";
 import { Button } from "@/components/ui/Button";
 import { useToast } from "@/components/ui/Toast";
@@ -222,6 +223,11 @@ export function UploadPage() {
         try {
           if (t.id === "youtube") {
             await uploadYoutube(item.path, perTitle, item.description, privacy);
+          } else if (t.id === "tiktok") {
+            // Rust reads the file and handles TikTok's chunking rules; sending
+            // the bytes through the webview would copy a large video twice for
+            // no benefit.
+            await uploadTiktok(item.path);
           } else if (t.id === "telegram") {
             if (tgSelected.size === 0) throw new Error("pick at least one chat");
             if (!bytes) bytes = await readFileBytes(item.path);

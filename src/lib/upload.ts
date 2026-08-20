@@ -47,3 +47,17 @@ export const uploadYoutube = (
   description: string,
   privacy: Privacy,
 ) => invoke<string>("upload_youtube", { filePath, title, description, privacy });
+
+/**
+ * Send a video to the creator's TikTok inbox. Resolves to TikTok's publish id.
+ *
+ * It does NOT appear on the profile, and it is NOT in Drafts: TikTok sends an
+ * inbox NOTIFICATION in the app, and the creator taps that to finish editing
+ * and post. Anyone told to look in Drafts will not find it.
+ *
+ * This is what `video.upload` grants, and the sensible mode while the app is
+ * unaudited, since TikTok forces anything an unaudited app posts to private
+ * viewing anyway.
+ */
+export const uploadTiktok = (filePath: string) =>
+  invoke<string>("upload_tiktok", { filePath });

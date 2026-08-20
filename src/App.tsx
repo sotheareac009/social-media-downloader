@@ -14,6 +14,8 @@ import {
 import { EngineStatusProvider } from "@/components/ui/EngineStatusProvider";
 import { ActivationScreen } from "@/components/license/ActivationScreen";
 import { licenseStatus, type LicenseStatus } from "@/lib/license";
+import { isTauri } from "@tauri-apps/api/core";
+import { BrowserNotice } from "@/components/app/BrowserNotice";
 import { SetupOverlay } from "@/components/setup/SetupOverlay";
 import {
   DownloadIcon,
@@ -70,6 +72,13 @@ export default function App() {
     // A UI preference, not a credential — localStorage is the right home.
     localStorage.setItem(THEME_KEY, theme);
   }, [theme]);
+
+  // Checked before anything else: without the IPC bridge every provider below
+  // would fail its first call and report the same cause in a different, wrong
+  // way.
+  if (!isTauri()) {
+    return <BrowserNotice url={window.location.href} />;
+  }
 
   return (
     <ToastProvider>

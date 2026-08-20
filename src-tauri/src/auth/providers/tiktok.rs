@@ -47,7 +47,22 @@ const TOKEN_ENDPOINT: &str = "https://open.tiktokapis.com/v2/oauth/token/";
 const REVOKE_ENDPOINT: &str = "https://open.tiktokapis.com/v2/oauth/revoke/";
 const USERINFO_ENDPOINT: &str = "https://open.tiktokapis.com/v2/user/info/";
 
-const SCOPES: &[&str] = &["user.info.basic"];
+/// Scopes requested at login.
+///
+/// `user.info.basic` shows who is connected. The two video scopes exist for the
+/// Upload page and were added deliberately - they are a real expansion of what
+/// the app asks for, and the consent screen now says so to the user:
+///
+///   `video.upload`  - send to the creator's DRAFTS, they publish in the app
+///   `video.publish` - post DIRECTLY to the profile
+///
+/// `video.publish` additionally requires "Direct Post" to be enabled on the app
+/// in TikTok's portal. If login starts failing with `scope_not_authorized`,
+/// that configuration is missing and dropping this one entry restores it.
+///
+/// Note that TikTok restricts everything an *unaudited* app posts to private
+/// viewing regardless of scope.
+const SCOPES: &[&str] = &["user.info.basic", "video.upload", "video.publish"];
 const USERINFO_FIELDS: &str = "open_id,union_id,display_name,avatar_url";
 
 pub struct TikTokProvider {
@@ -146,7 +161,11 @@ impl AuthProvider for TikTokProvider {
             .append_pair("scope", &SCOPES.join(","))
             .append_pair("redirect_uri", redirect_uri)
             .append_pair("state", &state)
-            .append_pair("code_challenge", &pkce.challenge)
+            // HEX, not base64url. TikTok documents `code_challenge` as the hex
+            // encoding of SHA256(code_verifier) even though it names the method
+            // S256; the RFC 7636 base64url form is rejected as an invalid code
+            // challenge.
+            .append_pair("code_challenge", &pkce.challenge_hex())
             .append_pair("code_challenge_method", pkce.method());
 
         Ok(PendingFlow {
@@ -313,7 +332,7 @@ impl AuthProvider for TikTokProvider {
 ///
 /// SECURITY: only the provider's short error *code* is propagated, never the
 /// message or `log_id`, and never the body itself.
-fn check_api_error(body: &[u8]) -> Result<()> {
+pub(crate) fn check_api_error(body: &[u8]) -> Result<()> {
     #[derive(serde::Deserialize)]
     #[serde(untagged)]
     enum ErrorField {
@@ -324,6 +343,15 @@ fn check_api_error(body: &[u8]) -> Result<()> {
     struct MaybeError {
         #[serde(default)]
         error: Option<ErrorField>,
+        /// OAuth-style detail from `/v2/oauth/token/`. This names the parameter
+        /// TikTok objected to, which is the difference between a developer
+        /// being able to fix a misconfiguration and staring at
+        /// "invalid_request".
+        ///
+        /// Only the OAuth `error_description` is propagated - never `message`
+        /// from the Open API envelope, which can carry request detail.
+        #[serde(default)]
+        error_description: Option<String>,
     }
 
     // An empty body (a successful revoke) is not an error.
@@ -336,6 +364,7 @@ fn check_api_error(body: &[u8]) -> Result<()> {
         return Ok(());
     };
 
+    let detail = parsed.error_description.as_deref().map(sanitize_detail);
     let code = match parsed.error {
         None => return Ok(()),
         Some(ErrorField::Structured { code }) => code,
@@ -350,7 +379,10 @@ fn check_api_error(body: &[u8]) -> Result<()> {
     if code == "access_denied" {
         return Err(AppError::Cancelled);
     }
-    Err(AppError::ProviderDenied(sanitize_code(&code)))
+    Err(AppError::ProviderDenied(match detail {
+        Some(d) if !d.is_empty() => format!("{} - {d}", sanitize_code(&code)),
+        _ => sanitize_code(&code),
+    }))
 }
 
 /// Turn TikTok's `error_type` into operator-facing guidance.
@@ -389,6 +421,19 @@ fn explain_error_type(kind: &str) -> Option<String> {
     };
     // Collapse the line continuations above into single spaces.
     Some(text.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// Keep an OAuth `error_description` readable but bounded.
+///
+/// Printable ASCII only and length-capped, so a hostile or oversized body
+/// cannot inject control characters or flood the interface.
+fn sanitize_detail(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .take(160)
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 /// Provider error codes are short ASCII identifiers; anything else is dropped
@@ -471,14 +516,38 @@ mod tests {
         assert_eq!(q["code_challenge_method"], "S256");
     }
 
+    /// The bug this guards: TikTok wants the challenge hex-encoded, and the
+    /// standards-compliant base64url value is refused at the token exchange
+    /// with "Code verifier or code challenge is invalid".
     #[test]
-    fn scopes_are_comma_separated_and_minimal() {
+    fn the_challenge_sent_to_tiktok_is_hex_not_base64url() {
+        let flow = configured().authorize("http://127.0.0.1:1234/callback").unwrap();
+        let url = Url::parse(&flow.authorize_url).unwrap();
+        let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        let sent = &q["code_challenge"];
+
+        assert_eq!(sent.len(), 64, "expected 64 hex characters, got {sent:?}");
+        assert!(sent.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(*sent, flow.pkce.challenge_hex());
+        assert_ne!(*sent, flow.pkce.challenge, "base64url form was sent");
+    }
+
+    /// Pins the exact scope set.
+    ///
+    /// Asserting the whole string rather than "does not contain X" means any
+    /// future addition fails here and has to be justified, instead of quietly
+    /// widening what users are asked to consent to.
+    #[test]
+    fn scopes_are_comma_separated_and_pinned() {
         let flow = configured().authorize("http://127.0.0.1:1/callback").unwrap();
         let url = Url::parse(&flow.authorize_url).unwrap();
         let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
-        assert_eq!(q["scope"], "user.info.basic");
+
+        assert_eq!(q["scope"], "user.info.basic,video.upload,video.publish");
         assert!(!q["scope"].contains(' '), "TikTok wants comma-delimited scopes");
-        for forbidden in ["video.upload", "video.publish", "user.info.stats"] {
+
+        // Scopes that read or post beyond what the app actually does.
+        for forbidden in ["user.info.stats", "user.info.profile", "research."] {
             assert!(!q["scope"].contains(forbidden), "over-broad scope requested");
         }
     }
@@ -518,7 +587,23 @@ mod tests {
     #[test]
     fn oauth_style_string_error_is_caught() {
         let body = br#"{"error":"invalid_grant","error_description":"Authorization code is invalid"}"#;
-        assert_eq!(check_api_error(body).unwrap_err().code(), "provider_denied");
+        let err = check_api_error(body).unwrap_err();
+        assert_eq!(err.code(), "provider_denied");
+        // The description names what TikTok objected to; without it a developer
+        // has nothing to act on.
+        assert!(
+            err.to_string().contains("Authorization code is invalid"),
+            "the actionable detail was dropped: {err}"
+        );
+    }
+
+    #[test]
+    fn the_open_api_message_field_is_still_withheld() {
+        // `error_description` is developer-facing; `message` on the Open API
+        // envelope can carry request detail and stays suppressed.
+        let body = br#"{"error":{"code":"scope_not_authorized","message":"request detail here"}}"#;
+        let err = check_api_error(body).unwrap_err();
+        assert!(!err.to_string().contains("request detail here"));
     }
 
     #[test]

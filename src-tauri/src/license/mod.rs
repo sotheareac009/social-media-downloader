@@ -251,7 +251,21 @@ mod tests {
         format_key(&payload, &sig.to_bytes())
     }
 
+    /// `LICENSE_PUBLIC_KEY` is process-global, and cargo runs tests in
+    /// parallel. Without this lock, a test that clears the key races one that
+    /// sets it: `verify` then gets past the "not configured" branch and fails
+    /// later as `license_malformed`, so the suite fails intermittently on an
+    /// assertion that has nothing to do with the bug.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the lock even if a previous test panicked while holding it - the
+    /// data it guards is the environment, which we set explicitly anyway.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn with_public_key<T>(public: &str, f: impl FnOnce() -> T) -> T {
+        let _guard = env_guard();
         std::env::set_var("LICENSE_PUBLIC_KEY", public);
         let out = f();
         std::env::remove_var("LICENSE_PUBLIC_KEY");
@@ -359,6 +373,7 @@ mod tests {
 
     #[test]
     fn licensing_is_off_when_no_public_key_is_compiled_in() {
+        let _guard = env_guard();
         std::env::remove_var("LICENSE_PUBLIC_KEY");
         assert!(!is_enforced(), "dev builds must not be gated");
         assert_eq!(verify("SMD1-AAAAAA").unwrap_err().code(), "license_not_configured");

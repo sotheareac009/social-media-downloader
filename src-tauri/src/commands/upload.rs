@@ -40,6 +40,22 @@ pub async fn upload_targets(
     // YouTube is ready when Google is connected.
     let youtube_ready = manager.access_token(ProviderId::Google).await.is_ok();
 
+    // TikTok needs more than a connection. Login grants `user.info.basic`,
+    // which reads a profile and nothing else; posting goes through the Content
+    // Posting API and needs `video.publish`, or `video.upload` to send the
+    // video to the creator's TikTok inbox for them to finish.
+    // Checking the granted scopes rather than just "is connected" keeps the
+    // card from promising an upload that would fail at the first API call.
+    let tiktok = manager.access_token(ProviderId::TikTok).await.ok();
+    let tiktok_connected = tiktok.is_some();
+    let tiktok_can_post = tiktok
+        .as_ref()
+        .is_some_and(|c| {
+            c.scopes
+                .iter()
+                .any(|s| s == "video.publish" || s == "video.upload")
+        });
+
     Ok(vec![
         UploadTarget {
             id: "youtube".into(),
@@ -58,6 +74,23 @@ pub async fn upload_targets(
             accepts: "photo".into(),
             ready: false,
             reason: Some("Needs Facebook Business Verification before publishing.".into()),
+        },
+        UploadTarget {
+            id: "tiktok".into(),
+            name: "TikTok".into(),
+            accepts: "video".into(),
+            ready: tiktok_can_post,
+            reason: if tiktok_can_post {
+                None
+            } else if tiktok_connected {
+                Some(
+                    "Connected, but this login only grants profile access. Posting needs the \
+                     video.publish scope, which TikTok grants after app review."
+                        .into(),
+                )
+            } else {
+                Some("Connect TikTok on the Accounts page.".into())
+            },
         },
         UploadTarget {
             id: "telegram".into(),
@@ -201,6 +234,40 @@ pub async fn upload_video_thumbnail(path: String) -> Result<Option<String>> {
 }
 
 /// Upload a video to the user's YouTube channel. Returns the video id.
+/// Send a video to the creator's TikTok inbox.
+///
+/// Returns TikTok's publish id. The video does NOT appear on the profile, and
+/// it is NOT in Drafts either: TikTok sends the creator an inbox NOTIFICATION,
+/// and they must tap it to finish editing and post. Saying "drafts" sends people
+/// looking somewhere the video will not be.
+#[tauri::command]
+pub async fn upload_tiktok(
+    manager: State<'_, AuthManager>,
+    file_path: String,
+) -> Result<String> {
+    let cred = manager.access_token(ProviderId::TikTok).await?;
+
+    // Fail with something actionable rather than letting TikTok reject the
+    // first API call: the connection can be live while the scope is absent.
+    if !cred
+        .scopes
+        .iter()
+        .any(|s| s == "video.upload" || s == "video.publish")
+    {
+        return Err(AppError::ProviderDenied(
+            "this TikTok login has no upload permission - reconnect TikTok on the Accounts page"
+                .into(),
+        ));
+    }
+
+    crate::tiktok::upload_to_inbox(
+        &reqwest::Client::new(),
+        &cred.access_token,
+        std::path::Path::new(&file_path),
+    )
+    .await
+}
+
 #[tauri::command]
 pub async fn upload_youtube(
     manager: State<'_, AuthManager>,

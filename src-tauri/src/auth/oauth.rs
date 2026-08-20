@@ -46,6 +46,23 @@ impl Pkce {
     pub fn method(&self) -> &'static str {
         "S256"
     }
+
+    /// SHA-256 of the verifier, HEX encoded.
+    ///
+    /// RFC 7636 specifies base64url for the S256 challenge, and that is what
+    /// [`Self::challenge`] carries. TikTok documents hex instead, while still
+    /// calling the method "S256". Sending the base64url form there is rejected
+    /// with "Code verifier or code challenge is invalid", which reads like a
+    /// PKCE bug rather than an encoding mismatch.
+    ///
+    /// Kept as a separate accessor so the standards-compliant value stays the
+    /// default and only the provider that needs the deviation opts into it.
+    pub fn challenge_hex(&self) -> String {
+        Sha256::digest(self.verifier.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
 }
 
 impl std::fmt::Debug for Pkce {
@@ -180,6 +197,39 @@ mod tests {
             redirect_uri: String::new(),
             state: state.to_string(),
             pkce: Pkce::generate(),
+        }
+    }
+
+    /// TikTok wants hex; everyone else wants base64url. Both must derive from
+    /// the same verifier.
+    #[test]
+    fn hex_challenge_is_the_same_digest_in_a_different_encoding() {
+        let p = Pkce::generate();
+        let digest = Sha256::digest(p.verifier().as_bytes());
+
+        let hex = p.challenge_hex();
+        assert_eq!(hex.len(), 64, "sha256 hex is 64 characters");
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_eq!(hex, digest.iter().map(|b| format!("{b:02x}")).collect::<String>());
+
+        // The two encodings must not be confused for one another.
+        assert_ne!(hex, p.challenge);
+        assert_eq!(p.challenge, URL_SAFE_NO_PAD.encode(digest));
+    }
+
+    /// TikTok restricts the verifier to RFC 3986 unreserved characters.
+    #[test]
+    fn verifier_uses_only_unreserved_characters() {
+        for _ in 0..20 {
+            let p = Pkce::generate();
+            assert!(
+                p.verifier()
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~')),
+                "verifier contains a character TikTok rejects: {}",
+                p.verifier()
+            );
+            assert!((43..=128).contains(&p.verifier().len()));
         }
     }
 
