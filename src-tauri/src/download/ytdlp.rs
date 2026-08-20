@@ -381,11 +381,11 @@ pub struct ProfileListing {
 /// intermittently answers with "Unable to extract secondary user ID" - the
 /// same profile succeeds moments later - so this retries a little harder than
 /// a single-video probe does.
-pub async fn list_profile(url: &Url) -> Result<ProfileListing> {
+pub async fn list_profile(url: &Url, cookies: Option<&std::path::Path>) -> Result<ProfileListing> {
     let mut last = AppError::NoMediaFound;
 
     for attempt in 0..PROFILE_LIST_ATTEMPTS {
-        match list_profile_once(url).await {
+        match list_profile_once(url, cookies).await {
             Ok(listing) => return Ok(listing),
             Err(AppError::TemporarilyUnavailable) if attempt + 1 < PROFILE_LIST_ATTEMPTS => {
                 last = AppError::TemporarilyUnavailable;
@@ -402,9 +402,9 @@ pub async fn list_profile(url: &Url) -> Result<ProfileListing> {
     Err(last)
 }
 
-async fn list_profile_once(url: &Url) -> Result<ProfileListing> {
+async fn list_profile_once(url: &Url, cookies: Option<&std::path::Path>) -> Result<ProfileListing> {
     let mut cmd = crate::process::command(engine_path()?);
-    hardened_base(&mut cmd, None);
+    hardened_base(&mut cmd, cookies);
     cmd.arg("--yes-playlist")
         .arg("--flat-playlist")
         .arg("--dump-single-json")

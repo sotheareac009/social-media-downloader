@@ -333,6 +333,7 @@ const SETUP_VARS: Record<string, string[]> = {
     "INSTAGRAM_REDIRECT_URI",
   ],
   tiktok: ["TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_SECRET"],
+  x: ["X_CLIENT_ID", "X_CLIENT_SECRET"],
 };
 
 function SetupNotice({ provider }: { provider: string }) {

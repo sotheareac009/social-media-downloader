@@ -52,6 +52,13 @@ pub async fn upload_targets(
     // video to the creator's TikTok inbox for them to finish.
     // Checking the granted scopes rather than just "is connected" keeps the
     // card from promising an upload that would fail at the first API call.
+    // X posting needs the write scopes granted at login.
+    let x_cred = manager.access_token(ProviderId::X).await.ok();
+    let x_connected = x_cred.is_some();
+    let x_can_post = x_cred
+        .as_ref()
+        .is_some_and(|c| c.scopes.iter().any(|s| s == "tweet.write"));
+
     let tiktok = manager.access_token(ProviderId::TikTok).await.ok();
     let tiktok_connected = tiktok.is_some();
     let tiktok_can_post = tiktok
@@ -96,6 +103,22 @@ pub async fn upload_targets(
                 )
             } else {
                 Some("Connect TikTok on the Accounts page.".into())
+            },
+        },
+        UploadTarget {
+            id: "x".into(),
+            name: "X".into(),
+            accepts: "video,photo".into(),
+            ready: x_can_post,
+            reason: if x_can_post {
+                None
+            } else if x_connected {
+                Some(
+                    "Connected, but this login can't post. Reconnect X on the Accounts page to                      grant posting permission."
+                        .into(),
+                )
+            } else {
+                Some("Connect X on the Accounts page.".into())
             },
         },
         UploadTarget {
@@ -270,6 +293,29 @@ pub async fn upload_tiktok(
         &reqwest::Client::new(),
         &cred.access_token,
         std::path::Path::new(&file_path),
+    )
+    .await
+}
+
+/// Post a photo or video to X with a caption. Requires the write scopes granted
+/// at login; a read-only connection is rejected with an actionable message.
+#[tauri::command]
+pub async fn upload_x(
+    manager: State<'_, AuthManager>,
+    file_path: String,
+    caption: String,
+) -> Result<String> {
+    let cred = manager.access_token(ProviderId::X).await?;
+    if !cred.scopes.iter().any(|s| s == "tweet.write") {
+        return Err(AppError::ProviderDenied(
+            "this X login can't post - reconnect X on the Accounts page to grant permission".into(),
+        ));
+    }
+    crate::x_post::post_media(
+        &reqwest::Client::new(),
+        &cred.access_token,
+        std::path::Path::new(&file_path),
+        &caption,
     )
     .await
 }

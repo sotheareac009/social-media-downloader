@@ -9,6 +9,7 @@ pub mod facebook;
 pub mod google;
 pub mod instagram;
 pub mod tiktok;
+pub mod x;
 
 use std::sync::Arc;
 
@@ -106,6 +107,7 @@ pub fn build_registry(http: reqwest::Client) -> Vec<Arc<dyn AuthProvider>> {
         Arc::new(google::GoogleProvider::new(http.clone())),
         Arc::new(facebook::FacebookProvider::new(http.clone())),
         Arc::new(instagram::InstagramProvider::new(http.clone())),
-        Arc::new(tiktok::TikTokProvider::new(http)),
+        Arc::new(tiktok::TikTokProvider::new(http.clone())),
+        Arc::new(x::XProvider::new(http)),
     ]
 }

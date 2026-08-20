@@ -14,6 +14,9 @@ import {
 import { AccountCard } from "@/components/accounts/AccountCard";
 import {
   facebookConnect,
+  xConnect,
+  xDisconnect,
+  xStatus,
   facebookDisconnect,
   facebookStatus,
   instagramConnect,
@@ -46,6 +49,8 @@ export function AccountsPage({
   const [igBusy, setIgBusy] = useState(false);
   const [fbDownload, setFbDownload] = useState<SessionStatus | null>(null);
   const [fbBusy, setFbBusy] = useState(false);
+  const [xDownload, setXDownload] = useState<SessionStatus | null>(null);
+  const [xBusy, setXBusy] = useState(false);
   const [telegram, setTelegram] = useState<TelegramStatus | null>(null);
   const [ytAccounts, setYtAccounts] = useState<YoutubeAccount[]>([]);
 
@@ -79,6 +84,9 @@ export function AccountsPage({
           .catch(() => {});
         facebookStatus()
           .then((st) => mounted.current && setFbDownload(st))
+          .catch(() => {});
+        xStatus()
+          .then((st) => mounted.current && setXDownload(st))
           .catch(() => {});
         fetchTelegramStatus()
           .then((st) => mounted.current && setTelegram(st))
@@ -211,6 +219,31 @@ export function AccountsPage({
     }
   }, [toast]);
 
+  const signInX = useCallback(async () => {
+    setXBusy(true);
+    try {
+      setXDownload(await xConnect());
+      toast("success", "X connected. Your X videos can now be downloaded.");
+    } catch (e) {
+      const err = toAuthError(e);
+      if (err.code !== "cancelled") toast("error", friendlyMessage(err));
+    } finally {
+      if (mounted.current) setXBusy(false);
+    }
+  }, [toast]);
+
+  const disconnectX = useCallback(async () => {
+    setXBusy(true);
+    try {
+      setXDownload(await xDisconnect());
+      toast("info", "X disconnected.");
+    } catch (e) {
+      toast("error", toAuthError(e).message);
+    } finally {
+      if (mounted.current) setXBusy(false);
+    }
+  }, [toast]);
+
   const removeYtUploader = useCallback(
     async (id: string) => {
       try {
@@ -320,7 +353,41 @@ export function AccountsPage({
                         : undefined
                     }
                     footer={
-                      descriptor.id === "google" && ytAccounts.length > 0 ? (
+                      descriptor.id === "x" ? (
+                        <div className="xdl">
+                          <div className="xdl__head">Download login</div>
+                          {xDownload?.connected ? (
+                            <div className="xdl__row">
+                              <span className="xdl__ok">
+                                <CheckIcon size={12} /> Signed in — X videos can download
+                              </span>
+                              <button
+                                className="btn btn--ghost btn--sm"
+                                type="button"
+                                onClick={() => void disconnectX()}
+                                disabled={xBusy}
+                              >
+                                Disconnect
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="xdl__row">
+                              <span className="xdl__hint">
+                                Sign in to download videos, sensitive posts and whole profiles from X.
+                                (Separate from the connect above, which is for posting.)
+                              </span>
+                              <button
+                                className="btn btn--primary btn--sm"
+                                type="button"
+                                onClick={() => void signInX()}
+                                disabled={xBusy}
+                              >
+                                {xBusy ? "Waiting…" : "Sign in to X"}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      ) : descriptor.id === "google" && ytAccounts.length > 0 ? (
                         <div className="yt-uploaders">
                           <div className="yt-uploaders__head">
                             YouTube upload accounts ({ytAccounts.length})

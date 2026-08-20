@@ -1,7 +1,7 @@
 import { ProviderLogo } from "@/components/accounts/ProviderLogo";
 
 /** Platforms this build can fetch public media from. */
-export type SourceId = "youtube" | "tiktok" | "facebook" | "instagram" | "telegram";
+export type SourceId = "youtube" | "tiktok" | "facebook" | "instagram" | "telegram" | "x";
 
 export const SOURCE_COLOR: Record<SourceId, string> = {
   youtube: "#FF0033",
@@ -11,6 +11,8 @@ export const SOURCE_COLOR: Record<SourceId, string> = {
   instagram: "#DD2A7B",
   // Telegram brand blue (the midpoint of its #2AABEE→#229ED9 gradient).
   telegram: "#229ED9",
+  // X is black; a mid grey reads as an accent where black would not.
+  x: "#71767B",
 };
 
 /**

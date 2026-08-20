@@ -32,7 +32,6 @@ import { EngineNotice } from "@/components/downloads/EngineNotice";
 import { JobCard } from "@/components/downloads/JobCard";
 import { ProfileCard } from "@/components/downloads/ProfileCard";
 import { QualityPicker } from "@/components/downloads/QualityPicker";
-import { FormatPanel } from "@/components/downloads/FormatPanel";
 import {
   countJobs,
   QueueSummary,
@@ -81,6 +80,8 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
   const [quality, setQuality] = useState<QualitySettings | null>(null);
   const [qualityBusy, setQualityBusy] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  // True while a single pasted link is being validated (quality probe in flight).
+  const [inspecting, setInspecting] = useState(false);
   // Profiles found in a paste, waiting for the user to confirm the count.
   const [profiles, setProfiles] = useState<ProfileListing[]>([]);
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -232,6 +233,11 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
   const start = useCallback(
     async (urls: string[]) => {
       setSubmitting(true);
+      // If this is the validated single video, honour the quality chosen in the
+      // card; otherwise let the backend use the default quality setting.
+      const useReportQuality =
+        urls.length === 1 && urls[0] === reportFor && report !== null;
+      const submitQuality = useReportQuality ? pickedQuality : undefined;
       // Clicking the top Download queues the pasted link straight away, so the
       // inspect/quality card for that same link is now redundant — dismiss it
       // (and cancel any pending probe) instead of leaving a second Download
@@ -242,8 +248,9 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
       }
       setReport(null);
       setReportFor(null);
+      setInspecting(false);
       try {
-        const result = await downloadSubmit(urls);
+        const result = await downloadSubmit(urls, submitQuality);
         result.queued.forEach(upsert);
         if (result.profiles.length > 0) {
           // Replace any earlier listing for the same profile rather than
@@ -280,7 +287,7 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
         if (mounted.current) setSubmitting(false);
       }
     },
-    [upsert, toast, recheckEngine],
+    [upsert, toast, recheckEngine, reportFor, report, pickedQuality],
   );
 
   /** Queue every video from a confirmed profile. */
@@ -419,16 +426,27 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
         inspectTimer.current = null;
       }
 
+      // Anything that isn't exactly one link is handled the normal way — no
+      // gating, no quality card (a channel/profile or a batch).
       if (urls.length !== 1) {
         setReport(null);
         setReportFor(null);
+        setInspecting(false);
         return;
       }
       const url = urls[0];
+      if (!/^https?:\/\//i.test(url)) {
+        setReport(null);
+        setReportFor(null);
+        setInspecting(false);
+        return;
+      }
       if (url === reportFor) return;
       setReportFor(url);
       setReport(null);
-      if (!/^https?:\/\//i.test(url)) return;
+      // A single link is a candidate single video: hold the Download button
+      // disabled while yt-dlp probes it, so a click can't beat the quality list.
+      setInspecting(true);
 
       inspectTimer.current = window.setTimeout(() => {
         downloadInspectFormats(url)
@@ -438,28 +456,20 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
             if (!mounted.current) return;
             setReport(r);
             setPickedQuality(quality?.selected ?? "best");
+            setInspecting(false);
           })
-          .catch(() => {});
+          .catch(() => {
+            // Not a single video (a channel/profile, or unsupported) — drop the
+            // quality card and let the normal submit path take over.
+            if (!mounted.current) return;
+            setReport(null);
+            setReportFor(null);
+            setInspecting(false);
+          });
       }, 700);
     },
     [reportFor, quality],
   );
-
-  const downloadInspected = useCallback(async () => {
-    if (!reportFor) return;
-    setSubmitting(true);
-    try {
-      const result = await downloadSubmit([reportFor], pickedQuality);
-      result.queued.forEach(upsert);
-      setReport(null);
-      setReportFor(null);
-    } catch (e) {
-      const err = toAuthError(e);
-      toast("error", downloadMessage(err.code, err.message));
-    } finally {
-      if (mounted.current) setSubmitting(false);
-    }
-  }, [reportFor, pickedQuality, upsert, toast]);
 
   const toggleCompatible = useCallback(
     async (on: boolean) => {
@@ -602,6 +612,7 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
           onDraftChange={onDraftChange}
           onSubmit={(urls) => void start(urls)}
           busy={submitting}
+          validating={inspecting}
           disabled={engineMissing || offline}
         />
       </div>
@@ -612,6 +623,10 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
           busy={qualityBusy}
           onChange={(q) => void changeQuality(q)}
           onToggleCompatible={(on) => void toggleCompatible(on)}
+          formats={report?.formats}
+          picked={pickedQuality}
+          onPick={setPickedQuality}
+          bestLabel={report?.best_label}
         />
       )}
 
@@ -626,23 +641,6 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
           onReset={() => void resetFolder()}
           onOpen={() => void reveal(dest.path)}
         />
-      )}
-
-      {report && (
-        <div className="rise" style={{ marginTop: 14 }}>
-          <FormatPanel
-            report={report}
-            chosen={pickedQuality}
-            busy={submitting}
-            hasFfmpeg={engine?.has_ffmpeg ?? false}
-            onChoose={setPickedQuality}
-            onDownload={() => void downloadInspected()}
-            onDismiss={() => {
-              setReport(null);
-              setReportFor(null);
-            }}
-          />
-        </div>
       )}
 
       {profiles.length > 0 && (

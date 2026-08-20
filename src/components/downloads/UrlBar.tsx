@@ -24,12 +24,15 @@ export function UrlBar({
   onSubmit,
   onDraftChange,
   busy,
+  validating = false,
   disabled,
 }: {
   onSubmit: (urls: string[]) => void;
   /** Fired as the box is edited, so the page can inspect a single link. */
   onDraftChange?: (urls: string[]) => void;
   busy: boolean;
+  /** A single link is being validated (quality probe) — hold the button. */
+  validating?: boolean;
   disabled: boolean;
 }) {
   const [value, setValue] = useState("");
@@ -55,7 +58,7 @@ export function UrlBar({
 
   const submit = (e?: FormEvent) => {
     e?.preventDefault();
-    if (urls.length === 0 || busy || disabled) return;
+    if (urls.length === 0 || busy || disabled || validating) return;
     onSubmit(urls);
     setValue("");
   };
@@ -78,7 +81,7 @@ export function UrlBar({
         rows={1}
         autoComplete="off"
         spellCheck={false}
-        placeholder="Paste YouTube, Facebook or TikTok links, or a channel — one per line"
+        placeholder="Paste YouTube, Facebook, TikTok or X links, or a channel — one per line"
         aria-label="Video links"
         value={value}
         disabled={disabled}
@@ -87,11 +90,15 @@ export function UrlBar({
       />
       <Button
         type="submit"
-        loading={busy}
-        disabled={disabled || urls.length === 0}
+        loading={busy || validating}
+        disabled={disabled || urls.length === 0 || validating}
         icon={<DownloadIcon size={15} />}
       >
-        {urls.length > 1 ? `Download ${urls.length}` : "Download"}
+        {validating
+          ? "Checking…"
+          : urls.length > 1
+            ? `Download ${urls.length}`
+            : "Download"}
       </Button>
     </form>
   );

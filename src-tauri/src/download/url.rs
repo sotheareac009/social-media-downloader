@@ -26,6 +26,7 @@ pub enum Source {
     TikTok,
     YouTube,
     Instagram,
+    X,
 }
 
 impl Source {
@@ -35,6 +36,7 @@ impl Source {
             Source::TikTok => "tiktok",
             Source::YouTube => "youtube",
             Source::Instagram => "instagram",
+            Source::X => "x",
         }
     }
 
@@ -44,6 +46,7 @@ impl Source {
             Source::TikTok => "TikTok",
             Source::YouTube => "YouTube",
             Source::Instagram => "Instagram",
+            Source::X => "X",
         }
     }
 }
@@ -66,6 +69,7 @@ const FACEBOOK_HOSTS: &[&str] = &["facebook.com", "fb.watch", "fb.com", "faceboo
 const TIKTOK_HOSTS: &[&str] = &["tiktok.com", "vm.tiktok.com", "vt.tiktok.com"];
 const YOUTUBE_HOSTS: &[&str] = &["youtube.com", "youtu.be", "youtube-nocookie.com"];
 const INSTAGRAM_HOSTS: &[&str] = &["instagram.com", "instagr.am", "ddinstagram.com"];
+const X_HOSTS: &[&str] = &["x.com", "twitter.com"];
 
 /// Strip the subdomains that are merely presentational, so `m.facebook.com`
 /// and `web.facebook.com` resolve to the same allowlist entry. Anything else
@@ -135,6 +139,30 @@ fn is_instagram_profile(url: &Url) -> bool {
 }
 
 /// Classify a pasted link and say whether it names a video or a whole profile.
+/// Path first-segments on x.com that are features, not user handles.
+const X_RESERVED: &[&str] = &[
+    "home", "explore", "notifications", "messages", "i", "search", "settings",
+    "compose", "hashtag", "login", "signup", "tos", "privacy", "about",
+    "download", "intent",
+];
+
+/// A whole-profile X link: `x.com/<handle>` or `x.com/<handle>/media`. A
+/// `/status/<id>` link is a single post and deliberately does not match.
+fn is_x_profile(url: &Url) -> bool {
+    let segments: Vec<&str> = url
+        .path_segments()
+        .map(|s| s.filter(|p| !p.is_empty()).collect())
+        .unwrap_or_default();
+    let handle_ok = |h: &str| {
+        !h.is_empty() && !X_RESERVED.contains(&h.to_ascii_lowercase().as_str())
+    };
+    match segments.as_slice() {
+        [handle] => handle_ok(handle),
+        [handle, tab] => handle_ok(handle) && matches!(*tab, "media" | "with_replies"),
+        _ => false,
+    }
+}
+
 pub fn classify_target(raw: &str) -> Result<(Source, Url, TargetKind)> {
     let (source, url) = classify(raw)?;
     match source {
@@ -144,6 +172,7 @@ pub fn classify_target(raw: &str) -> Result<(Source, Url, TargetKind)> {
         Source::Instagram if is_instagram_profile(&url) => {
             Ok((source, url, TargetKind::Profile))
         }
+        Source::X if is_x_profile(&url) => Ok((source, url, TargetKind::Profile)),
         _ => Ok((source, url, TargetKind::Single)),
     }
 }
@@ -263,6 +292,10 @@ pub fn classify(raw: &str) -> Result<(Source, Url)> {
             // for these, so refuse rather than queue work that cannot run.
             Err(AppError::InstagramProfileUnsupported)
         }
+    } else if X_HOSTS.contains(&host) {
+        // A single post: yt-dlp's Twitter extractor handles x.com and
+        // twitter.com `/status/<id>` links (video, GIF, or image).
+        Ok((Source::X, parsed))
     } else {
         Err(AppError::UnsupportedUrl)
     }

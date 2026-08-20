@@ -10,7 +10,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 /** Platforms this build will fetch public media from. */
-export type Source = "facebook" | "tiktok" | "youtube" | "instagram";
+export type Source = "facebook" | "tiktok" | "youtube" | "instagram" | "x";
 
 export type JobStatus =
   | "queued"
@@ -232,6 +232,14 @@ export const facebookConnect = () =>
 
 export const facebookDisconnect = () =>
   invoke<SessionStatus>("download_facebook_disconnect");
+
+export const xStatus = () => invoke<SessionStatus>("download_x_status");
+
+/** Opens a dedicated X login window; resolves once a session is captured. */
+export const xConnect = () => invoke<SessionStatus>("download_x_connect");
+
+export const xDisconnect = () =>
+  invoke<SessionStatus>("download_x_disconnect");
 
 export const downloadGetQuality = () =>
   invoke<QualitySettings>("download_get_quality");

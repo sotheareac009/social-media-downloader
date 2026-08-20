@@ -8,7 +8,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-export type ProviderId = "google" | "facebook" | "instagram" | "tiktok" | "telegram";
+export type ProviderId = "google" | "facebook" | "instagram" | "tiktok" | "telegram" | "x";
 
 export interface ProviderDescriptor {
   id: ProviderId;

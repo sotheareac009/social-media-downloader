@@ -197,6 +197,119 @@ pub async fn list_instagram_profile(
     })
 }
 
+/// List an X (Twitter) profile's video tweets via gallery-dl.
+///
+/// yt-dlp has no X timeline extractor, so — as with Instagram — gallery-dl does
+/// the enumeration and yt-dlp downloads each resulting tweet. X requires an
+/// authenticated session; the same captured cookies serve both tools.
+///
+/// gallery-dl gives each media file its tweet metadata (`tweet_id`, `author`),
+/// from which a canonical `/status/<id>` URL is built to queue for yt-dlp.
+pub async fn list_x_profile(url: &url::Url, cookies: Option<&Path>) -> Result<ProfileListing> {
+    let binary = locate().ok_or(AppError::ListerMissing)?;
+
+    let mut cmd = crate::process::command(binary);
+    cmd.arg("--dump-json")
+        .arg("--simulate")
+        .arg("--range")
+        .arg(format!("1-{MAX_POSTS}"));
+    if let Some(path) = cookies {
+        cmd.arg("--cookies").arg(path);
+    }
+
+    let out = cmd
+        .arg(url.as_str())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|_| AppError::ListerMissing)?;
+
+    if !out.status.success() {
+        return Err(classify_failure(&String::from_utf8_lossy(&out.stderr)));
+    }
+
+    let records: serde_json::Value =
+        serde_json::from_slice(&out.stdout).map_err(|_| AppError::MalformedProviderResponse)?;
+
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut entries: Vec<ProfileEntry> = Vec::new();
+    let mut uploader: Option<String> = None;
+
+    for record in records.as_array().into_iter().flatten() {
+        let Some(parts) = record.as_array() else { continue };
+        // Type 3 records are files (with metadata); skip directory/other records.
+        if parts.first().and_then(|k| k.as_u64()) != Some(3) {
+            continue;
+        }
+        let Some(meta) = parts.last().and_then(|m| m.as_object()) else {
+            continue;
+        };
+
+        // Only video / animated-gif tweets — yt-dlp can't fetch a still photo.
+        // Check the media type and, as a fallback, the file extension, so a
+        // field-name difference between gallery-dl versions doesn't drop videos.
+        let kind = meta.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let ext_is_video = meta
+            .get("extension")
+            .and_then(|e| e.as_str())
+            .map(|e| VIDEO_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+            .unwrap_or(false);
+        if kind != "video" && kind != "animated_gif" && !ext_is_video {
+            continue;
+        }
+
+        let Some(tweet_id) = meta
+            .get("tweet_id")
+            .and_then(|v| v.as_u64().map(|n| n.to_string()).or_else(|| v.as_str().map(str::to_string)))
+        else {
+            continue;
+        };
+        if !seen.insert(tweet_id.clone()) {
+            continue;
+        }
+
+        // The tweet's own author, so the /status/ URL resolves to the right
+        // handle; fall back to the timeline owner, then a neutral placeholder.
+        let handle = meta
+            .get("author")
+            .and_then(|a| a.get("name"))
+            .and_then(|n| n.as_str())
+            .or_else(|| meta.get("user").and_then(|u| u.get("name")).and_then(|n| n.as_str()))
+            .unwrap_or("i");
+        if uploader.is_none() {
+            uploader = meta
+                .get("user")
+                .and_then(|u| u.get("nick").or_else(|| u.get("name")))
+                .and_then(|n| n.as_str())
+                .map(str::to_string);
+        }
+
+        entries.push(ProfileEntry {
+            id: tweet_id.clone(),
+            url: format!("https://x.com/{handle}/status/{tweet_id}"),
+            title: meta
+                .get("content")
+                .and_then(|c| c.as_str())
+                .map(|c| c.lines().next().unwrap_or(c).trim().to_string())
+                .filter(|c| !c.is_empty()),
+            duration_seconds: None,
+        });
+    }
+
+    if entries.is_empty() {
+        return Err(AppError::NoMediaFound);
+    }
+
+    Ok(ProfileListing {
+        uploader: uploader.unwrap_or_else(|| "this profile".to_string()),
+        profile_url: url.to_string(),
+        count: entries.len(),
+        entries,
+    })
+}
+
 fn classify_failure(stderr: &str) -> AppError {
     let lower = stderr.to_lowercase();
     if lower.contains("login") || lower.contains("authentication") || lower.contains("challenge") {

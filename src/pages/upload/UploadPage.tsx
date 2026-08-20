@@ -14,6 +14,7 @@ import {
   type Privacy,
   type UploadTarget,
   uploadTiktok,
+  uploadX,
 } from "@/lib/upload";
 import {
   youtubeAccountAdd,
@@ -267,7 +268,9 @@ export function UploadPage() {
       for (const t of chosen) {
         try {
           if (t.id === "youtube") {
-            if (ytSelected.size === 0) throw new Error("pick at least one YouTube account");
+            // YouTube is optional: if no account is ticked, just skip it rather
+            // than failing the whole upload.
+            if (ytSelected.size === 0) continue;
             const errs: string[] = [];
             for (const accountId of ytSelected) {
               try {
@@ -283,6 +286,10 @@ export function UploadPage() {
             // the bytes through the webview would copy a large video twice for
             // no benefit.
             await uploadTiktok(item.path);
+          } else if (t.id === "x") {
+            // Rust uploads the media and creates the post; caption is the
+            // description, falling back to the title.
+            await uploadX(item.path, item.description.trim() || perTitle);
           } else if (t.id === "telegram") {
             if (tgSelected.size === 0) throw new Error("pick at least one chat");
             if (!bytes) bytes = await readFileBytes(item.path);

@@ -24,6 +24,7 @@ pub enum ProviderId {
     Facebook,
     TikTok,
     Instagram,
+    X,
 }
 
 impl ProviderId {
@@ -33,6 +34,7 @@ impl ProviderId {
         ProviderId::Facebook,
         ProviderId::Instagram,
         ProviderId::TikTok,
+        ProviderId::X,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -41,6 +43,7 @@ impl ProviderId {
             ProviderId::Facebook => "facebook",
             ProviderId::TikTok => "tiktok",
             ProviderId::Instagram => "instagram",
+            ProviderId::X => "x",
         }
     }
 
@@ -50,6 +53,7 @@ impl ProviderId {
             "facebook" => Some(ProviderId::Facebook),
             "tiktok" => Some(ProviderId::TikTok),
             "instagram" => Some(ProviderId::Instagram),
+            "x" => Some(ProviderId::X),
             _ => None,
         }
     }

@@ -63,6 +63,12 @@ const PLATFORMS: Platform[] = [
     goto: "downloads",
   },
   {
+    id: "x",
+    name: "X",
+    supports: ["Videos", "GIFs", "Whole profiles", "Public posts"],
+    goto: "downloads",
+  },
+  {
     id: "telegram",
     name: "Telegram",
     supports: ["Sign in by phone", "2FA supported", "Media coming soon"],

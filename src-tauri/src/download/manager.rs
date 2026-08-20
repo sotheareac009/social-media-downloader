@@ -30,6 +30,7 @@ fn session_kind_for(source: Source) -> Option<SessionKind> {
     match source {
         Source::Instagram => Some(SessionKind::Instagram),
         Source::Facebook => Some(SessionKind::Facebook),
+        Source::X => Some(SessionKind::X),
         _ => None,
     }
 }
@@ -225,6 +226,9 @@ impl DownloadManager {
                 if let Some(at) = saved.facebook_connected_at {
                     m.insert(SessionKind::Facebook, at);
                 }
+                if let Some(at) = saved.x_connected_at {
+                    m.insert(SessionKind::X, at);
+                }
                 m
             }),
             session_cache: Mutex::new(HashMap::new()),
@@ -350,6 +354,13 @@ impl DownloadManager {
     pub fn facebook_forget(&self) -> Result<SessionStatus> {
         self.session_forget(SessionKind::Facebook)
     }
+    pub fn x_status(&self) -> SessionStatus { self.session_status(SessionKind::X) }
+    pub fn x_remember(&self, s: &WebSession) -> Result<SessionStatus> {
+        self.session_remember(SessionKind::X, s)
+    }
+    pub fn x_forget(&self) -> Result<SessionStatus> {
+        self.session_forget(SessionKind::X)
+    }
 
     pub fn prefer_compatible(&self) -> bool {
         *self.prefer_compatible.lock().expect("compat lock")
@@ -390,6 +401,7 @@ impl DownloadManager {
             quality: self.quality(),
             instagram_connected_at: self.marker(SessionKind::Instagram),
             facebook_connected_at: self.marker(SessionKind::Facebook),
+            x_connected_at: self.marker(SessionKind::X),
             prefer_compatible: self.prefer_compatible(),
         }
         .save(&self.config_dir)
@@ -504,7 +516,19 @@ impl DownloadManager {
             .await;
         }
 
-        ytdlp::list_profile(&url).await
+        // X has no yt-dlp timeline extractor, so — like Instagram — gallery-dl
+        // enumerates the profile (using the captured session cookies) and
+        // yt-dlp downloads each resulting tweet.
+        if source == Source::X {
+            let jar = self.cookie_jar(source);
+            return crate::download::gallerydl::list_x_profile(
+                &url,
+                jar.as_ref().map(|j| j.path()),
+            )
+            .await;
+        }
+
+        ytdlp::list_profile(&url, None).await
     }
 
     pub fn list(&self) -> Vec<JobView> {

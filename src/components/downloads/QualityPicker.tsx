@@ -1,4 +1,4 @@
-import type { QualitySettings, Quality } from "@/lib/download";
+import type { QualitySettings, Quality, VideoFormat } from "@/lib/download";
 
 /**
  * Quality preference.
@@ -13,14 +13,36 @@ export function QualityPicker({
   busy,
   onChange,
   onToggleCompatible,
+  formats,
+  picked,
+  onPick,
+  bestLabel,
 }: {
   settings: QualitySettings;
   busy: boolean;
   onChange: (q: Quality) => void;
   onToggleCompatible: (on: boolean) => void;
+  /** A validated single video's real tiers. When present, the dropdown offers
+   *  exactly these instead of the generic ladder. */
+  formats?: VideoFormat[];
+  picked?: Quality;
+  onPick?: (q: Quality) => void;
+  bestLabel?: string | null;
 }) {
-  const selected = settings.options.find((o) => o.id === settings.selected);
-  const capped = !settings.has_ffmpeg && selected?.needs_ffmpeg;
+  // When a single video has been inspected, drive the dropdown from its real
+  // tiers (controlled by the transient picked-quality) instead of the global
+  // preference — so there is one place to choose, not a duplicate card.
+  const useVideo = !!(formats && formats.length > 0);
+  const selectValue = useVideo ? picked ?? "best" : settings.selected;
+  const handleChange = (q: Quality) => (useVideo ? onPick?.(q) : onChange(q));
+
+  const globalSel = settings.options.find((o) => o.id === settings.selected);
+  const pickedTier = typeof selectValue === "string" && selectValue.endsWith("p")
+    ? parseInt(selectValue, 10)
+    : 0;
+  const capped = useVideo
+    ? !settings.has_ffmpeg && pickedTier > 360
+    : !settings.has_ffmpeg && globalSel?.needs_ffmpeg;
 
   return (
     <div className="quality">
@@ -30,16 +52,30 @@ export function QualityPicker({
       <select
         id="quality-select"
         className="quality__select"
-        value={settings.selected}
+        value={selectValue}
         disabled={busy}
-        onChange={(e) => onChange(e.target.value as Quality)}
+        onChange={(e) => handleChange(e.target.value as Quality)}
       >
-        {settings.options.map((o) => (
-          <option key={o.id} value={o.id}>
-            {o.label}
-            {!settings.has_ffmpeg && o.needs_ffmpeg ? " — needs FFmpeg" : ""}
-          </option>
-        ))}
+        {useVideo ? (
+          <>
+            <option value="best">
+              Best available{bestLabel ? ` (up to ${bestLabel})` : ""}
+            </option>
+            {formats!.map((f) => (
+              <option key={f.tier} value={`${f.tier}p`}>
+                {f.label}
+                {f.width && f.height ? ` — ${f.width}×${f.height}` : ""}
+              </option>
+            ))}
+          </>
+        ) : (
+          settings.options.map((o) => (
+            <option key={o.id} value={o.id}>
+              {o.label}
+              {!settings.has_ffmpeg && o.needs_ffmpeg ? " — needs FFmpeg" : ""}
+            </option>
+          ))
+        )}
       </select>
       {capped && (
         <span className="quality__warn" title="Install FFmpeg to lift the cap">

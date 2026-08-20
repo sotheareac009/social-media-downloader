@@ -214,6 +214,7 @@ pub struct QualitySettings {
 
 const IG_LOGIN_URL: &str = "https://www.instagram.com/accounts/login/";
 const FB_LOGIN_URL: &str = "https://www.facebook.com/login/";
+const X_LOGIN_URL: &str = "https://x.com/login";
 
 /// Static per-platform login details.
 struct LoginTarget {
@@ -243,6 +244,15 @@ const FACEBOOK_TARGET: LoginTarget = LoginTarget {
     title: "Sign in to Facebook",
     default_domain: ".facebook.com",
     platform: "Facebook",
+};
+
+const X_TARGET: LoginTarget = LoginTarget {
+    kind: SessionKind::X,
+    label: "x-login",
+    url: X_LOGIN_URL,
+    title: "Sign in to X",
+    default_domain: ".x.com",
+    platform: "X",
 };
 
 /// Open a dedicated login window for `target` and capture its session.
@@ -405,6 +415,28 @@ pub async fn download_instagram_disconnect(
     manager: State<'_, Arc<DownloadManager>>,
 ) -> Result<SessionStatus> {
     manager.instagram_forget()
+}
+
+#[tauri::command]
+pub async fn download_x_connect(
+    app: AppHandle,
+    manager: State<'_, Arc<DownloadManager>>,
+) -> Result<SessionStatus> {
+    capture_session(&app, &manager, X_TARGET).await
+}
+
+#[tauri::command]
+pub async fn download_x_status(
+    manager: State<'_, Arc<DownloadManager>>,
+) -> Result<SessionStatus> {
+    Ok(manager.x_status())
+}
+
+#[tauri::command]
+pub async fn download_x_disconnect(
+    manager: State<'_, Arc<DownloadManager>>,
+) -> Result<SessionStatus> {
+    manager.x_forget()
 }
 
 #[tauri::command]

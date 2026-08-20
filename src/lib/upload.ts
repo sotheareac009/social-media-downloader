@@ -61,3 +61,7 @@ export const uploadYoutube = (
  */
 export const uploadTiktok = (filePath: string) =>
   invoke<string>("upload_tiktok", { filePath });
+
+/** Post a photo or video to X (Twitter) with a caption. Returns the tweet id. */
+export const uploadX = (filePath: string, caption: string) =>
+  invoke<string>("upload_x", { filePath, caption });

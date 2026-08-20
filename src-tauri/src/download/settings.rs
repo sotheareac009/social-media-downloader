@@ -37,6 +37,8 @@ pub struct Settings {
     pub instagram_connected_at: Option<i64>,
     #[serde(default)]
     pub facebook_connected_at: Option<i64>,
+    #[serde(default)]
+    pub x_connected_at: Option<i64>,
     /// Prefer H.264 so downloads open in QuickTime and Photos.
     ///
     /// Defaults to on, including for settings files written before this field
@@ -57,6 +59,7 @@ impl Default for Settings {
             quality: Quality::default(),
             instagram_connected_at: None,
             facebook_connected_at: None,
+            x_connected_at: None,
             prefer_compatible: true,
         }
     }

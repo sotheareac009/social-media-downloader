@@ -16,6 +16,9 @@ export const BRAND_COLOR: Record<ProviderId, string> = {
   // Telegram's tile is blue, so the card hairline uses its accent cyan instead —
   // blue would read as "no accent" against either theme.
   telegram: "#25F4EE",
+  // X's tile is black; the hairline uses a mid grey so it reads as an accent
+  // rather than "nothing" against either theme.
+  x: "#71767B",
 };
 
 export function ProviderLogo({ provider }: { provider: ProviderId }) {
@@ -36,6 +39,7 @@ const MARKS: Record<ProviderId, ReactNode> = {
   tiktok: <TikTokMark />,
   instagram: <InstagramMark />,
   telegram: <TelegramMark />,
+  x: <XMark />,
 };
 
 function GoogleMark() {
@@ -98,6 +102,14 @@ function InstagramMark() {
       <rect x="3" y="3" width="18" height="18" rx="5.2" />
       <circle cx="12" cy="12" r="4.1" />
       <circle cx="17.2" cy="6.8" r="1.15" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+function XMark() {
+  return (
+    <svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24h-6.657l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231 5.45-6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
     </svg>
   );
 }

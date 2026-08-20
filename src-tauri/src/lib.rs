@@ -25,6 +25,7 @@ pub mod facebook;
 pub mod process;
 pub mod telegram;
 pub mod tools;
+pub mod x_post;
 pub mod youtube;
 pub mod youtube_accounts;
 
@@ -104,6 +105,9 @@ pub fn run() {
             commands::download::download_facebook_status,
             commands::download::download_facebook_disconnect,
             commands::download::download_instagram_disconnect,
+            commands::download::download_x_connect,
+            commands::download::download_x_status,
+            commands::download::download_x_disconnect,
             commands::download::download_get_quality,
             commands::download::download_set_quality,
             commands::download::download_set_compatible,
@@ -121,6 +125,7 @@ pub fn run() {
             commands::upload::upload_video_thumbnail,
             commands::upload::upload_video_meta,
             commands::upload::upload_youtube,
+            commands::upload::upload_x,
             commands::upload::upload_youtube_channels,
             commands::telegram::telegram_get_config,
             commands::telegram::telegram_set_config,

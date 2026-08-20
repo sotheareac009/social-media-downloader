@@ -22,6 +22,7 @@ const SOURCE_LABEL: Record<JobView["source"], string> = {
   tiktok: "TikTok",
   youtube: "YouTube",
   instagram: "Instagram",
+  x: "X",
 };
 
 export function JobCard({

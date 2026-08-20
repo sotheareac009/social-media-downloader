@@ -29,6 +29,9 @@ pub async fn fetch(kind: SessionKind, cookies: &[StoredCookie]) -> Option<Sessio
     match kind {
         SessionKind::Instagram => fetch_instagram(cookies).await,
         SessionKind::Facebook => fetch_facebook(cookies).await,
+        // X has no cheap cookie-only "who am I" endpoint; the session still
+        // works for downloads, just without a name/avatar to show.
+        SessionKind::X => None,
     }
 }
 

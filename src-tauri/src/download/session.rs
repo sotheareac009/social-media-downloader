@@ -50,6 +50,7 @@ const LEGACY_KEYRING_ACCOUNT: &str = "instagram-session";
 pub enum SessionKind {
     Instagram,
     Facebook,
+    X,
 }
 
 impl SessionKind {
@@ -57,6 +58,7 @@ impl SessionKind {
         match self {
             SessionKind::Instagram => "instagram-session.json",
             SessionKind::Facebook => "facebook-session.json",
+            SessionKind::X => "x-session.json",
         }
     }
 
@@ -69,6 +71,11 @@ impl SessionKind {
             SessionKind::Instagram => &["sessionid"],
             // Facebook needs both: c_user is the account id, xs the secret.
             SessionKind::Facebook => &["c_user", "xs"],
+            // X needs BOTH: `auth_token` proves the login, and `ct0` is the
+            // CSRF token yt-dlp must send as `x-csrf-token`. Requiring both
+            // makes the capture wait until `ct0` is set (it appears a moment
+            // after login) instead of grabbing a session yt-dlp can't use.
+            SessionKind::X => &["auth_token", "ct0"],
         }
     }
 
@@ -78,6 +85,12 @@ impl SessionKind {
         match self {
             SessionKind::Instagram => d == "instagram.com" || d.ends_with(".instagram.com"),
             SessionKind::Facebook => d == "facebook.com" || d.ends_with(".facebook.com"),
+            SessionKind::X => {
+                d == "x.com"
+                    || d.ends_with(".x.com")
+                    || d == "twitter.com"
+                    || d.ends_with(".twitter.com")
+            }
         }
     }
 }
@@ -153,6 +166,7 @@ fn profile_key(kind: SessionKind) -> &'static str {
     match kind {
         SessionKind::Instagram => "instagram",
         SessionKind::Facebook => "facebook",
+        SessionKind::X => "x",
     }
 }
 
