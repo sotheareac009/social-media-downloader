@@ -11,9 +11,12 @@ import { AlertIcon, GlobeIcon } from "@/components/ui/icons";
 export function OfflineNotice({
   onRecheck,
   checking,
+  error,
 }: {
   onRecheck: () => void;
   checking: boolean;
+  /** Set when the check itself failed rather than finding no connection. */
+  error?: string | null;
 }) {
   return (
     <div className="engine engine--missing">
@@ -21,12 +24,20 @@ export function OfflineNotice({
         <AlertIcon size={14} />
       </span>
       <div className="engine__body">
-        <div className="engine__title">You're offline</div>
+        <div className="engine__title">
+          {error ? "Can't check your connection" : "You're offline"}
+        </div>
         <p className="engine__lede">
           Downloading needs an internet connection — the engine has to open the
           public page and fetch the video from the platform's own servers.
           Nothing can be fetched until the connection is back.
         </p>
+        {error && (
+          <p className="engine__hint">
+            The connectivity check failed to run: <code>{error}</code>. That is
+            a fault in the app rather than your network.
+          </p>
+        )}
         <p className="engine__hint">
           Files you've already downloaded are on your computer and still play
           normally. Anything that was mid-download will have stopped and can be

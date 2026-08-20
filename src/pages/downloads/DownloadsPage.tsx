@@ -64,7 +64,12 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
   } = useEngineStatus();
   // Connectivity gates the whole page: without a network the engine cannot
   // reach the platform at all, so submitting a link can only fail.
-  const { offline, checking: netChecking, probe: netProbe } = useNetStatus();
+  const {
+    offline,
+    checking: netChecking,
+    error: netError,
+    probe: netProbe,
+  } = useNetStatus();
 
   const [autoInstalling, setAutoInstalling] = useState(false);
   const [canAuto, setCanAuto] = useState(false);
@@ -561,7 +566,11 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
 
       {offline && (
         <div className="rise" style={{ marginBottom: 16 }}>
-          <OfflineNotice onRecheck={netProbe} checking={netChecking} />
+          <OfflineNotice
+            onRecheck={netProbe}
+            checking={netChecking}
+            error={netError}
+          />
         </div>
       )}
 

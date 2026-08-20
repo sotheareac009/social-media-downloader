@@ -21,6 +21,15 @@ interface NetContextValue {
    * every launch.
    */
   offline: boolean;
+  /**
+   * Why the last probe failed, when it failed for a reason other than "no
+   * network" - e.g. the command is missing or panicked.
+   *
+   * A rejected invoke used to be turned straight into `online: false`, which
+   * reported a broken check as "you are offline" and sent the user to look at
+   * their wifi. Keep the reason so the UI can say what actually happened.
+   */
+  error: string | null;
   probe: () => void;
 }
 
@@ -28,6 +37,7 @@ const NetContext = createContext<NetContextValue>({
   net: null,
   checking: false,
   offline: false,
+  error: null,
   probe: () => {},
 });
 
@@ -45,13 +55,28 @@ const POLL_MS = 15_000;
 export function NetStatusProvider({ children }: { children: ReactNode }) {
   const [net, setNet] = useState<NetStatus | null>(null);
   const [checking, setChecking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const probe = useCallback(() => {
     setChecking(true);
     netPing()
-      .then(setNet)
-      // A rejected command is itself evidence of no connectivity.
-      .catch(() => setNet({ online: false, ms: null, host: null }))
+      .then((s) => {
+        setNet(s);
+        setError(null);
+      })
+      .catch((e: unknown) => {
+        // Distinguish "the probe ran and found no route" from "the probe could
+        // not run at all". Both leave the app unusable for downloads, but only
+        // the first is the user's network.
+        setNet({ online: false, ms: null, host: null });
+        setError(
+          e instanceof Error && e.message
+            ? e.message
+            : typeof e === "string" && e
+              ? e
+              : "the connectivity check could not run",
+        );
+      })
       .finally(() => setChecking(false));
   }, []);
 
@@ -71,8 +96,8 @@ export function NetStatusProvider({ children }: { children: ReactNode }) {
   }, [probe]);
 
   const value = useMemo<NetContextValue>(
-    () => ({ net, checking, offline: net?.online === false, probe }),
-    [net, checking, probe],
+    () => ({ net, checking, offline: net?.online === false, error, probe }),
+    [net, checking, error, probe],
   );
 
   return <NetContext.Provider value={value}>{children}</NetContext.Provider>;
