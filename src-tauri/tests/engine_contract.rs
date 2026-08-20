@@ -231,7 +231,7 @@ exit 1"#,
         r#"printf '%s' '{"id":"MS4wLjABAAAA","title":"raimqqq","_type":"playlist","entries":[{"id":"7674870647071296789","url":"https://www.tiktok.com/@raimqqq/video/7674870647071296789","title":"Watch out","duration":9},{"id":"7674870647071296790","url":"https://www.tiktok.com/@raimqqq/video/7674870647071296790","title":"Second","duration":null},{"id":"nourl","title":"skipped"}]}'"#,
     );
     let profile_url = url::Url::parse("https://www.tiktok.com/@raimqqq").unwrap();
-    let listing = ytdlp::list_profile(&profile_url).await.expect("listing");
+    let listing = ytdlp::list_profile(&profile_url, None).await.expect("listing");
 
     assert_eq!(listing.uploader, "raimqqq");
     // The third entry has no URL, so there is nothing to queue for it.
@@ -246,7 +246,7 @@ exit 1"#,
 
     // ---- 6. an empty feed is "no media", not a listing of nothing ---------
     install_stub(&dir, "emptyfeed", r#"printf '%s' '{"title":"empty","entries":[]}'"#);
-    match ytdlp::list_profile(&profile_url).await {
+    match ytdlp::list_profile(&profile_url, None).await {
         Err(AppError::NoMediaFound) => {}
         other => panic!("expected NoMediaFound, got {other:?}"),
     }

@@ -124,6 +124,7 @@ mod tests {
             quality: Quality::P1080,
             instagram_connected_at: Some(1_700_000_000),
             facebook_connected_at: None,
+            x_connected_at: None,
             prefer_compatible: false,
         };
         s.save(&dir).unwrap();

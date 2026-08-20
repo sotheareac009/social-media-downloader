@@ -227,7 +227,7 @@ function Sidebar({
       <NetIndicator />
 
       <div className="sidebar__footer">
-        <span className="sidebar__phase">v0.1.0</span>
+        <span className="sidebar__phase">v0.0.2</span>
         <button
           className="iconbutton"
           type="button"
