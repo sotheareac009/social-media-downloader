@@ -25,7 +25,7 @@ import {
 } from "@/lib/youtube";
 import { Button } from "@/components/ui/Button";
 import { useToast } from "@/components/ui/Toast";
-import { CheckIcon, UploadIcon, XIcon } from "@/components/ui/icons";
+import { AlertIcon, CheckIcon, UploadIcon, XIcon } from "@/components/ui/icons";
 import { SourceLogo, SOURCE_COLOR, type SourceId } from "@/components/home/SourceLogo";
 
 type ItemStatus = "pending" | "uploading" | "done" | "failed";
@@ -35,6 +35,18 @@ interface Item {
   description: string;
   status: ItemStatus;
   error?: string;
+}
+
+interface PlatformResult {
+  name: string;
+  ok: number;
+  fail: number;
+  error?: string;
+}
+interface UploadResult {
+  totalVideos: number;
+  videosOk: number;
+  platforms: PlatformResult[];
 }
 
 /** Read a local file's bytes through the asset protocol. */
@@ -66,6 +78,7 @@ export function UploadPage() {
   const [tgSelected, setTgSelected] = useState<Set<string>>(new Set());
   const [tgSearch, setTgSearch] = useState("");
   const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<UploadResult | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
 
   const mounted = useRef(true);
@@ -253,7 +266,19 @@ export function UploadPage() {
   const publish = useCallback(async () => {
     if (chosen.length === 0 || items.length === 0) return;
     setBusy(true);
+    setResult(null);
     setItems((prev) => prev.map((i) => ({ ...i, status: "pending", error: undefined })));
+
+    // Per-platform tally: how many videos succeeded / failed on each.
+    const tally: Record<string, PlatformResult> = {};
+    const bump = (t: UploadTarget, okResult: boolean, err?: string) => {
+      const r = (tally[t.id] ??= { name: t.name, ok: 0, fail: 0 });
+      if (okResult) r.ok += 1;
+      else {
+        r.fail += 1;
+        if (!r.error && err) r.error = err;
+      }
+    };
 
     let ok = 0;
     for (const item of items) {
@@ -302,8 +327,10 @@ export function UploadPage() {
           } else {
             throw new Error(`${t.name} upload isn't available yet.`);
           }
+          bump(t, true);
         } catch (e) {
           failures.push(`${t.name}: ${messageOf(e)}`);
+          bump(t, false, messageOf(e));
         }
       }
 
@@ -321,10 +348,16 @@ export function UploadPage() {
       }
     }
 
-    if (mounted.current) setBusy(false);
+    if (mounted.current) {
+      setBusy(false);
+      setResult({
+        totalVideos: items.length,
+        videosOk: ok,
+        platforms: Object.values(tally),
+      });
+    }
     const failed = items.length - ok;
-    const dests = chosen.map((t) => t.name).join(", ");
-    if (failed === 0) toast("success", `Uploaded ${ok} to ${dests}.`);
+    if (failed === 0) toast("success", `Uploaded ${ok} video${ok === 1 ? "" : "s"}.`);
     else toast(ok > 0 ? "info" : "error", `${ok} done, ${failed} with errors.`);
   }, [chosen, items, privacy, tgSelected, ytSelected, ytAccounts, toast]);
 
@@ -607,6 +640,48 @@ export function UploadPage() {
         </div>
 
         {/* Files */}
+        {result && (
+          <section className="summary up-summary">
+            <div className="summary__row">
+              <div className="stat stat--ok">
+                <span className="stat__icon"><CheckIcon size={13} /></span>
+                <span className="stat__value">{result.videosOk}</span>
+                <span className="stat__label">Uploaded</span>
+              </div>
+              <div className="stat stat--bad">
+                <span className="stat__icon"><AlertIcon size={13} /></span>
+                <span className="stat__value">{result.totalVideos - result.videosOk}</span>
+                <span className="stat__label">Failed</span>
+              </div>
+            </div>
+
+            <div className="summary__foot">
+              <span>
+                Finished — {result.videosOk} of {result.totalVideos} video
+                {result.totalVideos === 1 ? "" : "s"} uploaded
+              </span>
+            </div>
+
+            <ul className="up-result__list">
+              {result.platforms.map((pr) => {
+                const total = pr.ok + pr.fail;
+                const state = pr.fail === 0 ? "ok" : pr.ok === 0 ? "bad" : "partial";
+                return (
+                  <li key={pr.name} className={`up-result__row up-result__row--${state}`}>
+                    <span className="up-result__plat">
+                      {pr.fail === 0 ? <CheckIcon size={13} /> : <XIcon size={13} />}
+                      {pr.name}
+                    </span>
+                    <span className="up-result__count">{pr.ok}/{total}</span>
+                    {pr.fail > 0 && pr.error && (
+                      <span className="up-result__err">{pr.error}</span>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        )}
         <div className="up-files-head">
           <label className="tg-field__label" style={{ margin: 0 }}>
             {accepts === "video" ? "Videos" : "Photos"}
@@ -725,6 +800,7 @@ export function UploadPage() {
                 : `Upload ${items.length > 1 ? `${items.length} ` : ""}to ${chosen.map((t) => t.name).join(", ")}`}
           </Button>
         </div>
+
       </div>
 
       {preview && (

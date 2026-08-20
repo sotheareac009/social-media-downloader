@@ -200,7 +200,7 @@ fn page_result(outcome: Outcome) -> String {
         Outcome::Success => (
             "&#10003;",
             "You're connected",
-            "Authorization complete. You can close this tab and return to Media Downloader.",
+            "Authorization complete. You can close this tab and return to Social Media Management.",
             "#34d399",
         ),
         Outcome::Cancelled => (
@@ -212,7 +212,7 @@ fn page_result(outcome: Outcome) -> String {
         Outcome::Failed => (
             "&#10005;",
             "Authorization failed",
-            "The platform refused the request. Close this tab and check Media Downloader for details.",
+            "The platform refused the request. Close this tab and check Social Media Management for details.",
             "#f87171",
         ),
     };

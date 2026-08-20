@@ -17,6 +17,7 @@ import { licenseStatus, type LicenseStatus } from "@/lib/license";
 import { isTauri } from "@tauri-apps/api/core";
 import { BrowserNotice } from "@/components/app/BrowserNotice";
 import { SetupOverlay } from "@/components/setup/SetupOverlay";
+import { HIDE_UPLOAD } from "@/lib/flags";
 import {
   DownloadIcon,
   GlobeIcon,
@@ -45,7 +46,11 @@ export default function App() {
   // so navigating away and back doesn't wipe what you were doing.
   const [uploadVisited, setUploadVisited] = useState(false);
   useEffect(() => {
-    if (route === "upload") setUploadVisited(true);
+    if (route === "upload" && !HIDE_UPLOAD) setUploadVisited(true);
+  }, [route]);
+  // If a hidden-upload build somehow lands on the route, bounce to Home.
+  useEffect(() => {
+    if (route === "upload" && HIDE_UPLOAD) setRoute("home");
   }, [route]);
 
   useEffect(() => {
@@ -168,7 +173,7 @@ function Sidebar({
           <img src="/logo.png" alt="" width={30} height={30} />
         </div>
         <div>
-          <div className="sidebar__title">Media Downloader</div>
+          <div className="sidebar__title">Social Media Management</div>
           <div className="sidebar__subtitle">Public media · Accounts</div>
         </div>
       </div>
@@ -195,16 +200,18 @@ function Sidebar({
           </span>
           Downloads
         </button>
-        <button
-          className={`navitem ${route === "upload" ? "navitem--active" : ""}`}
-          type="button"
-          onClick={() => onNavigate("upload")}
-        >
-          <span className="navitem__icon">
-            <UploadIcon size={16} />
-          </span>
-          Upload
-        </button>
+        {!HIDE_UPLOAD && (
+          <button
+            className={`navitem ${route === "upload" ? "navitem--active" : ""}`}
+            type="button"
+            onClick={() => onNavigate("upload")}
+          >
+            <span className="navitem__icon">
+              <UploadIcon size={16} />
+            </span>
+            Upload
+          </button>
+        )}
         <button
           className={`navitem ${route === "accounts" ? "navitem--active" : ""}`}
           type="button"

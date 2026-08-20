@@ -90,7 +90,7 @@ impl Settings {
 pub fn default_destination(os_downloads: Option<PathBuf>, app_data: &Path) -> PathBuf {
     os_downloads
         .unwrap_or_else(|| app_data.to_path_buf())
-        .join("Media Downloader")
+        .join("Social Media Management")
 }
 
 /// Resolve the folder to start with.

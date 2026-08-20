@@ -39,7 +39,7 @@ export function BrowserNotice({ url }: { url: string }) {
         </p>
 
         <p className="gate__lede" style={{ marginTop: 12 }}>
-          Use the <strong>Media Downloader window</strong> that{" "}
+          Use the <strong>Social Media Management window</strong> that{" "}
           <code>npm run tauri dev</code> opens. If you closed it, run that
           command again — visiting this address will never work on its own.
         </p>

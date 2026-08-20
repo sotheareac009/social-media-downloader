@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Media Downloader",
+  "productName": "Social Media Management",
   "version": "0.1.0",
   "identifier": "com.reach.mediadownloader",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Media Downloader",
+        "title": "Social Media Management",
         "width": 1160,
         "height": 780,
         "minWidth": 940,

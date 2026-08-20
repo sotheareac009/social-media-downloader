@@ -3951,3 +3951,161 @@
   font-weight: 600;
   color: var(--success);
 }
+
+/* --- home platform cards: download/upload capability rows ----------------- */
+.platform__caps {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  margin-top: 12px;
+}
+
+.cap { display: flex; flex-direction: column; gap: 3px; }
+
+.cap__head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.cap__icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--r-sm);
+  background: var(--surface-3);
+  color: var(--text-secondary);
+}
+
+/* Download = blue, Upload = violet, so the two directions read at a glance. */
+.cap--download .cap__icon {
+  color: #2563eb;
+  background: color-mix(in srgb, #2563eb 14%, transparent);
+}
+
+.cap--upload .cap__icon {
+  color: #7c3aed;
+  background: color-mix(in srgb, #7c3aed 14%, transparent);
+}
+
+.cap__kind {
+  flex: 1;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.cap__text {
+  margin: 0;
+  padding-left: 27px; /* align under the label, past the icon */
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.cap__login {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: var(--r-full);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.cap__login--no {
+  color: var(--success);
+  background: var(--success-soft);
+  border-color: var(--success-border);
+}
+
+.cap__login--yes {
+  color: #b26a00;
+  background: color-mix(in srgb, #d9a406 14%, transparent);
+  border-color: color-mix(in srgb, #d9a406 40%, transparent);
+}
+
+.cap__login--some {
+  color: var(--text-tertiary);
+  background: var(--surface-2);
+  border-color: var(--border-subtle);
+}
+
+/* --- upload result summary ----------------------------------------------- */
+.up-result {
+  margin-top: 14px;
+  padding: 14px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--border-default);
+  background: var(--surface-2);
+}
+
+.up-result__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+
+.up-result__head--ok { color: var(--success); }
+.up-result__head--warn { color: var(--danger); }
+
+.up-result__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.up-result__row {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--r-md);
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  font-size: 12.5px;
+}
+
+.up-result__plat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.up-result__row--ok .up-result__plat { color: var(--success); }
+.up-result__row--bad .up-result__plat { color: var(--danger); }
+.up-result__row--partial .up-result__plat { color: #b26a00; }
+
+.up-result__count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  color: var(--text-secondary);
+}
+
+.up-result__err {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+}
+
+/* upload summary reuses the download .summary look; add spacing + list gap */
+.up-summary { margin-top: 14px; }
+.up-summary .up-result__list { margin-top: 10px; }

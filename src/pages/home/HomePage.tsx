@@ -6,6 +6,7 @@ import {
 import { authGetAccounts, type AccountView } from "@/lib/auth";
 import { useEngineStatus } from "@/components/ui/EngineStatusProvider";
 import { SourceLogo, SOURCE_COLOR, type SourceId } from "@/components/home/SourceLogo";
+import { HIDE_UPLOAD } from "@/lib/flags";
 import {
   BoltIcon,
   DownloadIcon,
@@ -20,11 +21,21 @@ export type Route = "home" | "downloads" | "accounts" | "telegram" | "upload";
 
 type Tone = "ok" | "warn" | "muted";
 
+/** A download/upload capability line: what it does + whether sign-in is needed.
+ *  `login`: "no" = works logged-out, "yes" = sign-in required, "some" = public
+ *  works logged-out but more (private/profiles) needs sign-in. */
+interface Capability {
+  text: string;
+  login: "no" | "yes" | "some";
+}
+
 interface Platform {
   id: SourceId;
   name: string;
-  /** Exactly what this build handles — no aspirational entries. */
-  supports: string[];
+  /** What this platform can download; omitted when it has no download path. */
+  download?: Capability;
+  /** What this platform can upload/post; omitted when it has none. */
+  upload?: Capability;
   /** Where the card leads. Most go to Downloads; Telegram to its own page. */
   goto: Route;
   /** Live state, for the one platform whose availability can change. */
@@ -41,37 +52,41 @@ const PLATFORMS: Platform[] = [
   {
     id: "youtube",
     name: "YouTube",
-    supports: ["Videos", "Shorts", "Channels & playlists", "Up to 8K"],
+    download: { text: "Videos, Shorts, channels — up to 8K", login: "no" },
+    upload: { text: "Sign in to post to your channel", login: "yes" },
     goto: "downloads",
   },
   {
     id: "tiktok",
     name: "TikTok",
-    supports: ["Videos", "Whole profiles", "Photo posts"],
+    download: { text: "Videos, whole profiles, photos", login: "no" },
+    upload: { text: "Sign in to post (after app review)", login: "yes" },
     goto: "downloads",
   },
   {
     id: "facebook",
     name: "Facebook",
-    supports: ["Videos", "Reels", "Share links"],
+    download: { text: "Videos, reels & share links", login: "some" },
+    upload: { text: "Sign in to post a photo to a Page", login: "yes" },
     goto: "downloads",
   },
   {
     id: "instagram",
     name: "Instagram",
-    supports: ["Reels", "Whole profiles", "Posts & IGTV", "Sign-in required"],
+    download: { text: "Reels, posts & whole profiles", login: "yes" },
     goto: "downloads",
   },
   {
     id: "x",
     name: "X",
-    supports: ["Videos", "GIFs", "Whole profiles", "Public posts"],
+    download: { text: "Posts, videos & whole profiles", login: "some" },
+    upload: { text: "Sign in to post (needs X API credits)", login: "yes" },
     goto: "downloads",
   },
   {
     id: "telegram",
     name: "Telegram",
-    supports: ["Sign in by phone", "2FA supported", "Media coming soon"],
+    upload: { text: "Sign in by phone to send to groups & channels", login: "yes" },
     goto: "telegram",
   },
 ];
@@ -83,6 +98,29 @@ interface Feature {
   icon: (p: IconProps) => ReactElement;
   goto?: Route;
   status: { label: string; tone: Tone };
+}
+
+function CapRow({
+  icon,
+  kind,
+  cap,
+}: {
+  icon: ReactElement;
+  kind: string;
+  cap: Capability;
+}) {
+  const label =
+    cap.login === "no" ? "No login" : cap.login === "yes" ? "Sign-in" : "Public + sign-in";
+  return (
+    <div className={`cap cap--${kind.toLowerCase()}`}>
+      <div className="cap__head">
+        <span className="cap__icon">{icon}</span>
+        <span className="cap__kind">{kind}</span>
+        <span className={`cap__login cap__login--${cap.login}`}>{label}</span>
+      </div>
+      <p className="cap__text">{cap.text}</p>
+    </div>
+  );
 }
 
 export function HomePage({ onNavigate }: { onNavigate: (r: Route) => void }) {
@@ -174,16 +212,18 @@ export function HomePage({ onNavigate }: { onNavigate: (r: Route) => void }) {
       <header className="hero rise">
         <span className="hero__eyebrow">
           <BoltIcon size={12} />
-          Media Downloader
+          Social Media Management
         </span>
         <h1 className="hero__title">
-          Save any <span className="hero__accent">public video</span>
+          Download and <span className="hero__accent">publish</span>
           <br />
-          in a couple of clicks.
+          across your platforms.
         </h1>
         <p className="hero__lede">
-          YouTube, TikTok and Facebook — single links, whole profiles, or a
-          pasted list. No account required.
+          Download from YouTube, TikTok, Facebook, Instagram and X — single
+          links, whole profiles, or a pasted list. Then sign in to publish your
+          own videos to YouTube, Telegram and X. Public downloads need no
+          account.
         </p>
         <div className="hero__actions">
           <button
@@ -194,6 +234,16 @@ export function HomePage({ onNavigate }: { onNavigate: (r: Route) => void }) {
             <DownloadIcon size={15} />
             Start downloading
           </button>
+          {!HIDE_UPLOAD && (
+            <button
+              className="btn btn--ghost hero__cta"
+              type="button"
+              onClick={() => onNavigate("upload")}
+            >
+              <UploadIcon size={15} />
+              Start uploading
+            </button>
+          )}
           <span className={`hero__pill hero__pill--${ready ? "ok" : "warn"}`}>
             <span className="hero__dot" />
             {engine === null
@@ -232,11 +282,14 @@ export function HomePage({ onNavigate }: { onNavigate: (r: Route) => void }) {
                 <span className="platform__edge" />
                 <SourceLogo source={p.id} />
                 <span className="platform__name">{p.name}</span>
-                <ul className="platform__list">
-                  {p.supports.map((s) => (
-                    <li key={s}>{s}</li>
-                  ))}
-                </ul>
+                <div className="platform__caps">
+                  {p.download && (
+                    <CapRow icon={<DownloadIcon size={13} />} kind="Download" cap={p.download} />
+                  )}
+                  {p.upload && (
+                    <CapRow icon={<UploadIcon size={13} />} kind="Upload" cap={p.upload} />
+                  )}
+                </div>
                 {p.note && (
                   <span className={`platform__note platform__note--${p.note.tone}`}>
                     {p.note.label}
@@ -251,7 +304,7 @@ export function HomePage({ onNavigate }: { onNavigate: (r: Route) => void }) {
       <section className="section rise" style={{ animationDelay: "120ms" }}>
         <h2 className="section__label">What it does</h2>
         <div className="features">
-          {features.map((f, i) => (
+          {features.filter((f) => !(HIDE_UPLOAD && f.goto === "upload")).map((f, i) => (
             <FeatureCard key={f.key} feature={f} index={i} onNavigate={onNavigate} />
           ))}
         </div>

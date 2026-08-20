@@ -1,4 +1,4 @@
-//! Media Downloader.
+//! Social Media Management.
 //!
 //! Two independent capabilities, deliberately not wired to each other:
 //!
