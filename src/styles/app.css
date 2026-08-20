@@ -3822,3 +3822,89 @@
 }
 
 .up-yt__add { align-self: flex-start; }
+
+/* --- youtube uploader accounts under the Google card (Accounts page) ------ */
+.card__footer {
+  padding: 12px 18px 16px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.yt-uploaders {
+  padding: 0;
+}
+
+.yt-uploaders__head {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin-bottom: 8px;
+}
+
+.yt-uploaders__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+
+.yt-uploaders__row + .yt-uploaders__row { border-top: 1px solid var(--border-subtle); }
+
+.yt-uploaders__row img,
+.yt-uploaders__ph {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--r-full);
+  flex: none;
+  object-fit: cover;
+}
+
+.yt-uploaders__ph {
+  display: grid;
+  place-items: center;
+  background: var(--surface-3);
+  color: var(--text-tertiary);
+  font-size: 13px;
+}
+
+.yt-uploaders__meta { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+
+.yt-uploaders__name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.yt-uploaders__sub {
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.yt-uploaders__x {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out);
+}
+
+.yt-uploaders__x:hover { background: var(--danger-soft); color: var(--danger); }
+
+.yt-uploaders__hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}

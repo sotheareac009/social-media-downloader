@@ -22,7 +22,8 @@ import {
   type SessionStatus,
 } from "@/lib/download";
 import { useToast } from "@/components/ui/Toast";
-import { AlertIcon, CheckIcon, ChevronRightIcon, ShieldIcon, TelegramIcon, UsersIcon } from "@/components/ui/icons";
+import { AlertIcon, CheckIcon, ChevronRightIcon, ShieldIcon, TelegramIcon, UsersIcon, XIcon } from "@/components/ui/icons";
+import { youtubeAccountsList, youtubeAccountRemove, type YoutubeAccount } from "@/lib/youtube";
 import { telegramStatus as fetchTelegramStatus, type TelegramStatus } from "@/lib/telegram";
 
 export function AccountsPage({
@@ -46,6 +47,7 @@ export function AccountsPage({
   const [fbDownload, setFbDownload] = useState<SessionStatus | null>(null);
   const [fbBusy, setFbBusy] = useState(false);
   const [telegram, setTelegram] = useState<TelegramStatus | null>(null);
+  const [ytAccounts, setYtAccounts] = useState<YoutubeAccount[]>([]);
 
   // Guards a state update landing after unmount when a flow is abandoned.
   const mounted = useRef(true);
@@ -80,6 +82,9 @@ export function AccountsPage({
           .catch(() => {});
         fetchTelegramStatus()
           .then((st) => mounted.current && setTelegram(st))
+          .catch(() => {});
+        youtubeAccountsList()
+          .then((l) => mounted.current && setYtAccounts(l))
           .catch(() => {});
       } catch (e) {
         if (!mounted.current) return;
@@ -206,6 +211,19 @@ export function AccountsPage({
     }
   }, [toast]);
 
+  const removeYtUploader = useCallback(
+    async (id: string) => {
+      try {
+        await youtubeAccountRemove(id);
+        const list = await youtubeAccountsList();
+        if (mounted.current) setYtAccounts(list);
+      } catch (e) {
+        toast("error", toAuthError(e).message);
+      }
+    },
+    [toast],
+  );
+
   const connectedCount = Object.values(accounts).filter((a) => a.connected).length;
 
   return (
@@ -300,6 +318,48 @@ export function AccountsPage({
                       descriptor.id === "facebook"
                         ? () => onNavigate?.("facebook")
                         : undefined
+                    }
+                    footer={
+                      descriptor.id === "google" && ytAccounts.length > 0 ? (
+                        <div className="yt-uploaders">
+                          <div className="yt-uploaders__head">
+                            YouTube upload accounts ({ytAccounts.length})
+                          </div>
+                          {ytAccounts.map((a) => (
+                            <div key={a.id} className="yt-uploaders__row">
+                              {a.channel_avatar || a.avatar_url ? (
+                                <img
+                                  src={(a.channel_avatar || a.avatar_url)!}
+                                  alt=""
+                                  referrerPolicy="no-referrer"
+                                />
+                              ) : (
+                                <span className="yt-uploaders__ph">▶</span>
+                              )}
+                              <div className="yt-uploaders__meta">
+                                <span className="yt-uploaders__name">
+                                  {a.channel_title ?? a.display_name}
+                                </span>
+                                {a.email && (
+                                  <span className="yt-uploaders__sub">{a.email}</span>
+                                )}
+                              </div>
+                              <button
+                                className="yt-uploaders__x"
+                                type="button"
+                                onClick={() => void removeYtUploader(a.id)}
+                                aria-label="Remove account"
+                                title="Remove account"
+                              >
+                                <XIcon size={14} />
+                              </button>
+                            </div>
+                          ))}
+                          <div className="yt-uploaders__hint">
+                            Add more from the Upload page.
+                          </div>
+                        </div>
+                      ) : undefined
                     }
                   />
                 </div>

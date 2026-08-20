@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import {
   formatConnectedSince,
   type AccountView,
@@ -42,6 +42,8 @@ interface Props {
    * button that opens a dedicated detail page for this provider.
    */
   onOpenDetail?: () => void;
+  /** Extra content rendered inside the card, below the account row. */
+  footer?: ReactNode;
 }
 
 export function AccountCard({
@@ -60,6 +62,7 @@ export function AccountCard({
   onConnect,
   onDisconnect,
   onOpenDetail,
+  footer,
 }: Props) {
   const connected = account.connected;
   const clickable = connected && !!onOpenDetail;
@@ -161,6 +164,12 @@ export function AccountCard({
             <AlertIcon size={14} />
           </span>
           <div>{notice}</div>
+        </div>
+      )}
+
+      {footer && (
+        <div className="card__footer" onClick={(e) => e.stopPropagation()}>
+          {footer}
         </div>
       )}
     </article>

@@ -11,11 +11,12 @@ import {
   DownloadIcon,
   ShieldIcon,
   SlidersIcon,
+  UploadIcon,
   UsersIcon,
   type IconProps,
 } from "@/components/ui/icons";
 
-export type Route = "home" | "downloads" | "accounts" | "telegram";
+export type Route = "home" | "downloads" | "accounts" | "telegram" | "upload";
 
 type Tone = "ok" | "warn" | "muted";
 
@@ -107,6 +108,15 @@ export function HomePage({ onNavigate }: { onNavigate: (r: Route) => void }) {
   const connected = accounts?.filter((a) => a.connected).length ?? 0;
 
   const features: Feature[] = [
+    {
+      key: "yt-multi",
+      title: "Publish to several YouTube channels at once",
+      blurb:
+        "Sign in to more than one Google account on the Upload page, tick the channels you want, and send the same video to all of them in a single upload — each with its own title, description and visibility.",
+      icon: UploadIcon,
+      goto: "upload",
+      status: { label: "New", tone: "ok" },
+    },
     {
       key: "bulk",
       title: "Whole profiles & channels",
