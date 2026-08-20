@@ -196,13 +196,16 @@ mod tests {
         save_credentials(&dir, &TelegramCredentials { api_id: "123".into(), api_hash: "".into() }).unwrap();
         assert!(load_credentials(&dir).is_none(), "half-config must not count");
 
+        // Obvious placeholders. Never paste a real api_id/api_hash into a
+        // test: tests are committed, and this file was published to a git
+        // remote once already with live credentials in it.
         save_credentials(&dir, &TelegramCredentials {
-            api_id: "38837128".into(),
-            api_hash: "5bbe60bb99e8319216ffb68f745d7283".into(),
+            api_id: "1234567".into(),
+            api_hash: "00000000000000000000000000000000".into(),
         }).unwrap();
         let got = load_credentials(&dir).expect("should load");
-        assert_eq!(got.api_id, "38837128");
-        assert_eq!(got.api_hash, "5bbe60bb99e8319216ffb68f745d7283");
+        assert_eq!(got.api_id, "1234567");
+        assert_eq!(got.api_hash, "00000000000000000000000000000000");
 
         clear_credentials(&dir).unwrap();
         assert!(load_credentials(&dir).is_none());

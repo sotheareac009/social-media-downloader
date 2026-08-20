@@ -12,69 +12,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { TelegramClient, Api } from "telegram";
 import { StringSession } from "telegram/sessions";
 import { computeCheck } from "telegram/Password";
+import { verifyPbkdf2, webcryptoPbkdf2 } from "@/lib/gramjsCryptoFile";
 import { Logger } from "telegram/extensions";
 import { LogLevel } from "telegram/extensions/Logger";
-
-/**
- * Route GramJS's one PBKDF2 call through the webview's native WebCrypto.
- *
- * GramJS computes the 2FA (SRP) password hash with `crypto.pbkdf2Sync(…,
- * "sha512")`. WKWebView's `crypto.subtle` does PBKDF2-SHA512 natively and is
- * verified byte-identical to Node's reference, so this removes any doubt about
- * the bundled pure-JS pbkdf2. GramJS `await`s the result, so returning a
- * Promise is fine.
- *
- * Done lazily and defensively: a dynamic import inside a try/catch, run only
- * just before a 2FA check. Nothing here touches module load, so a failure to
- * patch can never blank the app — at worst 2FA falls back to GramJS's own
- * implementation.
- */
-let pbkdf2Patched = false;
-async function ensurePbkdf2Patched(): Promise<void> {
-  if (pbkdf2Patched) return;
-  try {
-    const mod = await import("telegram/CryptoFile");
-    const cf = (mod.default ?? mod) as { pbkdf2Sync?: unknown };
-    cf.pbkdf2Sync = async (
-      password: ArrayBufferView | string,
-      salt: ArrayBufferView | string,
-      iterations: number,
-      keylen: number,
-    ): Promise<Uint8Array> => {
-      const toBytes = (v: ArrayBufferView | string): Uint8Array =>
-        typeof v === "string"
-          ? new TextEncoder().encode(v)
-          : new Uint8Array(
-              (v.buffer as ArrayBuffer).slice(
-                v.byteOffset,
-                v.byteOffset + v.byteLength,
-              ),
-            );
-
-      const key = await crypto.subtle.importKey(
-        "raw",
-        toBytes(password) as BufferSource,
-        "PBKDF2",
-        false,
-        ["deriveBits"],
-      );
-      const bits = await crypto.subtle.deriveBits(
-        {
-          name: "PBKDF2",
-          salt: toBytes(salt) as BufferSource,
-          iterations,
-          hash: "SHA-512",
-        },
-        key,
-        keylen * 8,
-      );
-      return new Uint8Array(bits);
-    };
-    pbkdf2Patched = true;
-  } catch {
-    // Leave GramJS's own pbkdf2 in place; the app must still work.
-  }
-}
 
 export interface TelegramConfig {
   configured: boolean;
@@ -248,6 +188,60 @@ export async function telegramSendFile(
 export class TelegramLoginError extends Error {}
 
 /**
+ * Re-wrap the SRP byte fields in the *global* Buffer class.
+ *
+ * GramJS serialises bytes behind `if (!(data instanceof Buffer)) throw ...`,
+ * which compares class identity against whatever `globalThis.Buffer` is. In a
+ * webview, Buffer is polyfilled, and the crypto packages GramJS uses for
+ * `createHash` carry their own copy of it - so `computeCheck` returns perfectly
+ * good bytes belonging to a *different* Buffer class, and the serializer
+ * rejects them with "Bytes or str expected, not Buffer".
+ *
+ * The phone and code steps never hit this because their byte fields come from
+ * the connection layer, which uses the global Buffer already. Only the SRP
+ * values are produced by the hashing path.
+ *
+ * Copying through `globalThis.Buffer.from` gives the serializer the exact class
+ * it tests for. This is independent of how the bundler chunks anything, which
+ * is why it is done here rather than by aligning module copies.
+ */
+function adoptGlobalBuffers<T extends object>(check: T): T {
+  const B = (globalThis as { Buffer?: { from(v: Uint8Array): Uint8Array } })
+    .Buffer;
+  if (!B) return check;
+
+  const target = check as unknown as Record<string, unknown>;
+  for (const field of ["A", "M1"]) {
+    const value = target[field];
+    if (value instanceof Uint8Array && !(value instanceof (B as never))) {
+      target[field] = B.from(value);
+    }
+  }
+  return check;
+}
+
+/**
+ * Confirm the 2FA hash will be computed with native WebCrypto.
+ *
+ * The *binding* is guaranteed at build time: Vite redirects GramJS's
+ * `./CryptoFile` to `@/lib/gramjsCryptoFile` in both pipelines - the Rollup
+ * resolver for production and the esbuild pre-bundler for dev. Getting only one
+ * of those right is what made 2FA behave differently in the .dmg than locally.
+ *
+ * There is deliberately no runtime patch. `CryptoFile` exposes `pbkdf2Sync` as
+ * a non-configurable getter, so neither assignment nor `defineProperty` can
+ * replace it; the previous attempt threw into a `catch` and reported the
+ * failure as a wrong password. Importing the original module here would also
+ * pull the broken implementation back into the bundle.
+ *
+ * What remains worth checking at runtime is that WebCrypto is present and
+ * produces the reference value, since that depends on the webview.
+ */
+async function ensurePasswordCrypto(): Promise<void> {
+  await verifyPbkdf2(webcryptoPbkdf2);
+}
+
+/**
  * A login attempt in progress.
  *
  * Holds the one live client across steps. `connect()` opens the socket and
@@ -324,11 +318,29 @@ export class TelegramLogin {
   /** Complete a 2FA login with the cloud password. */
   async submitPassword(password: string): Promise<"done"> {
     const client = this.expectClient();
+
+    // Deliberately outside the try below. A broken PBKDF2 produces a wrong SRP
+    // proof, Telegram answers "password invalid", and the user gets told their
+    // correct password is wrong - which is exactly the bug this replaced. A
+    // crypto fault must report itself as a crypto fault.
     try {
-      await ensurePbkdf2Patched();
+      await ensurePasswordCrypto();
+    } catch (e) {
+      throw e instanceof TelegramLoginError
+        ? e
+        : new TelegramLoginError(
+            e instanceof Error && e.message
+              ? e.message
+              : "Password encryption is unavailable in this build.",
+          );
+    }
+
+    try {
       const pwd = await client.invoke(new Api.account.GetPassword());
       const check = await computeCheck(pwd, password);
-      await client.invoke(new Api.auth.CheckPassword({ password: check }));
+      await client.invoke(
+        new Api.auth.CheckPassword({ password: adoptGlobalBuffers(check) }),
+      );
       await this.persist();
       return "done";
     } catch (e) {
@@ -415,6 +427,22 @@ async function safeDisconnect(client: TelegramClient): Promise<void> {
 }
 
 function messageOf(e: unknown): string {
+  if (typeof e === "object" && e !== null) {
+    // GramJS RPC errors carry the Telegram code on `errorMessage`, which is not
+    // always reflected in `message`. Missing it meant real causes such as
+    // SRP_ID_INVALID fell through to the generic fallback and were reported as
+    // a wrong password.
+    const o = e as {
+      errorMessage?: unknown;
+      code?: unknown;
+      name?: unknown;
+      message?: unknown;
+    };
+    const parts = [o.name, o.errorMessage, o.message, o.code]
+      .filter((v) => v !== undefined && v !== null && v !== "")
+      .map(String);
+    if (parts.length > 0) return Array.from(new Set(parts)).join(" ");
+  }
   if (e instanceof Error) return e.message;
   return String(e);
 }
@@ -430,9 +458,23 @@ function asLoginError(e: unknown, fallback: string): TelegramLoginError {
     return new TelegramLoginError("That code expired. Start again to get a new one.");
   if (msg.includes("PASSWORD_HASH_INVALID"))
     return new TelegramLoginError("That 2FA password is incorrect.");
+  if (msg.includes("SRP_ID_INVALID"))
+    return new TelegramLoginError(
+      "The password challenge expired. Go back and start the login again.",
+    );
+  if (msg.includes("SRP_PASSWORD_CHANGED"))
+    return new TelegramLoginError(
+      "The account password changed during login. Start again.",
+    );
   if (msg.includes("FLOOD_WAIT"))
     return new TelegramLoginError("Too many attempts. Wait a while before trying again.");
   if (msg.includes("PHONE_NUMBER_BANNED"))
     return new TelegramLoginError("This phone number is banned from Telegram.");
-  return new TelegramLoginError(fallback);
+  // An unrecognised failure is NOT the same as a wrong password, and saying so
+  // sends people to change a password that was fine. Keep the plain-language
+  // fallback, but carry the underlying reason so it can be acted on.
+  const detail = msg.trim().slice(0, 200);
+  return new TelegramLoginError(
+    detail ? `${fallback} (${detail})` : fallback,
+  );
 }
