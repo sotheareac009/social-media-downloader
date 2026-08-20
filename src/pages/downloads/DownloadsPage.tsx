@@ -232,6 +232,16 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
   const start = useCallback(
     async (urls: string[]) => {
       setSubmitting(true);
+      // Clicking the top Download queues the pasted link straight away, so the
+      // inspect/quality card for that same link is now redundant — dismiss it
+      // (and cancel any pending probe) instead of leaving a second Download
+      // button hanging around after the video is already downloading.
+      if (inspectTimer.current !== null) {
+        window.clearTimeout(inspectTimer.current);
+        inspectTimer.current = null;
+      }
+      setReport(null);
+      setReportFor(null);
       try {
         const result = await downloadSubmit(urls);
         result.queued.forEach(upsert);
