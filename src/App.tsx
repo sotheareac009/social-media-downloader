@@ -3,7 +3,6 @@ import { AccountsPage } from "@/pages/accounts/AccountsPage";
 import { DownloadsPage } from "@/pages/downloads/DownloadsPage";
 import { HomePage } from "@/pages/home/HomePage";
 import { TelegramPage } from "@/pages/telegram/TelegramPage";
-import { SettingsPage } from "@/pages/settings/SettingsPage";
 import { FacebookPage } from "@/pages/facebook/FacebookPage";
 import { UploadPage } from "@/pages/upload/UploadPage";
 import { authGetAccounts, subscribeToAuthEvents } from "@/lib/auth";
@@ -15,14 +14,13 @@ import {
   GlobeIcon,
   HomeIcon,
   MoonIcon,
-  SlidersIcon,
   SunIcon,
   UploadIcon,
   UsersIcon,
 } from "@/components/ui/icons";
 
 type Theme = "light" | "dark";
-type Route = "home" | "accounts" | "downloads" | "upload" | "telegram" | "facebook" | "settings";
+type Route = "home" | "accounts" | "downloads" | "upload" | "telegram" | "facebook";
 const THEME_KEY = "md.theme";
 
 export default function App() {
@@ -89,7 +87,6 @@ export default function App() {
             {route === "accounts" && <AccountsPage onNavigate={setRoute} />}
             {route === "telegram" && <TelegramPage onBack={() => setRoute("accounts")} />}
             {route === "facebook" && <FacebookPage onBack={() => setRoute("accounts")} />}
-            {route === "settings" && <SettingsPage />}
           </div>
         </main>
       </div>
@@ -161,16 +158,6 @@ function Sidebar({
             <UsersIcon size={16} />
           </span>
           Accounts
-        </button>
-        <button
-          className={`navitem ${route === "settings" ? "navitem--active" : ""}`}
-          type="button"
-          onClick={() => onNavigate("settings")}
-        >
-          <span className="navitem__icon">
-            <SlidersIcon size={16} />
-          </span>
-          Settings
         </button>
       </nav>
 

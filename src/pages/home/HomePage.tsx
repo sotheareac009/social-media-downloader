@@ -16,7 +16,7 @@ import {
   type IconProps,
 } from "@/components/ui/icons";
 
-export type Route = "home" | "downloads" | "accounts" | "telegram" | "settings";
+export type Route = "home" | "downloads" | "accounts" | "telegram";
 
 type Tone = "ok" | "warn" | "muted";
 
