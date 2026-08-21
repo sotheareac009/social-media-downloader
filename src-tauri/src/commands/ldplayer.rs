@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, State};
 
 use crate::errors::{AppError, Result};
-use crate::ldplayer::manager::{DeviceEnvironment, DeviceView, LdPlayerManager};
+use crate::ldplayer::manager::{DeviceEnvironment, DeviceView, LdPlayerManager, TransferredMedia};
 use crate::ldplayer::settings::DeviceSettings;
 
 type Manager<'a> = State<'a, Arc<LdPlayerManager>>;
@@ -107,7 +107,7 @@ pub async fn ldplayer_transfer_media(
     manager: Manager<'_>,
     device_id: String,
     path: String,
-) -> Result<String> {
+) -> Result<TransferredMedia> {
     manager
         .transfer_media(Some(&app), &device_id, Path::new(&path))
         .await
@@ -143,29 +143,47 @@ pub async fn ldplayer_screenshot(
     manager.screenshot(&device_id, label.as_deref()).await
 }
 
-/// Pick a video from the computer. Mirrors `upload_pick_files`, but single-select
-/// and video-only: publishing takes one video at a time.
+/// Pick a video or photo from the computer. Mirrors `upload_pick_files`, but
+/// multi-select, because an album post is several files chosen together.
+///
+/// The combined filter is listed first so the default view shows everything
+/// publishable — someone who opened the dialog wanting a photo should not have
+/// to notice a dropdown to see one.
+///
+/// Returns an empty list when the dialog was cancelled, which is not an error.
 #[tauri::command]
-pub async fn ldplayer_pick_video(app: AppHandle) -> Result<Option<String>> {
+pub async fn ldplayer_pick_media(app: AppHandle) -> Result<Vec<String>> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
-        .set_title("Choose a video to publish")
+        .set_title("Choose a video or photo to publish")
+        .add_filter(
+            "Videos and photos",
+            &[
+                "mp4", "mov", "webm", "mkv", "avi", "m4v", "jpg", "jpeg", "png", "gif",
+                "webp", "heic",
+            ],
+        )
         .add_filter("Videos", &["mp4", "mov", "webm", "mkv", "avi", "m4v"])
-        .pick_file(move |f| {
+        .add_filter("Photos", &["jpg", "jpeg", "png", "gif", "webp", "heic"])
+        .pick_files(move |f| {
             let _ = tx.send(f);
         });
     let picked = rx
         .await
         .map_err(|_| AppError::Internal("file picker closed unexpectedly".into()))?;
-    let Some(file) = picked else { return Ok(None) };
-    Ok(Some(
-        file.into_path()
-            .map_err(|e| AppError::MediaFileMissing(e.to_string()))?
-            .display()
-            .to_string(),
-    ))
+
+    let mut out = Vec::new();
+    for file in picked.unwrap_or_default() {
+        out.push(
+            file.into_path()
+                .map_err(|e| AppError::MediaFileMissing(e.to_string()))?
+                .display()
+                .to_string(),
+        );
+    }
+    Ok(out)
 }
 
 /// Pick a folder or executable for the Settings page's path fields.

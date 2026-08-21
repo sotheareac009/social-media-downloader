@@ -89,6 +89,26 @@ impl Platform {
     }
 }
 
+/// How several selected assets are turned into posts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PostMode {
+    /// One post per account carrying every asset — a carousel or album.
+    Album,
+    /// Each asset becomes its own post, on every selected account.
+    Single,
+}
+
+impl PostMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "album" => Some(PostMode::Album),
+            "single" => Some(PostMode::Single),
+            _ => None,
+        }
+    }
+}
+
 /// An endpoint: one social app, on one emulator, already signed in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
@@ -233,7 +253,12 @@ pub struct PublishJob {
     pub account_name: String,
     pub platform: Platform,
     pub device_id: String,
+    /// First asset's name — what a compact row shows.
     pub media_name: String,
+    /// Every asset, in carousel order. One entry for a single post.
+    pub media_names: Vec<String>,
+    /// Convenience for the UI: >1 means this is an album post.
+    pub media_count: usize,
 }
 
 fn job_status<S: serde::Serializer>(v: &JobStatus, s: S) -> std::result::Result<S::Ok, S::Error> {
@@ -268,6 +293,13 @@ mod tests {
                 assert!(seen.insert(*pkg), "{pkg} is claimed by two platforms");
             }
         }
+    }
+
+    #[test]
+    fn post_modes_round_trip() {
+        assert_eq!(PostMode::parse("album"), Some(PostMode::Album));
+        assert_eq!(PostMode::parse("single"), Some(PostMode::Single));
+        assert_eq!(PostMode::parse("carousel"), None);
     }
 
     #[test]

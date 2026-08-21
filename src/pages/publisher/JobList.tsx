@@ -72,7 +72,18 @@ function JobCard({ job }: { job: PublishJob }) {
             {JOB_STATUS_LABEL[job.status]}
           </StatusBadge>
         </div>
-        <div className="job__media">{job.media_name}</div>
+        <div className="job__media">
+          {job.media_count > 1 ? (
+            <>
+              <span className="job__albumbadge">Album · {job.media_count} files</span>
+              {/* Order matters for a carousel, so the list is shown in order
+                  rather than summarised as a count alone. */}
+              <span className="job__files">{job.media_names.join(" · ")}</span>
+            </>
+          ) : (
+            job.media_name
+          )}
+        </div>
 
         {active && (
           <div className="job__bar" role="progressbar" aria-valuenow={Math.round(job.progress * 100)}>

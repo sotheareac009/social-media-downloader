@@ -22,11 +22,9 @@
 use async_trait::async_trait;
 
 use crate::errors::Result;
+use crate::ldplayer::adb::MediaCollection;
 use crate::publish::connector::{Outcome, PlatformConnector, PublishContext};
 use crate::publish::model::Platform;
-
-/// Videos are the only media this build publishes, so the MIME type is fixed.
-const MIME: &str = "video/*";
 
 pub struct ShareConnector {
     platform: Platform,
@@ -60,6 +58,7 @@ impl PlatformConnector for ShareConnector {
 
     async fn publish(&self, ctx: &PublishContext) -> Result<Outcome> {
         let label = self.platform.label();
+        let noun = noun_for(ctx);
 
         // Wake the app first. Sending a share intent to an app that has not
         // run since boot frequently lands on a blank screen while it
@@ -72,44 +71,43 @@ impl PlatformConnector for ShareConnector {
 
         let adb = ctx.manager.adb()?;
 
-        let Some(uri) = ctx.content_uri.as_deref() else {
+        // An album cannot be pre-attached. `ACTION_SEND_MULTIPLE` needs
+        // EXTRA_STREAM as a ParcelableArrayList<Uri>, and `am start` has no
+        // flag that builds one — `--eu` takes a single URI, and `--esa` would
+        // pass Strings, which every receiving app rejects with a
+        // ClassCastException. So the files are staged and the person selects
+        // them, which is honest, rather than firing an intent we know fails.
+        if ctx.is_album() {
+            ctx.step(0.92, &format!("{} files are ready in the gallery", ctx.media.len()));
+            return Ok(Outcome::NeedsUser(album_message(ctx, label)));
+        }
+
+        let item = ctx.first();
+        let Some(uri) = item.content_uri.as_deref() else {
             // No MediaStore URI means the gallery cannot offer the file
-            // either, so the honest move is to say the file is on the device
-            // and let the person pick it, rather than fire an intent that will
-            // fail with a permission error.
-            ctx.step(0.9, "Opened the app; pick the video from the gallery");
+            // either, so the honest move is to say where it is and let the
+            // person pick it, rather than fire an intent that will fail with a
+            // permission error.
+            ctx.step(0.9, &format!("Opened the app; pick the {noun} from the gallery"));
             return Ok(Outcome::NeedsUser(format!(
-                "{label} is open on this instance. The video is on the device at {}, \
+                "{label} is open on this instance. The {noun} is on the device at {}, \
                  but Android did not index it, so choose it from the gallery manually.",
-                ctx.remote_path
+                item.remote_path
             )));
         };
 
-        ctx.step(0.82, &format!("Handing the video to {label}…"));
+        ctx.step(0.82, &format!("Handing the {noun} to {label}…"));
         let caption = self.honours_caption().then(|| ctx.caption.as_str());
-        adb.share_to(&ctx.serial, &ctx.package, uri, MIME, caption)
+        adb.share_to(&ctx.serial, &ctx.package, uri, item.collection.mime(), caption)
             .await?;
 
         // Give the composer a moment to come up before looking at the screen.
         tokio::time::sleep(std::time::Duration::from_secs(4)).await;
 
-        // Confirm the app is actually in the foreground. If it crashed or
-        // bounced back to the launcher, saying "ready for you" would send the
-        // user to look at a screen that isn't there.
-        let foreground = adb.foreground_package(&ctx.serial).await;
-        let arrived = foreground
-            .as_deref()
-            .is_some_and(|p| p == ctx.package || p.starts_with(&ctx.package));
-
-        if let Some(path) = ctx.screenshot("composer").await {
-            ctx.step(0.95, &format!("{label} composer captured"));
-            let _ = path;
-        }
-
-        if !arrived {
+        if !self.arrived(ctx, &adb).await {
             ctx.step(0.9, &format!("{label} did not come to the front"));
             return Ok(Outcome::NeedsUser(format!(
-                "The video was sent to {label}, but it is not on screen — it may have \
+                "The {noun} was sent to {label}, but it is not on screen — it may have \
                  asked for a permission or a login confirmation. Open LDPlayer for this \
                  instance and finish there."
             )));
@@ -118,17 +116,78 @@ impl PlatformConnector for ShareConnector {
         ctx.step(0.98, "Waiting for you to post");
         Ok(Outcome::NeedsUser(if self.honours_caption() {
             format!(
-                "{label} is open with the video and caption attached on this instance. \
+                "{label} is open with the {noun} and caption attached on this instance. \
                  Review it and tap Post."
             )
         } else {
             format!(
-                "{label} is open with the video attached on this instance. \
+                "{label} is open with the {noun} attached on this instance. \
                  {label} does not accept a caption from outside its app, so paste the \
                  caption there, then tap Post."
             )
         }))
     }
+}
+
+impl ShareConnector {
+    /// Whether the app actually came to the foreground. If it crashed or
+    /// bounced back to the launcher, saying "ready for you" would send the
+    /// user to look at a screen that isn't there.
+    async fn arrived(&self, ctx: &PublishContext, adb: &crate::ldplayer::adb::Adb) -> bool {
+        let foreground = adb.foreground_package(&ctx.serial).await;
+        let arrived = foreground
+            .as_deref()
+            .is_some_and(|p| p == ctx.package || p.starts_with(&ctx.package));
+        if let Some(_path) = ctx.screenshot("composer").await {
+            ctx.step(0.95, &format!("{} composer captured", self.platform.label()));
+        }
+        arrived
+    }
+}
+
+/// "video", "photo", or "files" for a mixed album — the word the message uses.
+fn noun_for(ctx: &PublishContext) -> &'static str {
+    if ctx.is_mixed() {
+        return "files";
+    }
+    match ctx.first().collection {
+        MediaCollection::Video => {
+            if ctx.is_album() { "videos" } else { "video" }
+        }
+        MediaCollection::Image => {
+            if ctx.is_album() { "photos" } else { "photo" }
+        }
+    }
+}
+
+/// What to tell the user once an album is staged.
+///
+/// Names the files and their order, because carousel order is the thing they
+/// chose and the gallery will not preserve it — selection order in the app's
+/// picker is what decides it.
+fn album_message(ctx: &PublishContext, label: &str) -> String {
+    let names: Vec<String> = ctx
+        .media
+        .iter()
+        .enumerate()
+        .map(|(i, m)| format!("{}. {}", i + 1, m.file_name))
+        .collect();
+
+    let mixed = if ctx.is_mixed() {
+        " Some platforms refuse albums that mix photos and videos; if this one does, \
+         publish them as separate posts instead."
+    } else {
+        ""
+    };
+
+    format!(
+        "{label} is open on this instance and all {} files are in its gallery. \
+         Start a post, then select them in this order:\n{}\n\n\
+         They can't be attached from outside the app — Android has no way to hand an \
+         app several files at once.{mixed}",
+        ctx.media.len(),
+        names.join("\n")
+    )
 }
 
 #[cfg(test)]

@@ -29,7 +29,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use crate::errors::{AppError, Result};
-use crate::ldplayer::adb::{Adb, AdbDevice};
+use crate::ldplayer::adb::{Adb, AdbDevice, MediaCollection};
 use crate::ldplayer::console::{conventional_endpoint, Instance, LdConsole};
 use crate::ldplayer::settings::DeviceSettings;
 
@@ -129,6 +129,21 @@ pub struct LogLine {
     /// Device id or job id this line belongs to, when it has one.
     pub scope: Option<String>,
     pub message: String,
+}
+
+/// The result of putting a file on a device: where it landed, and the handle
+/// another app can be given for it.
+///
+/// The URI is returned alongside the path rather than re-queried later,
+/// because it is only obtainable *after* a successful index — and by that
+/// point the transfer has already proved it exists.
+#[derive(Debug, Clone, Serialize)]
+pub struct TransferredMedia {
+    pub remote_path: String,
+    /// `content://media/...`. Present whenever indexing succeeded, which the
+    /// transfer requires, so in practice always set on the success path.
+    pub content_uri: Option<String>,
+    pub collection: MediaCollection,
 }
 
 pub struct LdPlayerManager {
@@ -562,13 +577,17 @@ impl LdPlayerManager {
         app: Option<&AppHandle>,
         device_id: &str,
         local: &Path,
-    ) -> Result<String> {
+    ) -> Result<TransferredMedia> {
         let serial = self.serial_for_device(device_id).await?;
         let adb = self.adb()?;
         let settings = self.settings();
 
+        // The kind decides both the folder and which MediaStore table has to
+        // end up holding it - a photo indexed as video is invisible to a
+        // picker asking for photos.
+        let collection = MediaCollection::from_path(local);
         let file_name = sanitize_file_name(local);
-        let remote = settings.remote_path_for(&file_name);
+        let remote = settings.remote_path_for(&file_name, collection);
 
         self.log(app, "info", Some(device_id), format!("pushing {file_name} → {remote}"));
         adb.push(&serial, local, &remote).await?;
@@ -585,18 +604,20 @@ impl LdPlayerManager {
         if let Err(e) = adb.scan_media(&serial, &remote).await {
             self.log(app, "warn", Some(device_id), format!("media scan reported: {e}"));
         }
-        if !adb.is_in_media_store(&serial, &remote).await {
+        let mut uri = adb.media_store_uri(&serial, &remote, collection).await;
+        if uri.is_none() {
             // One retry: the first scan after a push occasionally races the
             // filesystem, and a second request a moment later succeeds.
             tokio::time::sleep(Duration::from_millis(1200)).await;
             adb.scan_media(&serial, &remote).await.ok();
-            if !adb.is_in_media_store(&serial, &remote).await {
+            uri = adb.media_store_uri(&serial, &remote, collection).await;
+            if uri.is_none() {
                 return Err(AppError::MediaScanFailed);
             }
         }
 
         self.log(app, "info", Some(device_id), "media is visible to the gallery");
-        Ok(remote)
+        Ok(TransferredMedia { remote_path: remote, content_uri: uri, collection })
     }
 
     /// Remove a pushed file and un-index it. Best effort by design: a leftover

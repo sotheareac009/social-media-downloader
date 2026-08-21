@@ -47,6 +47,7 @@ export interface DeviceSettings {
   ldplayer_path: string | null;
   adb_path: string | null;
   remote_dir: string;
+  remote_image_dir: string;
   max_concurrent: number;
   verbose_logging: boolean;
   cleanup_after_publish: boolean;
@@ -94,9 +95,19 @@ export const ldplayerConnectEndpoint = (address: string) =>
 export const ldplayerPackages = (deviceId: string) =>
   invoke<string[]>("ldplayer_packages", { deviceId });
 
-/** Copy a video to a device and make the gallery see it. Returns the on-device path. */
+/** Whether Android will index a file as video or as an image. */
+export type MediaCollection = "video" | "image";
+
+export interface TransferredMedia {
+  remote_path: string;
+  /** `content://media/...` — how the file is handed to another app. */
+  content_uri: string | null;
+  collection: MediaCollection;
+}
+
+/** Copy media to a device and make the gallery see it. */
 export const ldplayerTransferMedia = (deviceId: string, path: string) =>
-  invoke<string>("ldplayer_transfer_media", { deviceId, path });
+  invoke<TransferredMedia>("ldplayer_transfer_media", { deviceId, path });
 
 export const ldplayerLaunchApp = (deviceId: string, packageName: string) =>
   invoke<void>("ldplayer_launch_app", { deviceId, package: packageName });
@@ -107,9 +118,21 @@ export const ldplayerStopApp = (deviceId: string, packageName: string) =>
 export const ldplayerScreenshot = (deviceId: string, label?: string) =>
   invoke<string>("ldplayer_screenshot", { deviceId, label: label ?? null });
 
-/** `null` when the user cancelled the picker — not an error. */
-export const ldplayerPickVideo = () =>
-  invoke<string | null>("ldplayer_pick_video");
+/** Multi-select. Empty when the user cancelled the picker — not an error. */
+export const ldplayerPickMedia = () => invoke<string[]>("ldplayer_pick_media");
+
+/** Extensions the picker offers, and which collection each lands in. */
+const IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp"];
+
+/**
+ * Which kind a local path is, mirroring `MediaCollection::from_extension` in
+ * Rust. Unknown extensions read as video, matching the backend — the UI must
+ * not label something a photo that the device will file as a video.
+ */
+export function mediaKindOf(path: string): MediaCollection {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  return IMAGE_EXTENSIONS.includes(ext) ? "image" : "video";
+}
 
 export const ldplayerBrowsePath = (kind: "folder" | "file") =>
   invoke<string | null>("ldplayer_browse_path", { kind });

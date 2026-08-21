@@ -6,7 +6,7 @@ use serde::Serialize;
 use tauri::{AppHandle, State};
 
 use crate::errors::{AppError, Result};
-use crate::publish::model::{Account, AccountView, Platform, PublishJob};
+use crate::publish::model::{Account, AccountView, Platform, PostMode, PublishJob};
 use crate::publish::queue::{PublishQueue, QueueSummary};
 
 type Queue<'a> = State<'a, Arc<PublishQueue>>;
@@ -95,19 +95,27 @@ pub async fn publish_remove_account(queue: Queue<'_>, id: String) -> Result<()> 
 
 // -------------------------------------------------------------------- jobs
 
-/// Queue one video to every selected account. Returns immediately with the
-/// created jobs; progress arrives on `publish://updated`.
+/// Queue the selected media to every selected account. Returns immediately
+/// with the created jobs; progress arrives on `publish://updated`.
+///
+/// `mode` decides how several files become posts: `album` makes one post per
+/// account carrying all of them, `single` makes one post per file per account.
+/// It is required rather than defaulted — guessing wrong publishes three posts
+/// where the user wanted one, and that is not undoable.
 #[tauri::command]
 pub async fn publish_submit(
     app: AppHandle,
     queue: Queue<'_>,
-    video_path: String,
+    paths: Vec<String>,
     caption: String,
     account_ids: Vec<String>,
+    mode: String,
 ) -> Result<Vec<PublishJob>> {
+    let mode = PostMode::parse(&mode)
+        .ok_or_else(|| AppError::Internal(format!("unknown post mode `{mode}`")))?;
     let handle = queue.inner().clone();
     handle
-        .submit(&app, handle.clone(), &video_path, &caption, &account_ids)
+        .submit(&app, handle.clone(), &paths, &caption, &account_ids, mode)
         .await
 }
 

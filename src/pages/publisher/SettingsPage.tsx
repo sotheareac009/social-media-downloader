@@ -145,7 +145,7 @@ export function PublisherSettingsPage() {
 
         <div className="setrow">
           <div className="setrow__text">
-            <div className="setrow__label">Upload folder on the device</div>
+            <div className="setrow__label">Video folder on the device</div>
             <div className="setrow__hint">
               Where videos are copied inside Android. <code>/sdcard/Movies/…</code> is
               indexed as video by Android's gallery, which is what the social apps read.
@@ -156,6 +156,23 @@ export function PublisherSettingsPage() {
             value={settings.remote_dir}
             onChange={(e) => setSettings({ ...settings, remote_dir: e.target.value })}
             onBlur={(e) => void update({ remote_dir: e.target.value })}
+            spellCheck={false}
+          />
+        </div>
+
+        <div className="setrow">
+          <div className="setrow__text">
+            <div className="setrow__label">Photo folder on the device</div>
+            <div className="setrow__hint">
+              Photos go somewhere separate so they land in a Pictures album rather than
+              among your videos.
+            </div>
+          </div>
+          <input
+            className="input"
+            value={settings.remote_image_dir}
+            onChange={(e) => setSettings({ ...settings, remote_image_dir: e.target.value })}
+            onBlur={(e) => void update({ remote_image_dir: e.target.value })}
             spellCheck={false}
           />
         </div>

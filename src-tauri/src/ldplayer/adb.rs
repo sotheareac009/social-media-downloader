@@ -25,6 +25,57 @@ use crate::process::command;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const PUSH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
+/// Which MediaStore collection a file belongs to.
+///
+/// Generic Android, not platform-specific: `content://media/external/video`
+/// and `.../images` are separate tables, and a file indexed into the wrong one
+/// is invisible to any picker filtering for the other. Every app's media
+/// picker filters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaCollection {
+    Video,
+    Image,
+}
+
+impl MediaCollection {
+    /// The MediaStore table to query for an indexed file.
+    pub fn store_uri(self) -> &'static str {
+        match self {
+            MediaCollection::Video => "content://media/external/video/media",
+            MediaCollection::Image => "content://media/external/images/media",
+        }
+    }
+
+    /// MIME filter for a share intent. Wildcards, because the receiving app
+    /// cares about the family, and naming an exact subtype only risks an app
+    /// refusing a container it would otherwise have accepted.
+    pub fn mime(self) -> &'static str {
+        match self {
+            MediaCollection::Video => "video/*",
+            MediaCollection::Image => "image/*",
+        }
+    }
+
+    /// Guess from a file extension. Unknown extensions are treated as video:
+    /// this feature is video-first, and a wrong guess degrades to "the picker
+    /// doesn't show it" rather than to a failed transfer.
+    pub fn from_extension(ext: &str) -> Self {
+        match ext.to_ascii_lowercase().as_str() {
+            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "heic" | "heif" => {
+                MediaCollection::Image
+            }
+            _ => MediaCollection::Video,
+        }
+    }
+
+    pub fn from_path(path: &Path) -> Self {
+        path.extension()
+            .map(|e| Self::from_extension(&e.to_string_lossy()))
+            .unwrap_or(MediaCollection::Video)
+    }
+}
+
 /// A device as `adb devices -l` reports it.
 #[derive(Debug, Clone, Serialize)]
 pub struct AdbDevice {
@@ -376,16 +427,13 @@ impl Adb {
 
     /// Whether MediaStore has actually indexed the path — the honest check
     /// that `scan_media` succeeded, rather than trusting its exit code.
-    pub async fn is_in_media_store(&self, serial: &str, remote: &str) -> bool {
-        let q = format!(
-            "content query --uri content://media/external/video/media \
-             --projection _id --where \"_data='{}'\"",
-            remote.replace('\'', "")
-        );
-        match self.shell(serial, &q).await {
-            Ok(out) => out.contains("_id="),
-            Err(_) => false,
-        }
+    pub async fn is_in_media_store(
+        &self,
+        serial: &str,
+        remote: &str,
+        collection: MediaCollection,
+    ) -> bool {
+        self.media_store_id(serial, remote, collection).await.is_some()
     }
 
     /// MediaStore's row id for a pushed file, if it has been indexed.
@@ -395,10 +443,15 @@ impl Adb {
     /// connectors target refuses it. A `content://media/...` URI built from
     /// this id is the supported way to hand a video to another app, and it is
     /// generic Android, not platform-specific, which is why it lives here.
-    pub async fn media_store_id(&self, serial: &str, remote: &str) -> Option<String> {
+    pub async fn media_store_id(
+        &self,
+        serial: &str,
+        remote: &str,
+        collection: MediaCollection,
+    ) -> Option<String> {
         let q = format!(
-            "content query --uri content://media/external/video/media \
-             --projection _id --where \"_data='{}'\"",
+            "content query --uri {} --projection _id --where \"_data='{}'\"",
+            collection.store_uri(),
             remote.replace('\'', "")
         );
         let out = self.shell(serial, &q).await.ok()?;
@@ -412,10 +465,15 @@ impl Adb {
     }
 
     /// The `content://` URI for a pushed video, once MediaStore knows it.
-    pub async fn media_store_uri(&self, serial: &str, remote: &str) -> Option<String> {
-        self.media_store_id(serial, remote)
+    pub async fn media_store_uri(
+        &self,
+        serial: &str,
+        remote: &str,
+        collection: MediaCollection,
+    ) -> Option<String> {
+        self.media_store_id(serial, remote, collection)
             .await
-            .map(|id| format!("content://media/external/video/media/{id}"))
+            .map(|id| format!("{}/{id}", collection.store_uri()))
     }
 
     /// Hand a media item to a specific app through Android's own share
@@ -618,6 +676,28 @@ mod tests {
         let d = parse_devices(out);
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].serial, "emulator-5554");
+    }
+
+    #[test]
+    fn media_collections_are_guessed_from_the_extension() {
+        for ext in ["jpg", "JPEG", "png", "gif", "webp", "heic"] {
+            assert_eq!(MediaCollection::from_extension(ext), MediaCollection::Image, "{ext}");
+        }
+        for ext in ["mp4", "mov", "MKV", "webm"] {
+            assert_eq!(MediaCollection::from_extension(ext), MediaCollection::Video, "{ext}");
+        }
+        // Unknown degrades to video, which is the feature's primary case.
+        assert_eq!(MediaCollection::from_extension("xyz"), MediaCollection::Video);
+    }
+
+    #[test]
+    fn each_collection_has_its_own_store_and_mime() {
+        assert_ne!(
+            MediaCollection::Video.store_uri(),
+            MediaCollection::Image.store_uri(),
+            "indexing into the wrong table hides the file from every picker"
+        );
+        assert_eq!(MediaCollection::Image.mime(), "image/*");
     }
 
     #[test]

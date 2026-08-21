@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::ldplayer::adb::MediaCollection;
+
 const FILE_NAME: &str = "device-settings.json";
 
 /// Where pushed media lands on the device.
@@ -20,6 +22,14 @@ const FILE_NAME: &str = "device-settings.json";
 /// MediaStore. Files dropped in Download are frequently invisible to those
 /// pickers, which is the confusing failure this default exists to avoid.
 pub const DEFAULT_REMOTE_DIR: &str = "/sdcard/Movies/SocialPublisher";
+
+/// Where pushed images land.
+///
+/// Separate from the video folder for the same reason the video folder is
+/// `Movies`: Android's gallery groups by directory, and photos filed under
+/// "Movies" show up in an album called Movies. The MediaStore *type* comes
+/// from the file itself, but the album a user sees comes from the path.
+pub const DEFAULT_REMOTE_IMAGE_DIR: &str = "/sdcard/Pictures/SocialPublisher";
 
 /// Publishing more than a couple of emulators at once mostly makes each one
 /// slower — they share one CPU, one disk and one adb server — and a device
@@ -38,6 +48,10 @@ pub struct DeviceSettings {
     pub adb_path: Option<PathBuf>,
     #[serde(default = "default_remote_dir")]
     pub remote_dir: String,
+    /// Where images go. Defaulted rather than required, so a settings file
+    /// written before images were supported still loads.
+    #[serde(default = "default_remote_image_dir")]
+    pub remote_image_dir: String,
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: usize,
     /// Keep every adb command and its output in the app log, and capture a
@@ -55,6 +69,10 @@ fn default_remote_dir() -> String {
     DEFAULT_REMOTE_DIR.to_string()
 }
 
+fn default_remote_image_dir() -> String {
+    DEFAULT_REMOTE_IMAGE_DIR.to_string()
+}
+
 fn default_max_concurrent() -> usize {
     DEFAULT_MAX_CONCURRENT
 }
@@ -65,6 +83,7 @@ impl Default for DeviceSettings {
             ldplayer_path: None,
             adb_path: None,
             remote_dir: default_remote_dir(),
+            remote_image_dir: default_remote_image_dir(),
             max_concurrent: DEFAULT_MAX_CONCURRENT,
             verbose_logging: false,
             cleanup_after_publish: false,
@@ -94,18 +113,31 @@ impl DeviceSettings {
     /// the queue (zero workers) or thrash the host (twenty).
     fn sanitized(mut self) -> Self {
         self.max_concurrent = self.max_concurrent.clamp(1, 8);
-        let dir = self.remote_dir.trim().trim_end_matches('/');
-        if dir.is_empty() || !dir.starts_with('/') {
-            self.remote_dir = default_remote_dir();
-        } else {
-            self.remote_dir = dir.to_string();
-        }
+        self.remote_dir = sanitize_dir(&self.remote_dir, default_remote_dir);
+        self.remote_image_dir = sanitize_dir(&self.remote_image_dir, default_remote_image_dir);
         self
     }
 
-    /// Absolute path a file with this name will be pushed to.
-    pub fn remote_path_for(&self, file_name: &str) -> String {
-        format!("{}/{}", self.remote_dir, file_name)
+    /// Absolute path a file with this name will be pushed to, in the folder
+    /// that matches its kind.
+    pub fn remote_path_for(&self, file_name: &str, collection: MediaCollection) -> String {
+        let dir = match collection {
+            MediaCollection::Video => &self.remote_dir,
+            MediaCollection::Image => &self.remote_image_dir,
+        };
+        format!("{dir}/{file_name}")
+    }
+}
+
+/// An absolute, slash-trimmed device path, or the default when the value could
+/// not be one. A hand-edited relative path would otherwise push to the shell's
+/// working directory, wherever that happens to be.
+fn sanitize_dir(value: &str, fallback: fn() -> String) -> String {
+    let dir = value.trim().trim_end_matches('/');
+    if dir.is_empty() || !dir.starts_with('/') {
+        fallback()
+    } else {
+        dir.to_string()
     }
 }
 
@@ -119,8 +151,12 @@ mod tests {
         assert_eq!(s.remote_dir, DEFAULT_REMOTE_DIR);
         assert_eq!(s.max_concurrent, DEFAULT_MAX_CONCURRENT);
         assert_eq!(
-            s.remote_path_for("clip.mp4"),
+            s.remote_path_for("clip.mp4", MediaCollection::Video),
             "/sdcard/Movies/SocialPublisher/clip.mp4"
+        );
+        assert_eq!(
+            s.remote_path_for("shot.jpg", MediaCollection::Image),
+            "/sdcard/Pictures/SocialPublisher/shot.jpg"
         );
     }
 
@@ -142,7 +178,7 @@ mod tests {
     fn trailing_slashes_do_not_produce_a_double_slash_path() {
         let s = DeviceSettings { remote_dir: "/sdcard/Movies/".into(), ..Default::default() }
             .sanitized();
-        assert_eq!(s.remote_path_for("a.mp4"), "/sdcard/Movies/a.mp4");
+        assert_eq!(s.remote_path_for("a.mp4", MediaCollection::Video), "/sdcard/Movies/a.mp4");
     }
 
     #[test]

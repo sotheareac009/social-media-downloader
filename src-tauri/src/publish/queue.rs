@@ -23,9 +23,9 @@ use tokio::sync::Semaphore;
 
 use crate::errors::{AppError, Result};
 use crate::ldplayer::manager::{now_unix, LdPlayerManager};
-use crate::publish::connector::{self, Outcome, PublishContext};
+use crate::publish::connector::{self, Outcome, PublishContext, StagedMedia};
 use crate::publish::model::{
-    Account, AccountStatus, AccountView, JobStatus, MediaItem, Platform, PublishJob,
+    Account, AccountStatus, AccountView, JobStatus, MediaItem, Platform, PostMode, PublishJob,
 };
 use crate::publish::store::{JobRow, PublishStore};
 
@@ -194,69 +194,93 @@ impl PublishQueue {
         &self,
         app: &AppHandle,
         queue: Arc<PublishQueue>,
-        video_path: &str,
+        paths: &[String],
         caption: &str,
         account_ids: &[String],
+        mode: PostMode,
     ) -> Result<Vec<PublishJob>> {
         if account_ids.is_empty() {
             return Err(AppError::NoAccountsSelected);
         }
-
-        let path = Path::new(video_path);
-        let meta = std::fs::metadata(path).map_err(|_| {
-            AppError::MediaFileMissing(
-                path.file_name()
-                    .map(|f| f.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| video_path.to_string()),
-            )
-        })?;
-        if !meta.is_file() {
-            return Err(AppError::MediaFileMissing(video_path.to_string()));
+        if paths.is_empty() {
+            return Err(AppError::NoMediaSelected);
         }
 
+        // Register every file first, and fail the whole submit if one is
+        // missing. Half-queueing a batch is the worst outcome here: some
+        // accounts get the post, others silently don't, and the queue looks
+        // like it succeeded.
+        let mut media = Vec::with_capacity(paths.len());
+        for path in paths {
+            media.push(self.register_media(path)?);
+        }
+
+        // Validate accounts up front too — a job pointing at a deleted account
+        // would fail one worker-slot later, for no reason.
+        for account_id in account_ids {
+            self.store.account(account_id)?;
+        }
+
+        // Album: one job per account carrying every asset, so the person makes
+        // one post. Single: one job per asset per account.
+        let batches: Vec<Vec<MediaItem>> = match mode {
+            PostMode::Album => vec![media.clone()],
+            PostMode::Single => media.iter().cloned().map(|m| vec![m]).collect(),
+        };
+
+        let mut created = Vec::with_capacity(account_ids.len() * batches.len());
+        for account_id in account_ids {
+            for batch in &batches {
+                let ids: Vec<String> = batch.iter().map(|m| m.id.clone()).collect();
+                let row = JobRow {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    media_id: ids[0].clone(),
+                    account_id: account_id.clone(),
+                    caption: caption.to_string(),
+                    status: JobStatus::Pending,
+                    progress: 0.0,
+                    step: Some("Waiting for a free slot".into()),
+                    error_code: None,
+                    error: None,
+                    screenshot_path: None,
+                    created_at: now_unix(),
+                    started_at: None,
+                    completed_at: None,
+                };
+                self.store.add_job(&row, &ids)?;
+
+                let view = self.store.view(row.clone())?;
+                let _ = app.emit(events::CREATED, &view);
+                created.push(view);
+
+                self.spawn(app.clone(), queue.clone(), row.id);
+            }
+        }
+        Ok(created)
+    }
+
+    /// Record one local file, failing clearly if it is not there any more.
+    fn register_media(&self, path: &str) -> Result<MediaItem> {
+        let p = Path::new(path);
+        let name = || {
+            p.file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string())
+        };
+        let meta = std::fs::metadata(p).map_err(|_| AppError::MediaFileMissing(name()))?;
+        if !meta.is_file() {
+            return Err(AppError::MediaFileMissing(name()));
+        }
         let media = MediaItem {
             id: uuid::Uuid::new_v4().to_string(),
-            path: video_path.to_string(),
-            file_name: path
-                .file_name()
-                .map(|f| f.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "video.mp4".into()),
+            path: path.to_string(),
+            file_name: name(),
             size_bytes: meta.len(),
             duration_seconds: None,
             added_at: now_unix(),
         };
         self.store.add_media(&media)?;
-
-        let mut created = Vec::with_capacity(account_ids.len());
-        for account_id in account_ids {
-            // Validate up front: a job pointing at a deleted account would
-            // fail one worker-slot later, for no reason.
-            self.store.account(account_id)?;
-
-            let row = JobRow {
-                id: uuid::Uuid::new_v4().to_string(),
-                media_id: media.id.clone(),
-                account_id: account_id.clone(),
-                caption: caption.to_string(),
-                status: JobStatus::Pending,
-                progress: 0.0,
-                step: Some("Waiting for a free slot".into()),
-                error_code: None,
-                error: None,
-                screenshot_path: None,
-                created_at: now_unix(),
-                started_at: None,
-                completed_at: None,
-            };
-            self.store.add_job(&row)?;
-
-            let view = self.store.view(row.clone())?;
-            let _ = app.emit(events::CREATED, &view);
-            created.push(view);
-
-            self.spawn(app.clone(), queue.clone(), row.id);
-        }
-        Ok(created)
+        Ok(media)
     }
 
     /// Put a stopped job back in the queue.
@@ -415,7 +439,10 @@ impl PublishQueue {
     async fn run_inner(&self, app: &AppHandle, job_id: &str) -> Result<Outcome> {
         let row = self.store.job(job_id)?;
         let account = self.store.account(&row.account_id)?;
-        let media = self.store.media(&row.media_id)?;
+        let assets = self.store.job_media(job_id)?;
+        if assets.is_empty() {
+            return Err(AppError::NoMediaSelected);
+        }
         let settings = self.devices.settings();
 
         // 1. The device. Booting a cold instance is the slowest step by far,
@@ -446,27 +473,62 @@ impl PublishQueue {
             return Err(AppError::AppNotInstalled(account.package_name.clone()));
         }
 
-        // 3. Copy and index. This is the step that replaces dragging a file
-        //    into LDPlayer by hand.
-        self.set(
-            app,
-            job_id,
-            JobStatus::Uploading,
-            0.2,
-            Some(&format!("Copying {} to the device", media.file_name)),
-            None,
-            None,
-        );
-        let remote_path = self
-            .devices
-            .transfer_media(Some(app), &account.ldplayer_instance_id, Path::new(&media.path))
-            .await?;
+        // 3. Copy and index every asset, in carousel order. This is the step
+        //    that replaces dragging files into LDPlayer by hand.
+        //
+        //    Progress is shared across the batch rather than per file, so a
+        //    three-photo album does not appear to restart twice.
+        let mut staged: Vec<StagedMedia> = Vec::with_capacity(assets.len());
+        for (i, media) in assets.iter().enumerate() {
+            let share = 0.45 * (i as f64) / assets.len() as f64;
+            self.set(
+                app,
+                job_id,
+                JobStatus::Uploading,
+                0.2 + share,
+                Some(&if assets.len() == 1 {
+                    format!("Copying {} to the device", media.file_name)
+                } else {
+                    format!(
+                        "Copying {} to the device ({} of {})",
+                        media.file_name,
+                        i + 1,
+                        assets.len()
+                    )
+                }),
+                None,
+                None,
+            );
 
-        if self.is_cancelled(job_id) {
-            self.devices
-                .remove_media(&account.ldplayer_instance_id, &remote_path)
-                .await;
-            return Err(AppError::Cancelled);
+            let transferred = match self
+                .devices
+                .transfer_media(
+                    Some(app),
+                    &account.ldplayer_instance_id,
+                    Path::new(&media.path),
+                )
+                .await
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    // One bad file must not leave the others littering the
+                    // device, because the job is not going to use them.
+                    self.cleanup(&account.ldplayer_instance_id, &staged).await;
+                    return Err(e);
+                }
+            };
+
+            staged.push(StagedMedia {
+                file_name: media.file_name.clone(),
+                remote_path: transferred.remote_path,
+                content_uri: transferred.content_uri,
+                collection: transferred.collection,
+            });
+
+            if self.is_cancelled(job_id) {
+                self.cleanup(&account.ldplayer_instance_id, &staged).await;
+                return Err(AppError::Cancelled);
+            }
         }
 
         self.set(
@@ -474,13 +536,16 @@ impl PublishQueue {
             job_id,
             JobStatus::Publishing,
             0.65,
-            Some("Video is in the device gallery"),
+            Some(&if staged.len() == 1 {
+                "File is in the device gallery".to_string()
+            } else {
+                format!("{} files are in the device gallery", staged.len())
+            }),
             None,
             None,
         );
 
         // 4. Hand off to the platform connector — the one platform-aware step.
-        let content_uri = adb.media_store_uri(&serial, &remote_path).await;
         let connector = connector::for_platform(account.platform);
 
         let ctx = PublishContext {
@@ -488,8 +553,7 @@ impl PublishQueue {
             device_id: account.ldplayer_instance_id.clone(),
             serial: serial.clone(),
             package: account.package_name.clone(),
-            remote_path: remote_path.clone(),
-            content_uri,
+            media: staged.clone(),
             caption: row.caption.clone(),
             report: {
                 let store = self.store.clone();
@@ -542,11 +606,17 @@ impl PublishQueue {
         // Only tidy up after a clean finish. A handed-off job still needs its
         // file: the person has not tapped Post yet.
         if settings.cleanup_after_publish && matches!(outcome, Outcome::Published) {
-            self.devices
-                .remove_media(&account.ldplayer_instance_id, &remote_path)
-                .await;
+            self.cleanup(&account.ldplayer_instance_id, &staged).await;
         }
 
         Ok(outcome)
+    }
+
+    /// Remove staged files from a device. Best effort, and never a reason to
+    /// fail a job that otherwise succeeded.
+    async fn cleanup(&self, device_id: &str, staged: &[StagedMedia]) {
+        for item in staged {
+            self.devices.remove_media(device_id, &item.remote_path).await;
+        }
     }
 }

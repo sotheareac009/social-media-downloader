@@ -206,6 +206,9 @@ pub enum AppError {
     #[error("choose at least one account to publish to")]
     NoAccountsSelected,
 
+    #[error("choose at least one video or photo to publish")]
+    NoMediaSelected,
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -265,6 +268,7 @@ impl AppError {
             Self::PublishJobNotFound(_) => "publish_job_not_found",
             Self::JobNotRetryable(_) => "job_not_retryable",
             Self::NoAccountsSelected => "no_accounts_selected",
+            Self::NoMediaSelected => "no_media_selected",
             Self::Internal(_) => "internal",
         }
     }

@@ -34,10 +34,27 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::errors::Result;
+use crate::ldplayer::adb::MediaCollection;
 use crate::ldplayer::manager::LdPlayerManager;
 use crate::publish::model::Platform;
 
 pub mod share;
+
+/// One asset sitting on the device, ready to hand to an app.
+#[derive(Debug, Clone)]
+pub struct StagedMedia {
+    /// Original file name, for messages to the user.
+    pub file_name: String,
+    /// Absolute on-device path, already indexed by MediaStore.
+    pub remote_path: String,
+    /// `content://media/...`. Absent means the share-intent route is
+    /// unavailable and the connector must fall back to opening the app and
+    /// letting the user pick from the gallery.
+    pub content_uri: Option<String>,
+    /// Video or image. Decides the share MIME type, and is worth naming in a
+    /// message — "the photo is attached" reads wrong for a video.
+    pub collection: MediaCollection,
+}
 
 /// Everything a connector is given, and the only device access it gets.
 pub struct PublishContext {
@@ -51,12 +68,9 @@ pub struct PublishContext {
     /// The Android package for this account — possibly a Lite variant, which
     /// is why it is passed rather than read from [`Platform::default_package`].
     pub package: String,
-    /// Absolute on-device path of the video, already indexed by MediaStore.
-    pub remote_path: String,
-    /// `content://media/...` for the same file, when MediaStore gave us one.
-    /// Absent means the share-intent route is unavailable and the connector
-    /// must fall back to opening the app and letting the user pick.
-    pub content_uri: Option<String>,
+    /// Every asset, already copied to the device and indexed, in the order
+    /// the user arranged them. Always at least one.
+    pub media: Vec<StagedMedia>,
     pub caption: String,
     /// Report a step to the UI. Called with a coarse 0–1 fraction and a
     /// sentence a non-technical person can read.
@@ -66,6 +80,25 @@ pub struct PublishContext {
 impl PublishContext {
     pub fn step(&self, progress: f64, message: &str) {
         (self.report)(progress, message);
+    }
+
+    /// The first asset. Safe to call: the queue refuses to start a job with
+    /// no media, so this list is never empty.
+    pub fn first(&self) -> &StagedMedia {
+        &self.media[0]
+    }
+
+    /// True when this is an album post rather than a single one.
+    pub fn is_album(&self) -> bool {
+        self.media.len() > 1
+    }
+
+    /// A mixed video+photo album, which some platforms refuse. Worth naming in
+    /// the hand-off message rather than letting the app reject it silently.
+    pub fn is_mixed(&self) -> bool {
+        self.media
+            .iter()
+            .any(|m| m.collection != self.first().collection)
     }
 
     /// Capture the screen for the job's debug view. Best effort: a failed

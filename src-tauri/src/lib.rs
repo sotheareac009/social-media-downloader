@@ -182,7 +182,7 @@ pub fn run() {
             commands::ldplayer::ldplayer_launch_app,
             commands::ldplayer::ldplayer_stop_app,
             commands::ldplayer::ldplayer_screenshot,
-            commands::ldplayer::ldplayer_pick_video,
+            commands::ldplayer::ldplayer_pick_media,
             commands::ldplayer::ldplayer_browse_path,
             commands::publish::publish_platforms,
             commands::publish::publish_accounts,

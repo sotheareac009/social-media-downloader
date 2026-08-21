@@ -42,6 +42,9 @@ export interface AccountView extends Account {
   detail: string | null;
 }
 
+/** How several selected assets become posts. */
+export type PostMode = "album" | "single";
+
 export interface PublishJob {
   id: string;
   media_id: string;
@@ -60,7 +63,12 @@ export interface PublishJob {
   account_name: string;
   platform: Platform;
   device_id: string;
+  /** First asset's name — what a compact row shows. */
   media_name: string;
+  /** Every asset, in carousel order. */
+  media_names: string[];
+  /** >1 means this job is an album post. */
+  media_count: number;
 }
 
 export interface QueueSummary {
@@ -103,11 +111,18 @@ export const publishRenameAccount = (id: string, name: string) =>
 export const publishRemoveAccount = (id: string) =>
   invoke<void>("publish_remove_account", { id });
 
-/** Queue one video to every selected account. Returns before any work starts. */
+/**
+ * Queue the selected media to every selected account. Returns before any work
+ * starts.
+ *
+ * `mode` is required, not defaulted: guessing wrong publishes three posts where
+ * one album was wanted, and that is not undoable.
+ */
 export const publishSubmit = (args: {
-  videoPath: string;
+  paths: string[];
   caption: string;
   accountIds: string[];
+  mode: PostMode;
 }) => invoke<PublishJob[]>("publish_submit", args);
 
 export const publishJobs = () => invoke<PublishJob[]>("publish_jobs");

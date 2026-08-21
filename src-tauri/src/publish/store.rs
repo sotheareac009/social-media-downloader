@@ -99,11 +99,44 @@ impl PublishStore {
                 completed_at    INTEGER
             );
 
+            -- Album posts: one job, several assets, in a defined order.
+            -- Carousel order is user-visible, so `position` is data, not a
+            -- rendering detail.
+            CREATE TABLE IF NOT EXISTS publish_job_media (
+                job_id   TEXT NOT NULL REFERENCES publish_jobs(id)  ON DELETE CASCADE,
+                media_id TEXT NOT NULL REFERENCES publish_media(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL,
+                PRIMARY KEY (job_id, position)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_jobs_status  ON publish_jobs(status);
             CREATE INDEX IF NOT EXISTS idx_jobs_created ON publish_jobs(created_at DESC);
             "#,
         )?;
+        Self::migrate(&conn)?;
         Ok(Self { conn: Mutex::new(conn) })
+    }
+
+    /// Additive migrations for databases written by an earlier build.
+    ///
+    /// WHY THIS EXISTS EVEN THOUGH IT CURRENTLY ADDS NOTHING NEW. The
+    /// `CREATE TABLE IF NOT EXISTS` above is a no-op against a database that
+    /// already exists, so it can never introduce a column. Without this, the
+    /// first release that adds one would meet every existing user with "no
+    /// such column" and an unreadable job history. The machinery has to be
+    /// shipped *before* it is needed, not with the change that needs it.
+    ///
+    /// Rules for anything added here: new columns must be nullable or carry a
+    /// DEFAULT (SQLite cannot add a NOT NULL column without one), and must
+    /// stay non-sensitive - the guard test at the bottom of this file fails
+    /// the build otherwise.
+    fn migrate(conn: &Connection) -> Result<()> {
+        // Optional job columns, listed so a database from any earlier build of
+        // this feature gains whichever it is missing.
+        add_column_if_missing(conn, "publish_jobs", "step", "TEXT")?;
+        add_column_if_missing(conn, "publish_jobs", "screenshot_path", "TEXT")?;
+        add_column_if_missing(conn, "publish_media", "duration_seconds", "REAL")?;
+        Ok(())
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
@@ -258,7 +291,14 @@ impl PublishStore {
 
     // --------------------------------------------------------------- jobs
 
-    pub fn add_job(&self, job: &JobRow) -> Result<()> {
+    /// Insert a job and the assets it carries, in order.
+    ///
+    /// `job.media_id` stays the first asset. It is redundant with the join
+    /// table, and deliberately so: the column is NOT NULL, rows written by
+    /// earlier builds have no join rows at all, and keeping it authoritative
+    /// for "the first asset" means those old rows still render correctly
+    /// instead of showing an empty job.
+    pub fn add_job(&self, job: &JobRow, media_ids: &[String]) -> Result<()> {
         let conn = self.lock()?;
         conn.execute(
             "INSERT INTO publish_jobs
@@ -281,7 +321,37 @@ impl PublishStore {
                 job.completed_at
             ],
         )?;
+        for (position, media_id) in media_ids.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO publish_job_media (job_id, media_id, position)
+                 VALUES (?1, ?2, ?3)",
+                params![job.id, media_id, position as i64],
+            )?;
+        }
         Ok(())
+    }
+
+    /// Every asset a job carries, in carousel order.
+    ///
+    /// Falls back to the job's own `media_id` for rows written before album
+    /// posts existed, so an old job still reports the one file it had.
+    pub fn job_media(&self, job_id: &str) -> Result<Vec<MediaItem>> {
+        let ids: Vec<String> = {
+            let conn = self.lock()?;
+            let mut stmt = conn.prepare(
+                "SELECT media_id FROM publish_job_media WHERE job_id = ?1 ORDER BY position",
+            )?;
+            let rows = stmt.query_map(params![job_id], |r| r.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        let ids = if ids.is_empty() {
+            vec![self.job(job_id)?.media_id]
+        } else {
+            ids
+        };
+        // A missing media row is survivable - the job still knows what it was
+        // doing - so absent items are skipped rather than failing the read.
+        Ok(ids.iter().filter_map(|id| self.media(id).ok()).collect())
     }
 
     pub fn job(&self, id: &str) -> Result<JobRow> {
@@ -396,7 +466,8 @@ impl PublishStore {
     /// has to hold three lists to draw one.
     pub fn view(&self, row: JobRow) -> Result<PublishJob> {
         let account = self.account(&row.account_id).ok();
-        let media = self.media(&row.media_id).ok();
+        let assets = self.job_media(&row.id).unwrap_or_default();
+        let media_names: Vec<String> = assets.iter().map(|m| m.file_name.clone()).collect();
         Ok(PublishJob {
             account_name: account
                 .as_ref()
@@ -407,10 +478,12 @@ impl PublishStore {
                 .as_ref()
                 .map(|a| a.ldplayer_instance_id.clone())
                 .unwrap_or_default(),
-            media_name: media
-                .as_ref()
-                .map(|m| m.file_name.clone())
+            media_name: media_names
+                .first()
+                .cloned()
                 .unwrap_or_else(|| "(missing file)".into()),
+            media_count: media_names.len().max(1),
+            media_names,
             id: row.id,
             media_id: row.media_id,
             account_id: row.account_id,
@@ -426,6 +499,27 @@ impl PublishStore {
             completed_at: row.completed_at,
         })
     }
+}
+
+
+/// Add a column unless it is already there. Guarded by a `PRAGMA table_info`
+/// read rather than by catching the error, so a genuine failure still
+/// propagates instead of being swallowed as "already migrated".
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> Result<()> {
+    let existing: Vec<String> = {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        rows.collect::<std::result::Result<_, _>>()?
+    };
+    if !existing.iter().any(|c| c == column) {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), [])?;
+    }
+    Ok(())
 }
 
 fn account_from_row(r: &Row<'_>) -> rusqlite::Result<Account> {
@@ -502,7 +596,7 @@ mod tests {
             started_at: None,
             completed_at: None,
         };
-        store.add_job(&row).unwrap();
+        store.add_job(&row, &[media.id.clone()]).unwrap();
         row
     }
 
@@ -603,6 +697,134 @@ mod tests {
         let view = s.view(row).unwrap();
         assert_eq!(view.media_name, "my-video.mp4");
         assert_eq!(view.account_name, "FB");
+    }
+
+
+    /// A database written by an earlier build must gain the new columns rather
+    /// than erroring on open. This is what makes shipping an update safe.
+    #[test]
+    fn a_legacy_database_is_migrated_rather_than_broken() {
+        let conn = Connection::open_in_memory().unwrap();
+        // The schema as an early build of this feature might have written it:
+        // no `step`, no `screenshot_path`, no `duration_seconds`.
+        conn.execute_batch(
+            "CREATE TABLE publish_accounts (
+                 id TEXT PRIMARY KEY, name TEXT NOT NULL, platform TEXT NOT NULL,
+                 ldplayer_instance_id TEXT NOT NULL, package_name TEXT NOT NULL,
+                 created_at INTEGER NOT NULL,
+                 UNIQUE (ldplayer_instance_id, package_name));
+             CREATE TABLE publish_media (
+                 id TEXT PRIMARY KEY, path TEXT NOT NULL, file_name TEXT NOT NULL,
+                 size_bytes INTEGER NOT NULL, added_at INTEGER NOT NULL);
+             CREATE TABLE publish_jobs (
+                 id TEXT PRIMARY KEY, media_id TEXT NOT NULL, account_id TEXT NOT NULL,
+                 caption TEXT NOT NULL, status TEXT NOT NULL,
+                 progress REAL NOT NULL DEFAULT 0,
+                 error_code TEXT, error TEXT, created_at INTEGER NOT NULL,
+                 started_at INTEGER, completed_at INTEGER);
+             INSERT INTO publish_accounts VALUES
+                 ('a1', 'Old FB', 'facebook', 'ld:0', 'com.facebook.katana', 1);",
+        )
+        .unwrap();
+
+        let s = PublishStore::from_connection(conn).unwrap();
+
+        // Running twice must also be safe - every startup calls it.
+        {
+            let c = s.lock().unwrap();
+            PublishStore::migrate(&c).unwrap();
+        }
+
+        // The old row survived, and the new columns are usable.
+        let accounts = s.accounts().unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].name, "Old FB");
+
+        let m = media(&s);
+        let j = job(&s, &accounts[0], &m);
+        s.update_job(&j.id, JobStatus::Uploading, 0.2, Some("Copying"), None, None)
+            .unwrap();
+        s.set_job_screenshot(&j.id, "/tmp/shot.png").unwrap();
+        let row = s.job(&j.id).unwrap();
+        assert_eq!(row.step.as_deref(), Some("Copying"));
+        assert_eq!(row.screenshot_path.as_deref(), Some("/tmp/shot.png"));
+    }
+
+    #[test]
+    fn an_album_job_carries_every_asset_in_order() {
+        let s = store();
+        let a = s.add_account("IG", Platform::Instagram, "ld:1", "com.instagram.android").unwrap();
+
+        let mut ids = Vec::new();
+        for name in ["a.jpg", "b.jpg", "c.jpg"] {
+            let m = MediaItem {
+                id: uuid::Uuid::new_v4().to_string(),
+                path: format!("/tmp/{name}"),
+                file_name: name.into(),
+                size_bytes: 10,
+                duration_seconds: None,
+                added_at: now_unix(),
+            };
+            s.add_media(&m).unwrap();
+            ids.push(m.id);
+        }
+
+        let row = JobRow {
+            id: uuid::Uuid::new_v4().to_string(),
+            media_id: ids[0].clone(),
+            account_id: a.id.clone(),
+            caption: "album".into(),
+            status: JobStatus::Pending,
+            progress: 0.0,
+            step: None,
+            error_code: None,
+            error: None,
+            screenshot_path: None,
+            created_at: now_unix(),
+            started_at: None,
+            completed_at: None,
+        };
+        s.add_job(&row, &ids).unwrap();
+
+        let assets = s.job_media(&row.id).unwrap();
+        assert_eq!(
+            assets.iter().map(|m| m.file_name.as_str()).collect::<Vec<_>>(),
+            ["a.jpg", "b.jpg", "c.jpg"],
+            "carousel order is the user's choice and must survive a round trip"
+        );
+
+        let view = s.view(row).unwrap();
+        assert_eq!(view.media_count, 3);
+        assert_eq!(view.media_name, "a.jpg");
+    }
+
+    /// A job written before album posts existed has no join rows at all. It
+    /// must still report the one file it had, rather than rendering empty.
+    #[test]
+    fn a_job_with_no_join_rows_falls_back_to_its_own_media_id() {
+        let s = store();
+        let a = s.add_account("FB", Platform::Facebook, "ld:0", "com.facebook.katana").unwrap();
+        let m = media(&s);
+        let row = JobRow {
+            id: uuid::Uuid::new_v4().to_string(),
+            media_id: m.id.clone(),
+            account_id: a.id.clone(),
+            caption: String::new(),
+            status: JobStatus::Pending,
+            progress: 0.0,
+            step: None,
+            error_code: None,
+            error: None,
+            screenshot_path: None,
+            created_at: now_unix(),
+            started_at: None,
+            completed_at: None,
+        };
+        s.add_job(&row, &[]).unwrap();
+
+        let assets = s.job_media(&row.id).unwrap();
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].file_name, "my-video.mp4");
     }
 
     /// The rule from this module's header, enforced.

@@ -189,9 +189,22 @@ CREATE TABLE publish_jobs (
     completed_at    INTEGER
 );
 
+-- Album posts: one job, several assets, in a defined order.
+CREATE TABLE publish_job_media (
+    job_id   TEXT NOT NULL REFERENCES publish_jobs(id)  ON DELETE CASCADE,
+    media_id TEXT NOT NULL REFERENCES publish_media(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    PRIMARY KEY (job_id, position)
+);
+
 CREATE INDEX idx_jobs_status  ON publish_jobs(status);
 CREATE INDEX idx_jobs_created ON publish_jobs(created_at DESC);
 ```
+
+Schema changes go through `PublishStore::migrate`, which adds missing columns
+one at a time behind a `PRAGMA table_info` check. New columns must be nullable
+or carry a DEFAULT. This runs on every startup and is safe to re-run — it is
+what lets you ship an update without breaking an existing user's job history.
 
 **There is no column that can hold a credential**, and a guard test fails the
 build if one is added whose name contains `token`, `secret`, `cookie`,
@@ -234,7 +247,7 @@ is the truth.
 | `ldplayer_transfer_media` | Push + MediaStore index (testable alone) |
 | `ldplayer_launch_app` / `ldplayer_stop_app` | Open / force-stop an app |
 | `ldplayer_screenshot` | PNG to disk, returns path |
-| `ldplayer_pick_video` / `ldplayer_browse_path` | Native pickers |
+| `ldplayer_pick_media` / `ldplayer_browse_path` | Native pickers (video **and** photo) |
 
 ### Publishing commands (`commands/publish.rs`)
 
@@ -244,7 +257,7 @@ is the truth.
 | `publish_accounts` | Accounts joined with **live** device status |
 | `publish_discover_accounts` | Social apps found installed on a device |
 | `publish_add_account` / `publish_rename_account` / `publish_remove_account` | |
-| `publish_submit` | Queue one video to N accounts |
+| `publish_submit` | Queue N assets to M accounts, as `album` or `single` |
 | `publish_jobs` / `publish_summary` | Read the queue |
 | `publish_retry` / `publish_cancel` / `publish_remove_job` / `publish_clear_finished` | |
 
@@ -356,6 +369,44 @@ adb -s ... shell content query --uri content://media/external/video/media \
     --projection _id --where "_data='/sdcard/Movies/SocialPublisher/my-video.mp4'"
 ```
 
+### Album posts, and what Android will not let us do
+
+Selecting several files offers two modes:
+
+- **`single`** — each asset becomes its own post. *N* files × *M* accounts = *N×M*
+  jobs, each fully automated exactly like a one-file publish.
+- **`album`** — one job per account carrying every asset in order. *M* jobs.
+
+An album **cannot be pre-attached**, and this is a hard Android limit rather
+than a shortcut. `ACTION_SEND_MULTIPLE` needs `EXTRA_STREAM` as a
+`ParcelableArrayList<Uri>`, and `am start` has no flag that builds one: `--eu`
+takes a single URI, and `--esa` passes Strings, which every receiving app
+rejects with a `ClassCastException`. So an album job stages all files, indexes
+them, opens the app, and tells the person which order to tick them in — rather
+than firing an intent we know will fail.
+
+Order is therefore real data, stored as `publish_job_media.position` and shown
+in the hand-off message, because the gallery will not preserve it — selection
+order in the app's own picker is what decides the carousel.
+
+`publish_jobs.media_id` stays the first asset even though the join table also
+holds it. That redundancy is deliberate: the column is NOT NULL, and rows
+written before album posts existed have no join rows at all, so keeping it
+authoritative for "the first asset" means old jobs still render.
+
+### Videos and photos are filed separately
+
+Android keeps them in **different MediaStore tables**
+(`content://media/external/video/media` vs `.../images/media`), and every app's
+picker filters by one or the other. A photo indexed as video is invisible to a
+picker asking for photos, so `MediaCollection` (in [adb.rs]) decides three
+things together: which device folder to push to (`Movies` vs `Pictures`), which
+table to verify the index in, and the share MIME (`video/*` vs `image/*`).
+
+Unknown extensions are treated as video — this feature is video-first, and the
+wrong guess degrades to "the picker doesn't show it" rather than a failed
+transfer.
+
 ### Why `/sdcard/Movies` and not `/sdcard/Download`
 
 MediaStore indexes `Movies` as **video**, and every social app's picker reads
@@ -405,7 +456,9 @@ release, package names do not.
    device by address* — instance 0 is port 5555, instance 1 is 5557, and so on.)
    Then Recognised social apps appear; press
    **Add** on each. Rename them by clicking the name.
-4. **Publish** → choose a video, write a caption, tick accounts, **Publish**.
+4. **Publish** → choose one or more videos/photos, write a caption, pick
+   **One album post** or **Separate posts** (shown only when you pick more than
+   one file), tick accounts, **Publish**.
 5. Watch the queue. Each job ends either *Published* or *Needs you* — the
    latter means the app is open on that instance with your video attached.
 

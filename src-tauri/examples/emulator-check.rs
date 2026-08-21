@@ -13,6 +13,7 @@
 //!
 //! ```text
 //! cargo run --example emulator-check -- push ld:0 C:\videos\my-video.mp4
+//! cargo run --example emulator-check -- push ld:0 C:\photos\shot.jpg
 //! ```
 //!
 //! SECURITY: prints device names, serials and package names. No social-media
@@ -112,8 +113,15 @@ async fn main() {
         println!();
         println!("Transferring {} to {device_id}", file.display());
         match manager.transfer_media(None, device_id, &file).await {
-            Ok(remote) => {
-                println!("  copied and indexed at {remote}");
+            Ok(media) => {
+                println!("  copied and indexed at {}", media.remote_path);
+                println!("  filed as {:?}", media.collection);
+                match media.content_uri {
+                    Some(uri) => println!("  handed to apps as {uri}"),
+                    // Should not happen on the success path, but printing it
+                    // beats a diagnostic that quietly implies all is well.
+                    None => println!("  WARNING: no MediaStore URI - apps cannot be handed this file"),
+                }
                 println!("  it should now appear in the emulator's gallery");
             }
             Err(e) => println!("  failed: {e}"),
