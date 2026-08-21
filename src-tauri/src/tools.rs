@@ -58,7 +58,7 @@ pub fn status() -> ToolsStatus {
         ytdlp,
         ffmpeg,
         ready: ytdlp && ffmpeg,
-        can_install: cfg!(target_os = "macos"),
+        can_install: cfg!(any(target_os = "macos", target_os = "windows")),
     }
 }
 
@@ -146,55 +146,98 @@ fn make_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Fetch a zip whose single payload is `member` (ffmpeg or ffprobe), and drop
-/// that one file, flattened, into `dir`. Uses the system `unzip`, which every
-/// mac has, rather than pulling in a zip crate for one call.
-async fn fetch_zip_binary(url: &str, member: &str, dir: &Path) -> Result<()> {
+/// Pull one or more binaries out of a zip, flattened into `dir`.
+///
+/// Extracts in-process rather than shelling out to `unzip`: that binary lives
+/// at `/usr/bin/unzip` on macOS and does not exist on Windows at all, so the
+/// old approach could never have worked there.
+///
+/// Members are matched on FILE NAME, not full path. Windows ffmpeg builds nest
+/// their binaries (`ffmpeg-master-latest-win64-gpl/bin/ffmpeg.exe`) while the
+/// macOS ones sit at the root, and matching the leaf handles both.
+async fn fetch_zip_binaries(url: &str, members: &[&str], dir: &Path) -> Result<()> {
     let bytes = fetch_bytes(url).await?;
-
     tokio::fs::create_dir_all(dir).await.ok();
-    let tmp = dir.join(format!(".{member}.zip"));
-    tokio::fs::write(&tmp, &bytes)
-        .await
-        .map_err(|e| AppError::Internal(format!("write failed: {e}")))?;
 
-    // -o overwrite, -j junk paths (flatten), -d destination.
-    let out = tokio::process::Command::new("/usr/bin/unzip")
-        .args(["-o", "-j"])
-        .arg(&tmp)
-        .arg("-d")
-        .arg(dir)
-        .output()
-        .await
-        .map_err(|e| AppError::Internal(format!("unzip failed to start: {e}")))?;
-    tokio::fs::remove_file(&tmp).await.ok();
-    if !out.status.success() {
+    let wanted: Vec<String> = members.iter().map(|m| exe_name(m)).collect();
+    // The closure needs its own copy; the original is checked afterwards to
+    // confirm every requested binary actually turned up.
+    let looking_for = wanted.clone();
+    let dir = dir.to_path_buf();
+
+    // `zip` is synchronous and these archives run to tens of MB, so unpack off
+    // the async runtime.
+    let found = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
+        let cursor = std::io::Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(cursor)
+            .map_err(|e| AppError::Internal(format!("the archive could not be opened: {e}")))?;
+
+        let mut found = Vec::new();
+        for i in 0..archive.len() {
+            let mut entry = archive
+                .by_index(i)
+                .map_err(|e| AppError::Internal(format!("archive entry unreadable: {e}")))?;
+            if entry.is_dir() {
+                continue;
+            }
+            // `enclosed_name` rejects paths that escape the destination, so a
+            // hostile archive cannot write outside `dir`.
+            let Some(path) = entry.enclosed_name() else {
+                continue;
+            };
+            let Some(leaf) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+                continue;
+            };
+            if !looking_for.contains(&leaf) {
+                continue;
+            }
+
+            let dest = dir.join(&leaf);
+            let mut out = std::fs::File::create(&dest)
+                .map_err(|e| AppError::Internal(format!("could not write {leaf}: {e}")))?;
+            std::io::copy(&mut entry, &mut out)
+                .map_err(|e| AppError::Internal(format!("could not extract {leaf}: {e}")))?;
+            drop(out);
+
+            make_executable(&dest)?;
+            found.push(leaf);
+        }
+        Ok(found)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("extraction task failed: {e}")))??;
+
+    let missing: Vec<&String> = wanted.iter().filter(|w| !found.contains(w)).collect();
+    if !missing.is_empty() {
         return Err(AppError::Internal(format!(
-            "unzip failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            "the download did not contain {missing:?}"
         )));
     }
-    let extracted = dir.join(member);
-    if !extracted.is_file() {
-        return Err(AppError::Internal(format!(
-            "{member} not found in the downloaded archive"
-        )));
+    Ok(())
+}
+
+/// Platform-correct executable name.
+fn exe_name(stem: &str) -> String {
+    if cfg!(windows) {
+        format!("{stem}.exe")
+    } else {
+        stem.to_string()
     }
-    make_executable(&extracted)
 }
 
 /// Download whatever is missing into `bin_dir`, emitting progress as it goes.
 /// Already-present tools are skipped, so re-running is cheap and safe.
 pub async fn install(app: &AppHandle) -> Result<ToolsStatus> {
-    if !cfg!(target_os = "macos") {
+    if !cfg!(any(target_os = "macos", target_os = "windows")) {
         return Err(AppError::Internal(
-            "automatic setup is only available on macOS right now".into(),
+            "automatic setup is available on macOS and Windows; on Linux install \
+             yt-dlp and ffmpeg with your package manager"
+                .into(),
         ));
     }
 
     let dir = bin_dir(app)?;
     tokio::fs::create_dir_all(&dir).await.ok();
-    let arch = mac_arch();
     let before = status();
     let total = 3u32;
 
@@ -211,13 +254,17 @@ pub async fn install(app: &AppHandle) -> Result<ToolsStatus> {
         );
     };
 
-    // 1. yt-dlp — a single universal binary published by the project.
+    // 1. yt-dlp - a single binary published by the project, no archive.
     if before.ytdlp {
         emit("yt-dlp", "skipped", 1, None);
     } else {
         emit("yt-dlp", "downloading", 1, None);
-        let url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
-        match fetch_to(url, &dir.join("yt-dlp")).await {
+        let url = if cfg!(target_os = "windows") {
+            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+        } else {
+            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
+        };
+        match fetch_to(url, &dir.join(exe_name("yt-dlp"))).await {
             Ok(()) => emit("yt-dlp", "installed", 1, None),
             Err(e) => {
                 emit("yt-dlp", "failed", 1, Some(e.to_string()));
@@ -226,17 +273,36 @@ pub async fn install(app: &AppHandle) -> Result<ToolsStatus> {
         }
     }
 
-    // 2 & 3. ffmpeg + ffprobe — per-arch static builds, one zip each.
+    // 2 & 3. ffmpeg + ffprobe.
     if before.ffmpeg {
         emit("ffmpeg", "skipped", 2, None);
         emit("ffprobe", "skipped", 3, None);
+    } else if cfg!(target_os = "windows") {
+        // One archive carries both binaries, so download it once rather than
+        // pulling ~100 MB twice. The macOS source has no Windows builds at all
+        // - every path there 404s - so this uses BtbN's release instead.
+        emit("ffmpeg", "downloading", 2, None);
+        emit("ffprobe", "downloading", 3, None);
+        let url = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip";
+        match fetch_zip_binaries(url, &["ffmpeg", "ffprobe"], &dir).await {
+            Ok(()) => {
+                emit("ffmpeg", "installed", 2, None);
+                emit("ffprobe", "installed", 3, None);
+            }
+            Err(e) => {
+                emit("ffmpeg", "failed", 2, Some(e.to_string()));
+                emit("ffprobe", "failed", 3, Some(e.to_string()));
+                return Err(e);
+            }
+        }
     } else {
+        let arch = mac_arch();
         for (i, member) in [(2u32, "ffmpeg"), (3u32, "ffprobe")] {
             emit(member, "downloading", i, None);
             let url = format!(
                 "https://ffmpeg.martin-riedl.de/redirect/latest/macos/{arch}/release/{member}.zip"
             );
-            match fetch_zip_binary(&url, member, &dir).await {
+            match fetch_zip_binaries(&url, &[member], &dir).await {
                 Ok(()) => emit(member, "installed", i, None),
                 Err(e) => {
                     emit(member, "failed", i, Some(e.to_string()));

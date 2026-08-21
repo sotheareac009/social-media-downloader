@@ -57,11 +57,21 @@ pub fn run() {
 
             // Make first-launch-installed tools discoverable: their folder goes
             // on PATH before anything tries to locate yt-dlp or ffmpeg.
+            //
+            // `join_paths` rather than formatting with ':' - that separator is
+            // Unix-only, and hardcoding it on Windows (where it is ';') produced
+            // a corrupt PATH entry, so an auto-installed yt-dlp.exe was never
+            // found and the app reported it as not installed.
             {
                 let bin = data_dir.join("bin");
                 let _ = std::fs::create_dir_all(&bin);
-                let prev = std::env::var("PATH").unwrap_or_default();
-                std::env::set_var("PATH", format!("{}:{}", bin.display(), prev));
+
+                let existing = std::env::var_os("PATH").unwrap_or_default();
+                let mut entries = vec![bin];
+                entries.extend(std::env::split_paths(&existing));
+                if let Ok(joined) = std::env::join_paths(entries) {
+                    std::env::set_var("PATH", joined);
+                }
             }
 
             let db = Arc::new(AccountDb::open(&data_dir.join("accounts.sqlite3"))?);
