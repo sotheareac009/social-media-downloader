@@ -1,0 +1,5 @@
+# Populated at build time by .github/workflows (see "Fetch bundled tools").
+# These are ~190 MB of third-party binaries; they are shipped inside the
+# installer but deliberately never committed.
+*
+!.gitignore

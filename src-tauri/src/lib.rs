@@ -68,6 +68,18 @@ pub fn run() {
 
                 let existing = std::env::var_os("PATH").unwrap_or_default();
                 let mut entries = vec![bin];
+
+                // Binaries shipped inside the installer (Windows bundles
+                // yt-dlp/ffmpeg/ffprobe as resources). Added AFTER the app-data
+                // folder so a tool the user updated at runtime still wins over
+                // the baseline copy frozen into the installer.
+                if let Ok(res) = app.path().resource_dir() {
+                    let bundled = res.join("bin");
+                    if bundled.is_dir() {
+                        entries.push(bundled);
+                    }
+                }
+
                 entries.extend(std::env::split_paths(&existing));
                 if let Ok(joined) = std::env::join_paths(entries) {
                     std::env::set_var("PATH", joined);
