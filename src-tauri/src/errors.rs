@@ -169,6 +169,13 @@ pub enum AppError {
     #[error("the emulator `{0}` is not responding; start it in LDPlayer and try again")]
     InstanceOffline(String),
 
+    /// Nothing is listening on the instance's ADB port. Overwhelmingly this
+    /// means ADB debugging is switched off inside LDPlayer, which is its
+    /// default on several builds — so this gets its own variant rather than
+    /// being reported as a generic connection failure the user cannot act on.
+    #[error("{0} isn't accepting ADB connections. In LDPlayer, open that instance's Settings → Other settings, set ADB debugging to \"Open local connection\", then restart the instance.")]
+    AdbDebuggingOff(String),
+
     /// Asked to start or stop something this app does not control - a phone,
     /// or another vendor's emulator.
     #[error("`{0}` is not an LDPlayer instance, so this app can't start or stop it")]
@@ -257,6 +264,7 @@ impl AppError {
             Self::InvalidDeviceAddress(_) => "invalid_device_address",
             Self::InstanceNotFound(_) => "instance_not_found",
             Self::InstanceOffline(_) => "instance_offline",
+            Self::AdbDebuggingOff(_) => "adb_debugging_off",
             Self::NotAnLdplayerInstance(_) => "not_an_ldplayer_instance",
             Self::MediaFileMissing(_) => "media_file_missing",
             Self::MediaTransferFailed(_) => "media_transfer_failed",

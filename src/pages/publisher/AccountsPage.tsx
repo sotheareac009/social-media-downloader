@@ -51,14 +51,21 @@ export function PublisherAccountsPage() {
   const toast = useToast();
   const [busy, setBusy] = useState<string | null>(null);
 
+  // Connect failures carry the fix in the message ("turn on ADB debugging"),
+  // and a toast that vanishes in four seconds is the wrong place for an
+  // instruction. Keep it pinned to the device it belongs to.
+  const [failure, setFailure] = useState<{ id: string; text: string } | null>(null);
+
   const act = async (id: string, label: string, run: () => Promise<unknown>) => {
     setBusy(id);
+    setFailure((prev) => (prev?.id === id ? null : prev));
     try {
       await run();
       await refreshDevices();
       await refreshAccounts();
     } catch (e) {
-      toast("error", `${label} failed: ${message(e)}`);
+      setFailure({ id, text: message(e) });
+      toast("error", `${label} failed`);
     } finally {
       setBusy(null);
     }
@@ -83,8 +90,23 @@ export function PublisherAccountsPage() {
         <div className="notice notice--warn">
           <AlertIcon size={16} />
           <div>
-            <strong>ADB was not found.</strong> Install LDPlayer, or set the ADB path in
-            Settings. Nothing on this page can work without it.
+            <strong>ADB was not found.</strong>{" "}
+            {environment.ldplayer_supported ? (
+              <>
+                If LDPlayer is installed, it's somewhere this app didn't look — set{" "}
+                <em>LDPlayer folder</em> in Settings to the folder containing{" "}
+                <code>ldconsole.exe</code> (right-click the LDPlayer shortcut → Open file
+                location), then press Re-detect.
+              </>
+            ) : (
+              <>
+                LDPlayer is Windows-only. Install Android platform-tools, or set the ADB
+                path in Settings.
+              </>
+            )}
+            {/* Naming the folders turns "not found" into something the user can
+                act on: they can see at a glance that their drive isn't listed. */}
+            {environment.searched.length > 0 && <SearchedPaths paths={environment.searched} />}
           </div>
         </div>
       )}
@@ -128,6 +150,7 @@ export function PublisherAccountsPage() {
                 device={device}
                 accounts={accounts.filter((a) => a.ldplayer_instance_id === device.id)}
                 busy={busy === device.id}
+                failure={failure?.id === device.id ? failure.text : null}
                 onStart={() => act(device.id, "Start", () => ldplayerStart(device.id))}
                 onStop={() => act(device.id, "Stop", () => ldplayerStop(device.id))}
                 onConnect={() => act(device.id, "Connect", () => ldplayerConnect(device.id))}
@@ -227,10 +250,30 @@ function ManualConnect({ onConnected }: { onConnected: () => Promise<void> }) {
   );
 }
 
+/** The folders detection tried, collapsed by default. */
+function SearchedPaths({ paths }: { paths: string[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="searched">
+      <button className="linkbtn" type="button" onClick={() => setOpen((o) => !o)}>
+        {open ? "Hide" : `Show the ${paths.length} folders that were checked`}
+      </button>
+      {open && (
+        <ul className="searched__list">
+          {paths.map((p) => (
+            <li key={p}>{p}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function DeviceCard({
   device,
   accounts,
   busy,
+  failure,
   onStart,
   onStop,
   onConnect,
@@ -239,6 +282,7 @@ function DeviceCard({
   device: DeviceView;
   accounts: AccountView[];
   busy: boolean;
+  failure: string | null;
   onStart: () => void;
   onStop: () => void;
   onConnect: () => void;
@@ -300,7 +344,8 @@ function DeviceCard({
         </StatusBadge>
       </header>
 
-      {device.error && <div className="devcard__error">{device.error}</div>}
+      {failure && <div className="devcard__error devcard__error--strong">{failure}</div>}
+      {!failure && device.error && <div className="devcard__error">{device.error}</div>}
 
       <div className="devcard__accounts">
         {accounts.length === 0 ? (

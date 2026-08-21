@@ -249,6 +249,12 @@ impl Adb {
         if text.contains("connected to") {
             return Ok(());
         }
+        // "Refused" means the port is closed, not that the address is wrong.
+        // For an emulator that is visibly running, that has one overwhelming
+        // cause, and saying so beats printing a winsock error code.
+        if is_refusal(&text) {
+            return Err(AppError::AdbDebuggingOff(endpoint.to_string()));
+        }
         Err(AppError::AdbFailed(format!(
             "could not connect to {endpoint}: {}",
             first_line(&sanitize(&out.stderr, &out.stdout))
@@ -581,6 +587,38 @@ impl Adb {
     }
 }
 
+/// Whether adb's failure text describes a closed port rather than a bad
+/// address. `10061` is winsock's WSAECONNREFUSED, which is how this presents
+/// on Windows; the wording differs per platform, so both are matched.
+fn is_refusal(lower: &str) -> bool {
+    lower.contains("refused")
+        || lower.contains("10061")
+        || lower.contains("cannot connect to")
+        || lower.contains("connection reset")
+}
+
+/// Whether a string looks like an adb serial at all.
+///
+/// `ldconsole` prints adb's own errors on stdout, so "error: no devices" would
+/// otherwise be adopted as a serial and every later `adb -s error:` command
+/// would fail for a reason nobody could trace back to here.
+pub fn looks_like_serial(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() || s.len() > 64 || s.contains(char::is_whitespace) {
+        return false;
+    }
+    let lower = s.to_lowercase();
+    if lower.contains("error") || lower.contains("unknown") || lower.contains("daemon") {
+        return false;
+    }
+    // Either `emulator-5554` or `host:port`; both are what LDPlayer produces.
+    s.starts_with("emulator-")
+        || s.rsplit_once(':').is_some_and(|(h, p)| {
+            !h.is_empty() && p.parse::<u16>().is_ok()
+        })
+        || s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// Quote one argument for the device's `sh`. Paths we build contain no quotes,
 /// but a user-chosen filename can, and an unquoted one would end the command.
 pub fn shell_quote(s: &str) -> String {
@@ -698,6 +736,30 @@ mod tests {
             "indexing into the wrong table hides the file from every picker"
         );
         assert_eq!(MediaCollection::Image.mime(), "image/*");
+    }
+
+    #[test]
+    fn adb_error_text_is_not_mistaken_for_a_serial() {
+        for bad in [
+            "error: no devices/emulators found",
+            "* daemon not running",
+            "unknown",
+            "",
+            "   ",
+            "cannot connect to 127.0.0.1:5555",
+        ] {
+            assert!(!looks_like_serial(bad), "{bad:?} should be refused");
+        }
+        for good in ["emulator-5554", "127.0.0.1:5555", "ABCD1234"] {
+            assert!(looks_like_serial(good), "{good:?} should be accepted");
+        }
+    }
+
+    #[test]
+    fn a_refused_connection_is_recognised_on_every_platform() {
+        assert!(is_refusal("cannot connect to 127.0.0.1:5555: no connection could be made because the target machine actively refused it. (10061)"));
+        assert!(is_refusal("failed to connect to '127.0.0.1:5555': connection refused"));
+        assert!(!is_refusal("connected to 127.0.0.1:5555"));
     }
 
     #[test]

@@ -47,6 +47,14 @@ pub mod events {
 /// slack, not a target.
 const BOOT_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// How long to keep trying an instance that is *already* running.
+///
+/// Much shorter than a cold boot, on purpose. An instance LDPlayer reports as
+/// running has had its chance to open the ADB port; if it has not, waiting
+/// three minutes changes nothing and only delays a message the user could have
+/// acted on immediately.
+const RUNNING_TIMEOUT: Duration = Duration::from_secs(40);
+
 /// Whether this machine can drive emulators at all, and how.
 #[derive(Debug, Clone, Serialize)]
 pub struct DeviceEnvironment {
@@ -65,6 +73,13 @@ pub struct DeviceEnvironment {
     pub max_concurrent: usize,
     pub verbose_logging: bool,
     pub cleanup_after_publish: bool,
+    /// Folders detection looked in, when it found nothing.
+    ///
+    /// Surfaced so "not found" becomes "we looked here, here and here" — the
+    /// difference between a fix the user can make in a minute and a support
+    /// conversation. Empty once LDPlayer *is* found, since the list is then
+    /// just noise.
+    pub searched: Vec<String>,
 }
 
 /// How the app came to know about a device.
@@ -230,6 +245,16 @@ impl LdPlayerManager {
             Some(a) => a.version().await.ok(),
             None => None,
         };
+        // Only worth computing when there is something to explain.
+        let searched = if console.is_none() && cfg!(windows) {
+            crate::ldplayer::console::candidate_dirs()
+                .into_iter()
+                .map(|p| p.display().to_string())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         DeviceEnvironment {
             adb_available: adb.is_some(),
             adb_path: adb.as_ref().map(|a| a.path().display().to_string()),
@@ -241,6 +266,7 @@ impl LdPlayerManager {
             max_concurrent: s.max_concurrent,
             verbose_logging: s.verbose_logging,
             cleanup_after_publish: s.cleanup_after_publish,
+            searched,
         }
     }
 
@@ -464,14 +490,18 @@ impl LdPlayerManager {
         let index = device_index(device_id)?;
         let console = self.console()?;
 
-        if !console.is_running(index).await.unwrap_or(false) {
+        let was_running = console.is_running(index).await.unwrap_or(false);
+        if !was_running {
             self.log(app, "info", Some(device_id), "starting LDPlayer instance");
             self.booting.lock().expect("booting lock").push(index);
             console.launch(index).await?;
         }
 
-        let serial = self.wait_for_serial(index).await?;
-        adb.wait_for_device(&serial, BOOT_TIMEOUT).await?;
+        // A cold boot deserves patience; a running instance does not.
+        let budget = if was_running { RUNNING_TIMEOUT } else { BOOT_TIMEOUT };
+
+        let serial = self.wait_for_serial(app, index, budget).await?;
+        adb.wait_for_device(&serial, budget).await?;
         self.booting.lock().expect("booting lock").retain(|i| *i != index);
         self.log(app, "info", Some(device_id), format!("online as {serial}"));
         Ok(serial)
@@ -479,14 +509,36 @@ impl LdPlayerManager {
 
     /// A just-launched instance has no adb port for a few seconds, so the
     /// serial lookup has to be retried rather than failed.
-    async fn wait_for_serial(&self, index: u32) -> Result<String> {
-        let deadline = std::time::Instant::now() + BOOT_TIMEOUT;
+    ///
+    /// The *last* error is what surfaces, not a generic timeout. That matters:
+    /// "nothing is listening on this port, turn on ADB debugging" is
+    /// actionable, while "not responding" sends people to restart an emulator
+    /// that was never the problem.
+    async fn wait_for_serial(
+        &self,
+        app: Option<&AppHandle>,
+        index: u32,
+        budget: Duration,
+    ) -> Result<String> {
+        let deadline = std::time::Instant::now() + budget;
+        let mut last: Option<AppError> = None;
         loop {
-            if let Ok(s) = self.serial_for(index).await {
-                return Ok(s);
+            match self.serial_for(index).await {
+                Ok(s) => return Ok(s),
+                Err(e) => {
+                    if last.as_ref().map(|p| p.code()) != Some(e.code()) {
+                        self.log(
+                            app,
+                            "warn",
+                            Some(&format!("ld:{index}")),
+                            format!("not reachable yet: {e}"),
+                        );
+                    }
+                    last = Some(e);
+                }
             }
             if std::time::Instant::now() >= deadline {
-                return Err(AppError::InstanceOffline(index.to_string()));
+                return Err(last.unwrap_or(AppError::InstanceOffline(index.to_string())));
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }

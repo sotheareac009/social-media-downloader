@@ -41,6 +41,8 @@ export interface DeviceEnvironment {
   max_concurrent: number;
   verbose_logging: boolean;
   cleanup_after_publish: boolean;
+  /** Folders detection looked in. Only populated when LDPlayer wasn't found. */
+  searched: string[];
 }
 
 export interface DeviceSettings {

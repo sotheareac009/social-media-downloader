@@ -24,17 +24,31 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Where LDPlayer installs itself when nobody changes the defaults. Checked in
 /// newest-first order so a machine with both 9 and 4 gets the modern one.
-const COMMON_DIRS: &[&str] = &[
-    r"C:\LDPlayer\LDPlayer9",
-    r"C:\Program Files\LDPlayer\LDPlayer9",
-    r"C:\Program Files (x86)\LDPlayer\LDPlayer9",
-    r"D:\LDPlayer\LDPlayer9",
-    r"C:\LDPlayer\LDPlayer64",
-    r"C:\LDPlayer\LDPlayer4.0",
-    r"C:\Program Files\LDPlayer\LDPlayer4.0",
-    r"C:\ChangZhi\dnplayer2",
-    r"C:\LDPlayer\dnplayer2",
+/// Where LDPlayer installs itself when nobody changes the defaults.
+///
+/// The registry is asked first and is authoritative; this list only catches
+/// installs the registry lost track of (a repaired install, a folder moved by
+/// hand). Ordered newest-first so a machine with both 9 and 4 gets the modern
+/// one.
+const COMMON_SUBDIRS: &[&str] = &[
+    r"LDPlayer\LDPlayer9",
+    r"LDPlayer9",
+    r"Program Files\LDPlayer\LDPlayer9",
+    r"Program Files (x86)\LDPlayer\LDPlayer9",
+    r"LDPlayer\LDPlayer64",
+    r"LDPlayer\LDPlayer4.0",
+    r"LDPlayer4.0",
+    r"Program Files\LDPlayer\LDPlayer4.0",
+    r"ChangZhi\dnplayer2",
+    r"LDPlayer\dnplayer2",
+    r"dnplayer2",
 ];
+
+/// Drives to try each subdirectory under.
+///
+/// People routinely install emulators on a second drive precisely because they
+/// are large, so checking only C: is why "installed but not found" happens.
+const DRIVES: &[&str] = &["C:", "D:", "E:", "F:"];
 
 /// The console binary's name changed between major versions; both are still in
 /// the wild, and an installation only ever has one of them.
@@ -99,13 +113,8 @@ impl LdConsole {
         if !cfg!(windows) {
             return None;
         }
-        for dir in registry_dirs().iter().map(PathBuf::from) {
+        for dir in candidate_dirs() {
             if let Some(found) = console_in(&dir) {
-                return Some(Self::new(found));
-            }
-        }
-        for dir in COMMON_DIRS {
-            if let Some(found) = console_in(Path::new(dir)) {
                 return Some(Self::new(found));
             }
         }
@@ -200,10 +209,14 @@ impl LdConsole {
                 "get-serialno",
             ])
             .await?;
+        // Validate rather than take the first non-empty line: ldconsole prints
+        // adb's own errors here, and adopting "error: no devices/emulators
+        // found" as a serial makes every later command fail for a reason
+        // nobody could trace back to this function.
         let serial = out
             .lines()
             .map(str::trim)
-            .find(|l| !l.is_empty() && !l.starts_with('*') && *l != "unknown")
+            .find(|l| crate::ldplayer::adb::looks_like_serial(l))
             .ok_or_else(|| AppError::InstanceOffline(index.to_string()))?;
         Ok(serial.to_string())
     }
@@ -222,40 +235,96 @@ fn console_in(dir: &Path) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// Every folder detection will look in, in order.
+///
+/// Public so the Settings page can show it. "We looked in these twelve places
+/// and found nothing" is an actionable message; "not found" is not, and it is
+/// what turns a five-minute fix into a support conversation.
+pub fn candidate_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = registry_dirs().into_iter().map(PathBuf::from).collect();
+    for drive in DRIVES {
+        for sub in COMMON_SUBDIRS {
+            dirs.push(PathBuf::from(format!(r"{drive}\{sub}")));
+        }
+    }
+    dirs.dedup();
+    dirs
+}
+
 /// Install directories recorded by LDPlayer's installer.
 ///
-/// Shelling out to `reg` rather than adding a registry crate: this is one
-/// read, on one platform, and `reg.exe` is present on every Windows.
+/// Three sources, because no single one is reliable across versions: the
+/// vendor key (present on a clean install), the same key per-user (present
+/// when installed without admin rights), and Windows' own uninstall entry
+/// (present whenever the installer registered at all, and the one that
+/// survives when the vendor key does not).
+///
+/// Shelling out to `reg` rather than adding a registry crate: a few reads, on
+/// one platform, and `reg.exe` is on every Windows.
 #[cfg(windows)]
 fn registry_dirs() -> Vec<String> {
-    const KEYS: &[&str] = &[
-        r"HKEY_LOCAL_MACHINE\SOFTWARE\leidian\LDPlayer9",
-        r"HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\leidian\LDPlayer9",
-        r"HKEY_LOCAL_MACHINE\SOFTWARE\leidian\LDPlayer",
-        r"HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\leidian\LDPlayer",
-        r"HKEY_LOCAL_MACHINE\SOFTWARE\XuanZhi\LDPlayer",
+    /// (key, value name)
+    const SOURCES: &[(&str, &str)] = &[
+        (r"HKLM\SOFTWARE\leidian\LDPlayer9", "InstallDir"),
+        (r"HKLM\SOFTWARE\WOW6432Node\leidian\LDPlayer9", "InstallDir"),
+        (r"HKLM\SOFTWARE\leidian\LDPlayer", "InstallDir"),
+        (r"HKLM\SOFTWARE\WOW6432Node\leidian\LDPlayer", "InstallDir"),
+        (r"HKLM\SOFTWARE\XuanZhi\LDPlayer", "InstallDir"),
+        (r"HKCU\SOFTWARE\leidian\LDPlayer9", "InstallDir"),
+        (r"HKCU\SOFTWARE\leidian\LDPlayer", "InstallDir"),
+        (
+            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LDPlayer9",
+            "InstallLocation",
+        ),
+        (
+            r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\LDPlayer9",
+            "InstallLocation",
+        ),
+        (
+            r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\LDPlayer",
+            "InstallLocation",
+        ),
     ];
+
     let mut out = Vec::new();
-    for key in KEYS {
-        let Ok(res) = std::process::Command::new("reg")
-            .args(["query", key, "/v", "InstallDir"])
-            .stdin(Stdio::null())
-            .output()
-        else {
-            continue;
-        };
+    for (key, value) in SOURCES {
+        let mut cmd = std::process::Command::new("reg");
+        cmd.args(["query", key, "/v", value]).stdin(Stdio::null());
+        hide_console(&mut cmd);
+        let Ok(res) = cmd.output() else { continue };
+
         let text = String::from_utf8_lossy(&res.stdout);
-        for line in text.lines() {
-            if let Some(rest) = line.trim().strip_prefix("InstallDir") {
-                if let Some(value) = rest.split_once("REG_SZ").map(|(_, v)| v.trim()) {
-                    if !value.is_empty() {
-                        out.push(value.to_string());
-                    }
-                }
+        for path in parse_reg_values(&text, value) {
+            if !out.contains(&path) {
+                out.push(path);
             }
         }
     }
     out
+}
+
+/// Pull the data out of `reg query` output lines like:
+///
+/// ```text
+///     InstallDir    REG_SZ    C:\LDPlayer\LDPlayer9\
+/// ```
+#[cfg(windows)]
+fn parse_reg_values(text: &str, value_name: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix(value_name)?;
+            let (_, data) = rest.split_once("REG_SZ")?;
+            let data = data.trim().trim_end_matches('\\');
+            (!data.is_empty()).then(|| data.to_string())
+        })
+        .collect()
+}
+
+/// Keep `reg query` from flashing a console window at startup.
+#[cfg(windows)]
+fn hide_console(cmd: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
 }
 
 #[cfg(not(windows))]
@@ -326,6 +395,26 @@ mod tests {
     #[test]
     fn ignores_junk_lines() {
         assert!(parse_list2("\n\nsome banner text\n").is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reg_query_output_is_parsed() {
+        let out = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\leidian\\LDPlayer9\r\n    \
+                   InstallDir    REG_SZ    C:\\LDPlayer\\LDPlayer9\\\r\n\r\n";
+        assert_eq!(
+            parse_reg_values(out, "InstallDir"),
+            vec![r"C:\LDPlayer\LDPlayer9".to_string()],
+            "the trailing separator must be trimmed or every join gets a double slash"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn candidates_cover_more_than_the_c_drive() {
+        let dirs = candidate_dirs();
+        assert!(dirs.iter().any(|d| d.starts_with("D:")), "second drives are common");
+        assert!(dirs.len() >= COMMON_SUBDIRS.len() * DRIVES.len());
     }
 
     #[test]

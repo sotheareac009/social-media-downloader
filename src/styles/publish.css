@@ -1056,3 +1056,31 @@
 }
 
 .job__files { color: var(--text-tertiary); }
+
+/* The folders detection tried. Collapsed by default — it is a dozen lines of
+   paths, useful exactly once. */
+.searched { margin-top: 8px; }
+
+.searched__list {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  list-style: none;
+  max-height: 190px;
+  overflow-y: auto;
+  border-radius: var(--r-sm);
+  background: var(--surface-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+}
+
+/* A failed action's message, pinned to the device rather than left in a toast:
+   these carry the fix ("turn on ADB debugging"), and instructions must not
+   disappear after four seconds. */
+.devcard__error--strong {
+  border: 1px solid var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--danger);
+  line-height: 1.5;
+}
