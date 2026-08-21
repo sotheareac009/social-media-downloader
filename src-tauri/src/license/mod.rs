@@ -384,6 +384,20 @@ mod tests {
     fn licensing_is_off_when_no_public_key_is_compiled_in() {
         let _guard = env_guard();
         std::env::remove_var("LICENSE_PUBLIC_KEY");
+
+        // A release build bakes the key in with `option_env!`, so "no key
+        // configured" is not reachable there - removing the runtime variable
+        // cannot unset a compile-time one. CI sets LICENSE_PUBLIC_KEY for the
+        // whole job, so this test has to describe both kinds of build rather
+        // than assuming the developer's.
+        if option_env!("LICENSE_PUBLIC_KEY").is_some() {
+            assert!(
+                is_enforced(),
+                "a build with the key compiled in must enforce licensing"
+            );
+            return;
+        }
+
         assert!(!is_enforced(), "dev builds must not be gated");
         assert_eq!(verify("SMD1-AAAAAA").unwrap_err().code(), "license_not_configured");
     }
