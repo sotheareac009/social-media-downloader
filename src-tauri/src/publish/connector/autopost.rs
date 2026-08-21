@@ -154,6 +154,33 @@ fn has_labels(nodes: &[UiNode]) -> bool {
         .any(|n| !n.text.trim().is_empty() || !n.content_desc.trim().is_empty())
 }
 
+/// Whether the caption is already sitting in a text field on this screen.
+///
+/// WHY THIS EXISTS: the share intent delivers the caption via `EXTRA_TEXT`,
+/// and once it lands the field stops reading "What's on your mind?" and starts
+/// reading the caption. Matchers written against the placeholder therefore
+/// find nothing on exactly the posts where the hand-off worked best — the step
+/// waited out its timeout and handed back a composer that was complete.
+///
+/// Restricted to real text-entry widgets. "Does any node contain the caption"
+/// would also match the caption rendered elsewhere on screen, and a short one
+/// ("Hi") turns up inside ordinary words.
+fn caption_field_holds_it(nodes: &[UiNode], caption: &str) -> bool {
+    nodes.iter().any(|n| {
+        n.class.contains("EditText") && is_safe_caption_field(n) && field_already_has(n, caption)
+    })
+}
+
+/// Whether the caption appears anywhere on screen, in any kind of node.
+///
+/// Looser, and used only once the placeholder has already failed to appear:
+/// at that point the choice is between posting with a caption the app itself
+/// inserted and handing back a finished composer, and the first is what the
+/// person asked for.
+fn caption_is_on_screen(nodes: &[UiNode], caption: &str) -> bool {
+    nodes.iter().any(|n| field_already_has(n, caption))
+}
+
 /// Whether a field already contains the caption.
 ///
 /// Compared on a prefix rather than in full: apps ellipsize long values in the
@@ -203,38 +230,59 @@ fn visible_labels(nodes: &[UiNode]) -> String {
 /// button on a different screen size, and these instances vary.
 pub fn recipe(platform: Platform) -> Vec<Step> {
     match platform {
-        // The share intent already attaches the video AND the caption, so the
-        // only thing left is the Post button. That makes Facebook both the
-        // most reliable and the least fragile of the four.
-        // Labels below come from a real Facebook composer screenshot, not a
-        // guess: "Create post", "Say something about this photo…", "POST".
+        // The share intent attaches the video and, for most post types, the
+        // caption too — so little is left to drive here, which makes Facebook
+        // the least fragile of the four. Labels below come from real composer
+        // screenshots, not guesses: "Create post", "New post", "What's on your
+        // mind?", "Say something about this photo…", "Next", "Post".
         Platform::Facebook => vec![
             Step::Settle(2),
             Step::expect(
                 "Facebook's composer",
                 vec![
+                    // "New post" is the current header; "Create post" is the
+                    // older one. Both stay, because instances run different
+                    // app versions. The chips are the sturdier signal — they
+                    // are unmistakably the composer and survived the redesign
+                    // that renamed the header.
+                    Match::TextContains("New post".into()),
                     Match::TextContains("Create post".into()),
+                    Match::TextContains("Tag/collaborate".into()),
+                    Match::TextContains("Feeling/activity".into()),
                     Match::TextContains("What's on your mind".into()),
                     Match::TextContains("Say something about".into()),
                     Match::Text("Post".into()),
                 ],
             ),
-            Step::maybe("the composer's Next button", vec![Match::Text("Next".into())]),
             // The share intent usually delivers the caption via EXTRA_TEXT, but
             // not for every post type — the photo composer comes up empty. So
             // type it, and let the step skip itself when it is already there.
+            //
+            // BEFORE Next, not after: "What's on your mind?" lives on the
+            // first screen of the current composer, and Next is what leaves
+            // that screen. Tapping Next first left the caption step waiting
+            // out its timeout on a screen the field was no longer on, which
+            // handed back a post that was one tap from going out.
             Step::Caption {
                 into: vec![
                     Match::TextContains("Say something about".into()),
                     Match::TextContains("What's on your mind".into()),
                 ],
             },
+            Step::maybe("the composer's Next button", vec![Match::Text("Next".into())]),
+            // Next lands on a "Post settings" screen whose submit button is
+            // SHARE, not Post — so both names are here, and `Match::Text` is
+            // an exact (case-insensitive) comparison, which is what keeps
+            // "Share" off that screen's "Share to Story" and "Share to
+            // Facebook Groups" rows.
             Step::tap(
                 "the Post button",
                 vec![
                     Match::Text("Post".into()),
                     Match::Desc("Post".into()),
                     Match::ResourceId("id/post_button".into()),
+                    Match::Text("Share".into()),
+                    Match::Desc("Share".into()),
                     Match::Text("Share now".into()),
                 ],
             ),
@@ -464,6 +512,17 @@ pub async fn run(ctx: &PublishContext, adb: &Adb, steps: &[Step]) -> Result<Run>
                          accepts plain ASCII this way). Paste it in {label} and tap Post."
                     )));
                 }
+                // Already delivered by the share intent? Then the field no
+                // longer shows the placeholder these matchers look for, and
+                // waiting on it would burn the timeout before handing back a
+                // composer that is finished.
+                if let Ok(nodes) = adb.ui_dump(&ctx.serial).await {
+                    if caption_field_holds_it(&nodes, &ctx.caption) {
+                        ctx.step(progress, "Caption is already filled in");
+                        continue;
+                    }
+                }
+
                 ctx.step(progress, "Typing the caption…");
                 let found = match adb.wait_for_node(&ctx.serial, into, STEP_TIMEOUT).await {
                     Ok(found) => found,
@@ -507,6 +566,22 @@ pub async fn run(ctx: &PublishContext, adb: &Adb, steps: &[Step]) -> Result<Run>
                         tokio::time::sleep(Duration::from_millis(600)).await;
                     }
                     None => {
+                        // One last look before giving up. An app that renders
+                        // its caption box as something other than an EditText
+                        // — Facebook's composer is Litho-drawn and has moved
+                        // between widget classes across releases — passes the
+                        // strict check above while still showing the caption,
+                        // and handing back a post that needs only its final
+                        // tap is the worse of the two mistakes.
+                        let showing = adb
+                            .ui_dump(&ctx.serial)
+                            .await
+                            .map(|nodes| caption_is_on_screen(&nodes, &ctx.caption))
+                            .unwrap_or(false);
+                        if showing {
+                            ctx.step(progress, "Caption is already filled in");
+                            continue;
+                        }
                         return Ok(Run::HandedBack(format!(
                             "The {noun} is attached but the caption field never appeared in \
                              {label}. Add the caption there and tap Post."
@@ -535,7 +610,7 @@ pub async fn run(ctx: &PublishContext, adb: &Adb, steps: &[Step]) -> Result<Run>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ldplayer::adb::parse_ui_nodes;
+    use crate::ldplayer::adb::{find_node, parse_ui_nodes};
 
     fn nodes(text: &str) -> Vec<UiNode> {
         parse_ui_nodes(&format!(
@@ -555,6 +630,112 @@ mod tests {
                 _ => panic!("{p:?} does not end by tapping a submit control"),
             }
         }
+    }
+
+    /// The bug this exists for: "What's on your mind?" is on the FIRST screen
+    /// of Facebook's composer and Next is what leaves it, so tapping Next
+    /// before typing stranded the caption step on a screen the field was no
+    /// longer on — a hand-off one tap short of posting. Instagram is the
+    /// opposite (its caption screen sits behind two Nexts), which is why the
+    /// order is asserted per platform rather than globally.
+    #[test]
+    fn facebook_captions_before_it_leaves_the_first_screen() {
+        let steps = recipe(Platform::Facebook);
+        let position = |pred: &dyn Fn(&Step) -> bool| steps.iter().position(|s| pred(s));
+
+        let caption = position(&|s| matches!(s, Step::Caption { .. }))
+            .expect("Facebook's recipe types a caption when EXTRA_TEXT did not carry one");
+        let next = position(&|s| match s {
+            Step::Tap { any_of, .. } => any_of
+                .iter()
+                .any(|m| matches!(m, Match::Text(t) if t.eq_ignore_ascii_case("next"))),
+            _ => false,
+        })
+        .expect("Facebook's recipe advances past the first screen");
+
+        assert!(caption < next, "the caption must be typed before Next leaves its screen");
+    }
+
+    /// Built from a real dump of the composer this failed on: the header now
+    /// reads "New post", and none of "Create post", "What's on your mind" or
+    /// "Say something about" was anywhere on screen — the caption had already
+    /// replaced the placeholder — so the screen check rejected the very
+    /// composer it was waiting for.
+    #[test]
+    fn the_current_facebook_composer_is_recognised() {
+        let screen = concat!(
+            r#"<node text="" resource-id="" class="android.widget.Button" content-desc="Close" clickable="true" enabled="true" bounds="[20,90][80,150]"/>"#,
+            r#"<node text="New post" resource-id="" class="android.widget.TextView" content-desc="" clickable="false" enabled="true" bounds="[200,90][500,150]"/>"#,
+            r#"<node text="Tag/collaborate" resource-id="" class="android.widget.TextView" content-desc="" clickable="true" enabled="true" bounds="[20,340][300,400]"/>"#,
+            r#"<node text="Hi" resource-id="" class="android.widget.EditText" content-desc="" clickable="true" enabled="true" bounds="[20,450][660,520]"/>"#,
+            r#"<node text="Next" resource-id="" class="android.widget.Button" content-desc="" clickable="true" enabled="true" bounds="[510,1170][670,1240]"/>"#,
+        );
+        let nodes = parse_ui_nodes(screen);
+
+        let expect = match &recipe(Platform::Facebook)[1] {
+            Step::Expect { any_of, .. } => any_of.clone(),
+            _ => panic!("the screen check is the step after Settle"),
+        };
+        assert!(
+            expect.iter().any(|m| find_node(&nodes, m, false).is_some()),
+            "this composer must be recognised, not handed back"
+        );
+    }
+
+    /// The other half of the same failure: the share intent had already put
+    /// the caption in, so the field no longer read "What's on your mind?" and
+    /// the placeholder matchers could never find it.
+    #[test]
+    fn a_caption_the_intent_already_delivered_is_not_hunted_for() {
+        let filled = parse_ui_nodes(
+            r#"<node text="Hi" resource-id="" class="android.widget.EditText" content-desc="" clickable="true" enabled="true" bounds="[20,450][660,520]"/>"#,
+        );
+        assert!(caption_field_holds_it(&filled, "Hi"));
+
+        let empty = parse_ui_nodes(
+            r#"<node text="What's on your mind?" resource-id="" class="android.widget.EditText" content-desc="" clickable="true" enabled="true" bounds="[20,450][660,520]"/>"#,
+        );
+        assert!(!caption_field_holds_it(&empty, "Hi"), "an empty box must still be typed into");
+
+        // A label that merely contains the caption is not a filled-in field:
+        // short captions turn up inside ordinary words, and skipping on one
+        // would post with no caption at all.
+        let coincidence = parse_ui_nodes(
+            r#"<node text="History" resource-id="" class="android.widget.TextView" content-desc="" clickable="true" enabled="true" bounds="[20,450][660,520]"/>"#,
+        );
+        assert!(!caption_field_holds_it(&coincidence, "Hi"));
+
+        // The search box rule still applies to a field that looks filled.
+        let search = parse_ui_nodes(
+            r#"<node text="Hi" resource-id="com.facebook.katana:id/search_box" class="android.widget.EditText" content-desc="" clickable="true" enabled="true" bounds="[20,450][660,520]"/>"#,
+        );
+        assert!(!caption_field_holds_it(&search, "Hi"));
+    }
+
+    /// Built from the "Post settings" screen Next actually lands on: the
+    /// submit button reads SHARE, and the page is a list of rows several of
+    /// which start with the word Share. The submit button must be the one
+    /// found, and none of the rows may be.
+    #[test]
+    fn the_share_button_is_found_on_the_post_settings_screen() {
+        let screen = concat!(
+            r#"<node text="Post settings" resource-id="" class="android.widget.TextView" content-desc="" clickable="false" enabled="true" bounds="[60,110][250,160]"/>"#,
+            r#"<node text="SHARE" resource-id="" class="android.widget.Button" content-desc="" clickable="true" enabled="true" bounds="[486,105][614,165]"/>"#,
+            r#"<node text="Post audience" resource-id="" class="android.widget.TextView" content-desc="" clickable="true" enabled="true" bounds="[84,200][400,240]"/>"#,
+            r#"<node text="Share to Story" resource-id="" class="android.widget.TextView" content-desc="" clickable="true" enabled="true" bounds="[84,740][400,780]"/>"#,
+            r#"<node text="Share to Facebook Groups" resource-id="" class="android.widget.TextView" content-desc="" clickable="true" enabled="true" bounds="[84,840][540,880]"/>"#,
+        );
+        let nodes = parse_ui_nodes(screen);
+
+        let submit = match recipe(Platform::Facebook).pop() {
+            Some(Step::Tap { any_of, .. }) => any_of,
+            _ => panic!("Facebook's recipe ends by tapping submit"),
+        };
+        let hit = submit
+            .iter()
+            .find_map(|m| find_node(&nodes, m, false))
+            .expect("SHARE must be found");
+        assert_eq!(hit.text, "SHARE", "a Share-to-… row is not the submit button");
     }
 
     #[test]

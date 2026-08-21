@@ -200,7 +200,7 @@ export function PublisherSettingsPage() {
 
         <Toggle
           label="Tap Post automatically"
-          hint="After the app opens with your media attached, tap its own Post button for you. It reads on-screen labels, so an app update can break it — when that happens the job stops and hands the instance back rather than tapping blindly. It always stops at a login, a captcha or a security check."
+          hint="On by default: once the app opens with your media attached, its own Post button gets tapped for you, so a job finishes without you. It reads on-screen labels, so an app update can break it — when that happens the job stops and hands the instance back rather than tapping blindly. It always stops at a login, a captcha or a security check. Turn it off to review each post before it goes out."
           checked={settings.auto_post}
           onChange={(v) => void update({ auto_post: v })}
         />

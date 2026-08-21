@@ -61,11 +61,17 @@ pub struct DeviceSettings {
     pub verbose_logging: bool,
     /// Tap the app's own Post button once the composer is open.
     ///
-    /// Off by default, and that default is deliberate rather than timid: this
-    /// works by reading on-screen labels, so an app redesign breaks it, and the
-    /// failure mode of publishing is not undoable. A person who turns it on has
-    /// seen the warning beside it.
-    #[serde(default)]
+    /// ON by default: publishing without finishing the job by hand is the
+    /// point of the feature, and a person who has to be told to go and enable
+    /// it has already been handed the manual work this exists to remove.
+    ///
+    /// The risk that argued for off — this reads on-screen labels, so an app
+    /// redesign breaks it, and a post cannot be unpublished — is answered by
+    /// how a break behaves rather than by leaving it switched off: a control
+    /// that is not found stops the run and hands the instance back, and a
+    /// login, captcha or security screen stops it too. It never taps blindly.
+    /// The toggle stays, for anyone who wants to eyeball each post first.
+    #[serde(default = "default_auto_post")]
     pub auto_post: bool,
     /// Delete the pushed file from the device once a job finishes. Off by
     /// default because a failed job's file is the thing you want to inspect.
@@ -85,6 +91,13 @@ fn default_max_concurrent() -> usize {
     DEFAULT_MAX_CONCURRENT
 }
 
+/// Named rather than `#[serde(default)]` so a settings file written before
+/// this became the default — which has no `auto_post` key at all — comes back
+/// on, instead of silently inheriting `bool`'s `false`.
+fn default_auto_post() -> bool {
+    true
+}
+
 impl Default for DeviceSettings {
     fn default() -> Self {
         Self {
@@ -93,7 +106,7 @@ impl Default for DeviceSettings {
             remote_dir: default_remote_dir(),
             remote_image_dir: default_remote_image_dir(),
             max_concurrent: DEFAULT_MAX_CONCURRENT,
-            auto_post: false,
+            auto_post: default_auto_post(),
             verbose_logging: false,
             cleanup_after_publish: false,
         }
@@ -188,6 +201,26 @@ mod tests {
         let s = DeviceSettings { remote_dir: "/sdcard/Movies/".into(), ..Default::default() }
             .sanitized();
         assert_eq!(s.remote_path_for("a.mp4", MediaCollection::Video), "/sdcard/Movies/a.mp4");
+    }
+
+    /// Publishing that stops one tap short is the thing this product exists
+    /// to remove, so the default has to be on — and a settings file written
+    /// before that changed has no `auto_post` key, which must read as on too
+    /// rather than falling back to `bool::default()`.
+    #[test]
+    fn posting_is_automatic_unless_someone_turned_it_off() {
+        assert!(DeviceSettings::default().auto_post);
+
+        let legacy: DeviceSettings = serde_json::from_str(
+            r#"{"remote_dir":"/sdcard/Movies","max_concurrent":2}"#,
+        )
+        .expect("a settings file from an older build still loads");
+        assert!(legacy.auto_post, "an absent key must not mean off");
+
+        // An explicit off is still honoured — the toggle has to mean something.
+        let opted_out: DeviceSettings =
+            serde_json::from_str(r#"{"auto_post":false}"#).unwrap();
+        assert!(!opted_out.auto_post);
     }
 
     #[test]

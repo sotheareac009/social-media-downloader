@@ -1,9 +1,7 @@
 {
   "bundle": {
     "resources": {
-      "resources/bin/yt-dlp.exe": "bin/yt-dlp.exe",
-      "resources/bin/ffmpeg.exe": "bin/ffmpeg.exe",
-      "resources/bin/ffprobe.exe": "bin/ffprobe.exe"
+      "resources/bin": "bin"
     }
   }
 }

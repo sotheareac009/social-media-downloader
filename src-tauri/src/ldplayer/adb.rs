@@ -627,20 +627,115 @@ impl Adb {
         Ok(())
     }
 
-    /// Launch an app's main activity. `monkey` is used rather than a hand-built
-    /// `am start` because it resolves the launcher activity itself, and those
-    /// activity names change between app releases.
+    /// Launch an app's main activity.
+    ///
+    /// Three strategies, tried in order, because no single one works on every
+    /// image. `monkey` used to be the only one: it resolves the launcher
+    /// activity itself, which matters because those activity names change with
+    /// every app release. But LDPlayer ships builds with `/system/bin/monkey`
+    /// stripped — the shell answers "monkey: inaccessible or not found" — so
+    /// the resolution is now asked of the package manager first, and monkey is
+    /// kept last for images where the others are cut down instead.
     pub async fn launch_app(&self, serial: &str, package: &str) -> Result<()> {
         if !self.is_installed(serial, package).await? {
             return Err(AppError::AppNotInstalled(package.to_string()));
         }
-        let cmd = format!(
-            "monkey -p {} -c android.intent.category.LAUNCHER 1",
-            shell_quote(package)
-        );
-        let out = self.shell(serial, &cmd).await?;
-        if out.contains("No activities found") || out.contains("Error") {
-            return Err(AppError::AppLaunchFailed(package.to_string()));
+
+        // Every failure is collected rather than returned, so a launch that
+        // exhausts all three says what each one said. Debugging this from a
+        // single symptom is what cost us the monkey bug.
+        let mut attempts: Vec<String> = Vec::new();
+
+        // 1. Ask which activity the launcher would open, then open exactly it.
+        if let Some(component) = self.launcher_activity(serial, package).await {
+            match self
+                .start_activity(serial, &format!("am start -n {}", shell_quote(&component)))
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) => attempts.push(e),
+            }
+        }
+
+        // 2. The same intent monkey builds, resolved by `am` instead. Covers
+        //    images with no `cmd`, and packages whose resolve answers with
+        //    Android's fallback handler.
+        match self
+            .start_activity(
+                serial,
+                &format!(
+                    "am start -a android.intent.action.MAIN \
+                     -c android.intent.category.LAUNCHER -p {}",
+                    shell_quote(package)
+                ),
+            )
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(e) => attempts.push(e),
+        }
+
+        // 3. The original path, for images where `am start` is restricted.
+        match self
+            .start_activity(
+                serial,
+                &format!(
+                    "monkey -p {} -c android.intent.category.LAUNCHER 1",
+                    shell_quote(package)
+                ),
+            )
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(e) => attempts.push(e),
+        }
+
+        Err(AppError::AppLaunchFailed(format!(
+            "{package} ({})",
+            attempts.join("; ")
+        )))
+    }
+
+    /// The component the launcher would start for `package`, e.g.
+    /// `com.facebook.katana/.LoginActivity`.
+    ///
+    /// Both spellings of the query are sent in one round trip: the explicit
+    /// intent form is the documented one, while the bare-package form is what
+    /// actually answers on some builds. The first line that names the package
+    /// wins, so whichever spelling worked is the one used. The trailing
+    /// `true` keeps a good answer from the first form from being thrown away
+    /// when the second exits non-zero.
+    async fn launcher_activity(&self, serial: &str, package: &str) -> Option<String> {
+        let pkg = shell_quote(package);
+        let out = self
+            .shell(
+                serial,
+                &format!(
+                    "cmd package resolve-activity --brief \
+                     -a android.intent.action.MAIN \
+                     -c android.intent.category.LAUNCHER -p {pkg} 2>/dev/null; \
+                     cmd package resolve-activity --brief {pkg} 2>/dev/null; true"
+                ),
+            )
+            .await
+            .ok()?;
+        parse_launcher_component(&out, package)
+    }
+
+    /// Run one launch command and decide whether the app actually came up.
+    ///
+    /// Exit status alone is not enough in either direction: `am` prints
+    /// "Error: Activity not started" and still exits 0, while a missing
+    /// binary fails at the shell before the command runs. Both come back as
+    /// the same kind of short reason so the caller can try the next strategy.
+    async fn start_activity(&self, serial: &str, cmd: &str) -> std::result::Result<(), String> {
+        let out = match self.shell(serial, cmd).await {
+            Ok(out) => out,
+            Err(e) => return Err(first_line(&e.to_string())),
+        };
+        if out.contains("No activities found") || out.contains("Error") || out.contains("Exception")
+        {
+            return Err(first_line(&out));
         }
         Ok(())
     }
@@ -1063,6 +1158,22 @@ fn chunk_text(s: &str, max: usize) -> Vec<String> {
     out
 }
 
+/// Pick the component out of `cmd package resolve-activity --brief`.
+///
+/// The brief output still carries a `priority=… isDefault=true` line ahead of
+/// the component, and an intent nothing handles resolves to Android's own
+/// fallback (`com.android.fallback/.Fallback`). Accepting only a bare line
+/// under the package we asked about rejects both, and rejecting is the right
+/// answer: the caller then falls through to a strategy that does not need the
+/// activity name at all.
+fn parse_launcher_component(out: &str, package: &str) -> Option<String> {
+    let prefix = format!("{package}/");
+    out.lines()
+        .map(str::trim)
+        .find(|line| line.starts_with(&prefix) && !line.contains(char::is_whitespace))
+        .map(str::to_string)
+}
+
 /// Quote one argument for the device's `sh`. Paths we build contain no quotes,
 /// but a user-chosen filename can, and an unquoted one would end the command.
 pub fn shell_quote(s: &str) -> String {
@@ -1337,5 +1448,33 @@ mod tests {
     fn zero_exit_with_error_text_is_still_a_failure() {
         let o = Output { status: 0, stdout: String::new(), stderr: "error: device offline".into() };
         assert!(o.ok() && o.failed_despite_zero());
+    }
+
+    /// The bug this exists for: LDPlayer images ship without
+    /// `/system/bin/monkey`, so the only launch path we had died at the shell
+    /// with "monkey: inaccessible or not found". Resolving the activity is
+    /// what replaced it, and the resolve output is not just the component.
+    #[test]
+    fn the_launcher_component_is_read_past_the_priority_line() {
+        let out = "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\n\
+                   com.facebook.katana/.LoginActivity\n";
+        assert_eq!(
+            parse_launcher_component(out, "com.facebook.katana").as_deref(),
+            Some("com.facebook.katana/.LoginActivity")
+        );
+    }
+
+    #[test]
+    fn androids_fallback_handler_is_not_mistaken_for_the_app() {
+        // Resolving an intent nothing handles answers with this, and starting
+        // it would open a "no app can do that" dialog instead of failing over.
+        let out = "priority=0 preferredOrder=0\ncom.android.fallback/.Fallback\n";
+        assert_eq!(parse_launcher_component(out, "com.facebook.katana"), None);
+    }
+
+    #[test]
+    fn no_resolution_is_no_component() {
+        assert_eq!(parse_launcher_component("No activity found\n", "com.facebook.katana"), None);
+        assert_eq!(parse_launcher_component("", "com.facebook.katana"), None);
     }
 }
