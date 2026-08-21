@@ -199,6 +199,13 @@ export function PublisherSettingsPage() {
         </div>
 
         <Toggle
+          label="Tap Post automatically"
+          hint="After the app opens with your media attached, tap its own Post button for you. It reads on-screen labels, so an app update can break it — when that happens the job stops and hands the instance back rather than tapping blindly. It always stops at a login, a captcha or a security check."
+          checked={settings.auto_post}
+          onChange={(v) => void update({ auto_post: v })}
+        />
+
+        <Toggle
           label="Delete the video from the device after publishing"
           hint="Off by default: a failed job's file is the thing you want to inspect."
           checked={settings.cleanup_after_publish}

@@ -450,6 +450,14 @@ function AccountRow({
           {account.device_name ?? account.ldplayer_instance_id} · {account.package_name}
         </div>
         {account.detail && <div className="acctrow__detail">{account.detail}</div>}
+        {/* Said here, before jobs are queued, rather than after one stops. */}
+        {!account.supports_auto_post && (
+          <div className="acctrow__note">
+            This app draws its own screen, so “Tap Post automatically” can’t work on it —
+            publishing works, but the final tap stays manual. The full (non-Lite) app
+            supports automation.
+          </div>
+        )}
       </div>
       <StatusBadge tone={ACCOUNT_TONE[account.status]}>
         {ACCOUNT_STATUS_LABEL[account.status]}

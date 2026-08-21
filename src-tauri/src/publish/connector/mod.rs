@@ -38,6 +38,7 @@ use crate::ldplayer::adb::MediaCollection;
 use crate::ldplayer::manager::LdPlayerManager;
 use crate::publish::model::Platform;
 
+pub mod autopost;
 pub mod share;
 
 /// One asset sitting on the device, ready to hand to an app.
@@ -72,6 +73,11 @@ pub struct PublishContext {
     /// the user arranged them. Always at least one.
     pub media: Vec<StagedMedia>,
     pub caption: String,
+    /// Platform name for messages, so the automation engine never has to know
+    /// what platform it is driving.
+    pub platform_label: &'static str,
+    /// Whether the user asked for the final Post tap to be automated.
+    pub auto_post: bool,
     /// Report a step to the UI. Called with a coarse 0–1 fraction and a
     /// sentence a non-technical person can read.
     pub report: Box<dyn Fn(f64, &str) + Send + Sync>,
@@ -86,6 +92,21 @@ impl PublishContext {
     /// no media, so this list is never empty.
     pub fn first(&self) -> &StagedMedia {
         &self.media[0]
+    }
+
+    /// "video", "photo" or "files" — the word a message should use.
+    pub fn noun(&self) -> &'static str {
+        if self.is_mixed() {
+            return "files";
+        }
+        match self.first().collection {
+            crate::ldplayer::adb::MediaCollection::Video => {
+                if self.is_album() { "videos" } else { "video" }
+            }
+            crate::ldplayer::adb::MediaCollection::Image => {
+                if self.is_album() { "photos" } else { "photo" }
+            }
+        }
     }
 
     /// True when this is an album post rather than a single one.
@@ -114,10 +135,15 @@ pub enum Outcome {
     /// The post is live. Only returned when the connector actually observed
     /// that — never assumed from "the intent didn't error".
     Published,
-    /// The app is open on its composer with the video attached, and the person
-    /// finishes it. This is the honest result for the MVP path and for any app
-    /// whose final Post button we deliberately do not press.
-    NeedsUser(String),
+    /// Everything this app can do is done: the app is open on its composer
+    /// with the media attached, and the person taps Post. This is a SUCCESS —
+    /// the deliberate stopping point, not a problem — and the UI must not
+    /// dress it as a failure.
+    ReadyForUser(String),
+    /// Something got in the way: a login prompt, a permission request, the app
+    /// closing. The work so far is intact and the file is on the device, but
+    /// the person has to go and look.
+    Interrupted(String),
 }
 
 /// The interface every platform implements.

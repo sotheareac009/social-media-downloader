@@ -14,7 +14,7 @@
 //! one.
 //!
 //! WHERE IT STOPS. It does not confirm a post went live, because it cannot.
-//! It reports [`Outcome::NeedsUser`] and says so plainly rather than showing a
+//! It reports [`Outcome::ReadyForUser`] and says so plainly rather than showing a
 //! green tick nobody verified. A per-platform connector that drives the
 //! composer to completion replaces this one platform at a time — see
 //! [`super::for_platform`].
@@ -23,7 +23,7 @@ use async_trait::async_trait;
 
 use crate::errors::Result;
 use crate::ldplayer::adb::MediaCollection;
-use crate::publish::connector::{Outcome, PlatformConnector, PublishContext};
+use crate::publish::connector::{autopost, Outcome, PlatformConnector, PublishContext};
 use crate::publish::model::Platform;
 
 pub struct ShareConnector {
@@ -78,8 +78,12 @@ impl PlatformConnector for ShareConnector {
         // ClassCastException. So the files are staged and the person selects
         // them, which is honest, rather than firing an intent we know fails.
         if ctx.is_album() {
+            // Not automatable, and not for want of trying: the files can only
+            // be attached through the app's own gallery picker, and driving a
+            // multi-select grid by label is exactly the kind of blind tapping
+            // that posts the wrong thing.
             ctx.step(0.92, &format!("{} files are ready in the gallery", ctx.media.len()));
-            return Ok(Outcome::NeedsUser(album_message(ctx, label)));
+            return Ok(Outcome::ReadyForUser(album_message(ctx, label)));
         }
 
         let item = ctx.first();
@@ -89,7 +93,7 @@ impl PlatformConnector for ShareConnector {
             // person pick it, rather than fire an intent that will fail with a
             // permission error.
             ctx.step(0.9, &format!("Opened the app; pick the {noun} from the gallery"));
-            return Ok(Outcome::NeedsUser(format!(
+            return Ok(Outcome::ReadyForUser(format!(
                 "{label} is open on this instance. The {noun} is on the device at {}, \
                  but Android did not index it, so choose it from the gallery manually.",
                 item.remote_path
@@ -101,20 +105,47 @@ impl PlatformConnector for ShareConnector {
         adb.share_to(&ctx.serial, &ctx.package, uri, item.collection.mime(), caption)
             .await?;
 
-        // Give the composer a moment to come up before looking at the screen.
-        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        // Give the composer time to come up. Twenty seconds is not generous —
+        // a cold app on a loaded emulator regularly needs most of it.
+        ctx.step(0.9, &format!("Waiting for the {label} composer…"));
+        let seen = self
+            .wait_for_foreground(ctx, &adb, std::time::Duration::from_secs(20))
+            .await;
+        self.capture(ctx).await;
 
-        if !self.arrived(ctx, &adb).await {
-            ctx.step(0.9, &format!("{label} did not come to the front"));
-            return Ok(Outcome::NeedsUser(format!(
-                "The {noun} was sent to {label}, but it is not on screen — it may have \
-                 asked for a permission or a login confirmation. Open LDPlayer for this \
-                 instance and finish there."
+        if let Foreground::Other(pkg) = &seen {
+            ctx.step(0.92, &format!("{pkg} is on screen instead of {label}"));
+            let because = explain_foreground(pkg)
+                .map(|r| format!(" — {r}"))
+                .unwrap_or_else(|| format!(" — `{pkg}` is on screen instead"));
+            return Ok(Outcome::Interrupted(format!(
+                "The {noun} was sent to {label}, but {label} isn't the screen in \
+                 front{because}. Open LDPlayer for this instance and finish there; \
+                 the {noun} is already in the gallery."
             )));
         }
 
-        ctx.step(0.98, "Waiting for you to post");
-        Ok(Outcome::NeedsUser(if self.honours_caption() {
+        // Everything up to here is the same whether or not the last tap is
+        // automated: the composer is open with the media attached. Only now
+        // does the app get driven, and only if the user asked for it.
+        if ctx.auto_post {
+            match autopost::run(ctx, &adb, &autopost::recipe(self.platform)).await? {
+                autopost::Run::Posted => {
+                    ctx.step(1.0, &format!("Posted to {label}"));
+                    return Ok(Outcome::Published);
+                }
+                // Not a failure: the media is attached and the composer is
+                // open. The automation stopped somewhere it should not guess,
+                // and said where.
+                autopost::Run::HandedBack(why) => {
+                    ctx.step(0.97, "Stopped — needs you");
+                    return Ok(Outcome::Interrupted(why));
+                }
+            }
+        }
+
+        ctx.step(0.98, "Ready for you to post");
+        Ok(Outcome::ReadyForUser(if self.honours_caption() {
             format!(
                 "{label} is open with the {noun} and caption attached on this instance. \
                  Review it and tap Post."
@@ -129,20 +160,78 @@ impl PlatformConnector for ShareConnector {
     }
 }
 
+/// What the emulator's screen showed after the share was sent.
+enum Foreground {
+    /// The target app is in front. The composer is up.
+    Arrived,
+    /// Something else is in front, named so the message can explain it.
+    Other(String),
+    /// The screen could not be read. NOT the same as failure — reporting a
+    /// problem we cannot demonstrate would send people to look at a screen
+    /// that is very likely fine.
+    Unknown,
+}
+
 impl ShareConnector {
-    /// Whether the app actually came to the foreground. If it crashed or
-    /// bounced back to the launcher, saying "ready for you" would send the
-    /// user to look at a screen that isn't there.
-    async fn arrived(&self, ctx: &PublishContext, adb: &crate::ldplayer::adb::Adb) -> bool {
-        let foreground = adb.foreground_package(&ctx.serial).await;
-        let arrived = foreground
-            .as_deref()
-            .is_some_and(|p| p == ctx.package || p.starts_with(&ctx.package));
-        if let Some(_path) = ctx.screenshot("composer").await {
-            ctx.step(0.95, &format!("{} composer captured", self.platform.label()));
+    /// Wait for the target app to come to the front.
+    ///
+    /// Polls rather than sleeping once and looking. A cold app on a loaded
+    /// emulator routinely takes ten seconds or more to render its composer,
+    /// and a single check four seconds in reports a healthy publish as broken
+    /// — which is worse than waiting, because it sends the user hunting for a
+    /// problem that does not exist.
+    async fn wait_for_foreground(
+        &self,
+        ctx: &PublishContext,
+        adb: &crate::ldplayer::adb::Adb,
+        timeout: std::time::Duration,
+    ) -> Foreground {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut last: Option<String> = None;
+
+        loop {
+            match adb.foreground_package(&ctx.serial).await {
+                Some(pkg) if pkg == ctx.package || pkg.starts_with(&ctx.package) => {
+                    return Foreground::Arrived
+                }
+                Some(pkg) => last = Some(pkg),
+                None => {}
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         }
-        arrived
+
+        match last {
+            Some(pkg) => Foreground::Other(pkg),
+            None => Foreground::Unknown,
+        }
     }
+
+    /// Capture the screen for the job's debug view, best effort.
+    async fn capture(&self, ctx: &PublishContext) {
+        if ctx.screenshot("composer").await.is_some() {
+            ctx.step(0.95, &format!("{} screen captured", self.platform.label()));
+        }
+    }
+}
+
+/// Turn "some other app is in front" into a sentence that names the likely
+/// reason. These four cover almost every real case, and a user who is told
+/// "it asked you to pick a Google account" fixes it in seconds, while one told
+/// "it is not on screen" has to go and look.
+fn explain_foreground(pkg: &str) -> Option<&'static str> {
+    if pkg.starts_with("com.google.android.gms") {
+        return Some("it asked you to choose or confirm a Google account");
+    }
+    if pkg.contains("permissioncontroller") || pkg.contains("packageinstaller") {
+        return Some("it asked for a permission");
+    }
+    if pkg.contains("launcher") || pkg == "com.android.systemui" || pkg == "android" {
+        return Some("it closed or a system dialog took over");
+    }
+    None
 }
 
 /// "video", "photo", or "files" for a mixed album — the word the message uses.
@@ -202,6 +291,17 @@ mod tests {
         for p in [Platform::Instagram, Platform::Tiktok, Platform::Youtube] {
             assert!(!ShareConnector::new(p).honours_caption(), "{p:?}");
         }
+    }
+
+    #[test]
+    fn common_interruptions_are_explained_rather_than_just_named() {
+        assert!(explain_foreground("com.google.android.gms").unwrap().contains("Google account"));
+        assert!(explain_foreground("com.google.android.permissioncontroller")
+            .unwrap()
+            .contains("permission"));
+        assert!(explain_foreground("com.android.launcher3").unwrap().contains("closed"));
+        // An app we have no story for gets named, not guessed about.
+        assert!(explain_foreground("com.some.other.app").is_none());
     }
 
     #[test]

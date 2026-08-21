@@ -145,6 +145,7 @@ impl PublishQueue {
             };
 
             out.push(AccountView {
+                supports_auto_post: Platform::supports_auto_post(&account.package_name),
                 device_name: device.map(|d| d.name.clone()),
                 device_online: device.is_some_and(|d| d.is_online()),
                 status,
@@ -400,16 +401,30 @@ impl PublishQueue {
             Ok(Outcome::Published) => {
                 self.set(app, job_id, JobStatus::Published, 1.0, Some("Published"), None, None);
             }
-            Ok(Outcome::NeedsUser(message)) => {
-                // Deliberately not "Failed": the video is on the device and the
-                // app is open on it. Calling this a failure would teach people
-                // to ignore the failures that matter.
+            // The happy ending for every current connector: the app is open
+            // with the media attached and the person taps Post. Carries its own
+            // code so the UI can present it as the success it is, rather than
+            // as the amber "something went wrong" that shares this status.
+            Ok(Outcome::ReadyForUser(message)) => {
                 self.set(
                     app,
                     job_id,
                     JobStatus::NeedsAttention,
                     1.0,
                     Some("Ready for you to post"),
+                    Some("ready_for_user"),
+                    Some(&message),
+                );
+            }
+            // Something got in the way. Still not "Failed" — the file is on the
+            // device and the work stands — but this one does want attention.
+            Ok(Outcome::Interrupted(message)) => {
+                self.set(
+                    app,
+                    job_id,
+                    JobStatus::NeedsAttention,
+                    1.0,
+                    Some("Waiting for you"),
                     Some("needs_user"),
                     Some(&message),
                 );
@@ -555,6 +570,8 @@ impl PublishQueue {
             package: account.package_name.clone(),
             media: staged.clone(),
             caption: row.caption.clone(),
+            platform_label: account.platform.label(),
+            auto_post: settings.auto_post,
             report: {
                 let store = self.store.clone();
                 let app = app.clone();
@@ -591,7 +608,11 @@ impl PublishQueue {
         // A screenshot of wherever we ended up, success or failure — it is the
         // one artefact that answers "what is it stuck on?" without alt-tabbing
         // to LDPlayer.
-        if settings.verbose_logging || outcome.is_err() {
+        // Always on a failure or an interruption: the screenshot is the only
+        // way to see what the app was actually showing, and "it stopped and I
+        // can't tell why" is the state this whole feature keeps landing in.
+        let interrupted = matches!(outcome, Ok(Outcome::Interrupted(_)));
+        if settings.verbose_logging || outcome.is_err() || interrupted {
             if let Ok(path) = self
                 .devices
                 .screenshot(&account.ldplayer_instance_id, Some("result"))

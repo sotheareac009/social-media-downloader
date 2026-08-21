@@ -611,6 +611,11 @@
 .job--needs_attention { border-color: var(--warning-border); }
 .job--published { border-color: var(--success-border); }
 
+/* The finished hand-off. Wins over `job--needs_attention` above because this
+   ending is a success: everything the app can do is done, and the amber of a
+   genuine problem here reads as "the upload failed". */
+.job--ready { border-color: var(--accent-ring); }
+
 .job__text { flex: 1; min-width: 0; }
 
 .job__head {
@@ -667,6 +672,20 @@
 
 .job__msg--error { background: var(--danger-soft); color: var(--danger); }
 .job__msg--info  { background: var(--warning-soft); color: var(--text-primary); }
+
+/* Instructions for a completed hand-off, not a warning. */
+.job__msg--ready {
+  display: flex;
+  gap: 8px;
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
+
+.job__msgicon {
+  flex-shrink: 0;
+  color: var(--accent-text);
+  font-weight: 700;
+}
 
 .job__shot { margin-top: 8px; }
 
@@ -1083,4 +1102,17 @@
   background: var(--danger-soft);
   color: var(--danger);
   line-height: 1.5;
+}
+
+/* An advisory on an account — a limitation, not a fault, so it reads as a note
+   rather than the amber of something needing fixing. */
+.acctrow__note {
+  margin-top: 5px;
+  padding: 6px 9px;
+  border-radius: var(--r-sm);
+  background: var(--surface-3);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  max-width: 62ch;
 }

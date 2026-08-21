@@ -663,12 +663,27 @@ impl LdPlayerManager {
             tokio::time::sleep(Duration::from_millis(1200)).await;
             adb.scan_media(&serial, &remote).await.ok();
             uri = adb.media_store_uri(&serial, &remote, collection).await;
-            if uri.is_none() {
-                return Err(AppError::MediaScanFailed);
-            }
         }
 
-        self.log(app, "info", Some(device_id), "media is visible to the gallery");
+        match &uri {
+            Some(_) => self.log(app, "info", Some(device_id), "media is visible to the gallery"),
+            // NOT a failure. The file is on the device, whole and verified —
+            // only the handle for passing it to another app is missing. The
+            // connector's fallback is to open the app and let the person pick
+            // it from the gallery, which is a worse experience but a working
+            // one. Failing here would throw that away and lose a transfer that
+            // may have taken minutes.
+            None => self.log(
+                app,
+                "warn",
+                Some(device_id),
+                format!(
+                    "{remote} is on the device but MediaStore has no row for it; \
+                     the app will have to be pointed at it by hand"
+                ),
+            ),
+        }
+
         Ok(TransferredMedia { remote_path: remote, content_uri: uri, collection })
     }
 

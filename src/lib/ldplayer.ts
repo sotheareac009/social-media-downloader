@@ -51,6 +51,8 @@ export interface DeviceSettings {
   remote_dir: string;
   remote_image_dir: string;
   max_concurrent: number;
+  /** Tap the app's own Post button once the composer is open. */
+  auto_post: boolean;
   verbose_logging: boolean;
   cleanup_after_publish: boolean;
 }

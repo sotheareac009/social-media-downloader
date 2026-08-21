@@ -40,6 +40,8 @@ export interface AccountView extends Account {
   device_name: string | null;
   device_online: boolean;
   detail: string | null;
+  /** False for "Lite" apps, which expose no labels for automation to read. */
+  supports_auto_post: boolean;
 }
 
 /** How several selected assets become posts. */
@@ -168,6 +170,39 @@ export const JOB_STATUS_LABEL: Record<JobStatus, string> = {
   failed: "Failed",
   cancelled: "Cancelled",
 };
+
+export type JobTone = "success" | "warning" | "danger" | "muted" | "active";
+
+/**
+ * How one job should read.
+ *
+ * `needs_attention` covers two very different endings, and the status alone
+ * cannot tell them apart:
+ *
+ *   * `ready_for_user` — everything this app can do is DONE. The app is open
+ *     with the media attached and you tap Post. This is a success, and dressing
+ *     it in warning colours makes people think the upload failed.
+ *   * anything else — something got in the way (a login prompt, a permission)
+ *     and does want attention.
+ */
+export function jobDisplay(job: PublishJob): {
+  label: string;
+  tone: JobTone;
+  /** True for the happy hand-off, so the message renders as guidance. */
+  ready: boolean;
+} {
+  if (job.status === "needs_attention") {
+    const ready = job.error_code === "ready_for_user";
+    return ready
+      ? { label: "Ready to post", tone: "active", ready: true }
+      : { label: "Needs you", tone: "warning", ready: false };
+  }
+  return {
+    label: JOB_STATUS_LABEL[job.status],
+    tone: JOB_STATUS_TONE[job.status],
+    ready: false,
+  };
+}
 
 export const JOB_STATUS_TONE: Record<JobStatus, "success" | "warning" | "danger" | "muted" | "active"> = {
   pending: "muted",

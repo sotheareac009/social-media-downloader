@@ -79,6 +79,17 @@ impl Platform {
         self.packages()[0]
     }
 
+    /// Whether automatic posting can work against this package.
+    ///
+    /// The "Lite" builds render their whole UI to a canvas and expose nothing
+    /// to Android's accessibility tree — a dump of Facebook Lite's composer
+    /// returns 56 nodes with not one label between them. They publish fine;
+    /// only the final automated tap is impossible, so this is advisory, not a
+    /// reason to refuse the account.
+    pub fn supports_auto_post(package: &str) -> bool {
+        !package.ends_with(".lite") && !package.ends_with(".go")
+    }
+
     /// Which platform a package belongs to, for auto-detecting what an
     /// instance is signed in to.
     pub fn for_package(package: &str) -> Option<Self> {
@@ -151,6 +162,9 @@ pub struct AccountView {
     pub device_name: Option<String>,
     pub device_online: bool,
     pub detail: Option<String>,
+    /// False for apps that expose no accessibility labels, so the UI can say
+    /// so before a job is queued rather than after it stops.
+    pub supports_auto_post: bool,
 }
 
 /// A local file staged for publishing. The file itself is never copied into
@@ -283,6 +297,15 @@ mod tests {
                 assert_eq!(Platform::for_package(pkg), Some(*p), "{pkg}");
             }
         }
+    }
+
+    #[test]
+    fn lite_builds_are_flagged_as_unautomatable() {
+        assert!(!Platform::supports_auto_post("com.facebook.lite"));
+        assert!(!Platform::supports_auto_post("com.instagram.lite"));
+        assert!(!Platform::supports_auto_post("com.zhiliaoapp.musically.go"));
+        assert!(Platform::supports_auto_post("com.facebook.katana"));
+        assert!(Platform::supports_auto_post("com.instagram.android"));
     }
 
     #[test]

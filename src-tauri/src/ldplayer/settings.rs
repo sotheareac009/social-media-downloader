@@ -59,6 +59,14 @@ pub struct DeviceSettings {
     /// large and the logs are only useful while diagnosing a connector.
     #[serde(default)]
     pub verbose_logging: bool,
+    /// Tap the app's own Post button once the composer is open.
+    ///
+    /// Off by default, and that default is deliberate rather than timid: this
+    /// works by reading on-screen labels, so an app redesign breaks it, and the
+    /// failure mode of publishing is not undoable. A person who turns it on has
+    /// seen the warning beside it.
+    #[serde(default)]
+    pub auto_post: bool,
     /// Delete the pushed file from the device once a job finishes. Off by
     /// default because a failed job's file is the thing you want to inspect.
     #[serde(default)]
@@ -85,6 +93,7 @@ impl Default for DeviceSettings {
             remote_dir: default_remote_dir(),
             remote_image_dir: default_remote_image_dir(),
             max_concurrent: DEFAULT_MAX_CONCURRENT,
+            auto_post: false,
             verbose_logging: false,
             cleanup_after_publish: false,
         }

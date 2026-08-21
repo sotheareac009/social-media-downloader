@@ -6,8 +6,7 @@ import { PlatformMark } from "@/components/publish/PlatformMark";
 import { StatusBadge } from "@/components/publish/StatusDot";
 import {
   isJobActive,
-  JOB_STATUS_LABEL,
-  JOB_STATUS_TONE,
+  jobDisplay,
   publishCancel,
   publishRemoveJob,
   publishRetry,
@@ -48,6 +47,7 @@ function JobCard({ job }: { job: PublishJob }) {
   const [showShot, setShowShot] = useState(false);
 
   const active = isJobActive(job.status);
+  const display = jobDisplay(job);
 
   const act = async (label: string, run: () => Promise<unknown>) => {
     setBusy(true);
@@ -62,14 +62,14 @@ function JobCard({ job }: { job: PublishJob }) {
   };
 
   return (
-    <article className={`job job--${job.status}`}>
+    <article className={`job job--${job.status} ${display.ready ? "job--ready" : ""}`.trim()}>
       <PlatformMark platform={job.platform} />
 
       <div className="job__text">
         <div className="job__head">
           <span className="job__account">{job.account_name}</span>
-          <StatusBadge tone={JOB_STATUS_TONE[job.status]} pulse={active}>
-            {JOB_STATUS_LABEL[job.status]}
+          <StatusBadge tone={display.tone} pulse={active}>
+            {display.label}
           </StatusBadge>
         </div>
         <div className="job__media">
@@ -93,13 +93,19 @@ function JobCard({ job }: { job: PublishJob }) {
 
         {job.step && <div className="job__step">{job.step}</div>}
 
-        {/* `needs_user` is guidance, not a failure, so it reads as a note. */}
+        {/* A finished hand-off is instructions, not an error. Rendering it in
+            warning colours is what made people ask "did the upload fail?" */}
         {job.error && (
           <div
             className={`job__msg ${
-              job.error_code === "needs_user" ? "job__msg--info" : "job__msg--error"
+              display.ready
+                ? "job__msg--ready"
+                : job.error_code === "needs_user"
+                  ? "job__msg--info"
+                  : "job__msg--error"
             }`}
           >
+            {display.ready && <span className="job__msgicon" aria-hidden>✓</span>}
             {job.error}
           </div>
         )}
@@ -127,7 +133,7 @@ function JobCard({ job }: { job: PublishJob }) {
           </Button>
         ) : (
           <>
-            {job.status !== "published" && (
+            {job.status !== "published" && !display.ready && (
               <Button variant="ghost" loading={busy} onClick={() => act("Retry", () => publishRetry(job.id))}>
                 Retry
               </Button>

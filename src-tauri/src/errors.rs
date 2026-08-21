@@ -206,6 +206,17 @@ pub enum AppError {
     #[error("could not open `{0}` on the emulator")]
     AppLaunchFailed(String),
 
+    /// `uiautomator dump` failed. Usually "could not get idle state": the app
+    /// is animating and Android refuses to snapshot the hierarchy.
+    #[error("could not read what's on the emulator's screen ({0})")]
+    UiDumpFailed(String),
+
+    /// Android's `input text` is ASCII-only. Typing a Khmer or emoji caption
+    /// needs a custom keyboard installed on the device, which this app will
+    /// not do behind the user's back.
+    #[error("this caption can't be typed automatically — Android only accepts plain ASCII this way")]
+    CaptionNotTypeable,
+
     #[error("no account with id `{0}`")]
     AccountNotFound(String),
 
@@ -281,6 +292,8 @@ impl AppError {
             Self::MediaScanFailed => "media_scan_failed",
             Self::AppNotInstalled(_) => "app_not_installed",
             Self::AppLaunchFailed(_) => "app_launch_failed",
+            Self::UiDumpFailed(_) => "ui_dump_failed",
+            Self::CaptionNotTypeable => "caption_not_typeable",
             Self::AccountNotFound(_) => "account_not_found",
             Self::PackagePlatformMismatch(_) => "package_platform_mismatch",
             Self::PublishJobNotFound(_) => "publish_job_not_found",

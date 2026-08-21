@@ -441,8 +441,15 @@ impl Adb {
         let quoted = shell_quote(remote);
         let mut worked = false;
 
+        // The URI MUST be quoted. A filename with a space otherwise ends the
+        // argument early: `-d file:///sdcard/.../2.5M views _ 17K.mp4` reaches
+        // `am` as `-d file:///sdcard/.../2.5M` with `views` swallowed as the
+        // package argument, so a path that does not exist gets scanned and the
+        // real file is never indexed. Downloaded social videos are full of
+        // spaces, which is exactly where this bites.
         let broadcast = format!(
-            "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://{remote}"
+            "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d {}",
+            shell_quote(&format!("file://{remote}"))
         );
         if let Ok(out) = self.shell(serial, &broadcast).await {
             worked |= out.contains("Broadcast completed") || out.contains("result=0");
@@ -478,18 +485,59 @@ impl Adb {
     /// Needed because a `file://` URI handed to another app throws
     /// `FileUriExposedException` on Android 7 and later — every app the
     /// connectors target refuses it. A `content://media/...` URI built from
-    /// this id is the supported way to hand a video to another app, and it is
-    /// generic Android, not platform-specific, which is why it lives here.
+    /// this id is the supported way to hand a video to another app.
+    ///
+    /// THE TRAP, found on a real device: MediaStore stores the **canonical**
+    /// path. Push to `/sdcard/Movies/x.mp4` and the row reads
+    /// `/storage/emulated/0/Movies/x.mp4`, because `/sdcard` is a symlink on
+    /// every Android. Querying for the path we pushed to therefore never
+    /// matches, and a perfectly indexed file looks unindexed.
+    ///
+    /// So: ask for both spellings at once, then fall back to a suffix match
+    /// for any storage layout neither covers.
     pub async fn media_store_id(
         &self,
         serial: &str,
         remote: &str,
         collection: MediaCollection,
     ) -> Option<String> {
+        let mut clauses = vec![format!("_data='{}'", sql_escape(remote))];
+        if let Some(canonical) = self.canonical_path(serial, remote).await {
+            if canonical != remote {
+                clauses.push(format!("_data='{}'", sql_escape(&canonical)));
+            }
+        }
+        if let Some(id) = self
+            .query_media_id(serial, collection, &clauses.join(" OR "))
+            .await
+        {
+            return Some(id);
+        }
+
+        // Last resort: match on the tail of the path. The folder name is ours,
+        // so a false positive needs a same-named file in a same-named folder on
+        // another volume — far less likely than the alternative, which is
+        // reporting a successfully indexed file as missing.
+        let suffix = path_suffix(remote);
+        self.query_media_id(
+            serial,
+            collection,
+            &format!("_data LIKE '%{}'", sql_escape(&suffix)),
+        )
+        .await
+    }
+
+    /// Run one MediaStore query and pull the first `_id` out of it.
+    async fn query_media_id(
+        &self,
+        serial: &str,
+        collection: MediaCollection,
+        where_clause: &str,
+    ) -> Option<String> {
         let q = format!(
-            "content query --uri {} --projection _id --where \"_data='{}'\"",
+            "content query --uri {} --projection _id --where \"{}\"",
             collection.store_uri(),
-            remote.replace('\'', "")
+            where_clause
         );
         let out = self.shell(serial, &q).await.ok()?;
         // Rows print as: Row: 0 _id=42
@@ -499,6 +547,29 @@ impl Adb {
             .next()
             .filter(|s| !s.is_empty())
             .map(str::to_string)
+    }
+
+    /// Resolve a device path through its symlinks, the way MediaStore records
+    /// it. `realpath` is present on the Androids this app targets; the shell
+    /// fallback covers builds where it is not.
+    async fn canonical_path(&self, serial: &str, remote: &str) -> Option<String> {
+        let quoted = shell_quote(remote);
+        if let Ok(out) = self.shell(serial, &format!("realpath {quoted}")).await {
+            let line = out.lines().next().unwrap_or("").trim();
+            if line.starts_with('/') {
+                return Some(line.to_string());
+            }
+        }
+        // `cd` into the parent and ask where that really is.
+        let (dir, file) = remote.rsplit_once('/')?;
+        let out = self
+            .shell(serial, &format!("cd {} && pwd -P", shell_quote(dir)))
+            .await
+            .ok()?;
+        let real_dir = out.lines().next().unwrap_or("").trim();
+        real_dir
+            .starts_with('/')
+            .then(|| format!("{real_dir}/{file}"))
     }
 
     /// The `content://` URI for a pushed video, once MediaStore knows it.
@@ -587,11 +658,132 @@ impl Adb {
             .shell(serial, "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'")
             .await
             .ok()?;
-        // Focus lines look like: mCurrentFocus=Window{... u0 com.pkg/com.pkg.Act}
-        out.split_whitespace()
-            .find_map(|tok| tok.split_once('/').map(|(p, _)| p.to_string()))
-            .map(|p| p.trim_start_matches('{').to_string())
-            .filter(|p| p.contains('.'))
+        parse_foreground_package(&out)
+    }
+
+    // ------------------------------------------------------ UI automation
+    //
+    // Generic Android input. This is the same mechanism Appium drives, and it
+    // is here rather than in a connector because tapping a screen is not a
+    // platform-specific idea. WHICH button to tap is - that belongs upstairs.
+
+    /// Read the current view hierarchy.
+    ///
+    /// Dumps to a file and reads it back: `uiautomator dump /dev/tty` prints
+    /// only its own confirmation line on the Androids this app targets, which
+    /// silently yields an empty hierarchy and an automation that finds nothing.
+    pub async fn ui_dump(&self, serial: &str) -> Result<Vec<UiNode>> {
+        const REMOTE: &str = "/sdcard/.publisher-ui.xml";
+        let mut last = String::from("no output");
+
+        // `--compressed` first. uiautomator refuses to dump until the window
+        // goes idle, and an app whose composer animates — a photo preview, a
+        // shimmer, a spinner — never does. The compressed hierarchy skips
+        // uninteresting nodes and succeeds on screens where the full dump
+        // times out. Two attempts each, because the idle window is a moment
+        // that comes and goes.
+        for attempt in 0..4 {
+            let flag = if attempt % 2 == 0 { "--compressed" } else { "" };
+            let out = self
+                .shell(
+                    serial,
+                    // Errors go to stdout on purpose: swallowing them is what
+                    // made a screen we could not READ look like a screen
+                    // showing the wrong thing.
+                    &format!("uiautomator dump {flag} {REMOTE} 2>&1; echo '---'; cat {REMOTE} 2>/dev/null"),
+                )
+                .await?;
+
+            if let Some((status, xml)) = out.split_once("---") {
+                if xml.contains("<node") {
+                    return Ok(parse_ui_nodes(xml));
+                }
+                let status = status.trim();
+                if !status.is_empty() {
+                    last = status.lines().last().unwrap_or(status).to_string();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(800)).await;
+        }
+
+        Err(AppError::UiDumpFailed(sanitize(&last, "")))
+    }
+
+    /// Poll the hierarchy until one of `any_of` appears.
+    ///
+    /// Returns the node found and which matcher found it, so a caller waiting
+    /// on several alternatives (an app that says "Post" or "Share" or "Next"
+    /// depending on version) knows which it got.
+    /// `Ok(Some)` found it, `Ok(None)` the screen was readable but had no such
+    /// control, `Err` the screen could not be read at all.
+    ///
+    /// That third case has to be separate. Collapsing it into "not found" is
+    /// what made an unreadable screen report as the wrong screen — sending
+    /// someone to check an app that was showing exactly the right thing.
+    pub async fn wait_for_node(
+        &self,
+        serial: &str,
+        any_of: &[Match],
+        timeout: Duration,
+    ) -> Result<Option<UiNode>> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut last_err = None;
+        loop {
+            match self.ui_dump(serial).await {
+                Ok(nodes) => {
+                    for m in any_of {
+                        if let Some(n) = find_node(&nodes, m, false) {
+                            return Ok(Some(n));
+                        }
+                    }
+                    last_err = None;
+                }
+                Err(e) => last_err = Some(e),
+            }
+            if std::time::Instant::now() >= deadline {
+                return match last_err {
+                    Some(e) => Err(e),
+                    None => Ok(None),
+                };
+            }
+            tokio::time::sleep(Duration::from_millis(900)).await;
+        }
+    }
+
+    pub async fn tap(&self, serial: &str, x: i32, y: i32) -> Result<()> {
+        self.shell(serial, &format!("input tap {x} {y}")).await.map(|_| ())
+    }
+
+    /// Tap a node's centre.
+    pub async fn tap_node(&self, serial: &str, node: &UiNode) -> Result<()> {
+        let (x, y) = node.center();
+        self.tap(serial, x, y).await
+    }
+
+    pub async fn press_back(&self, serial: &str) -> Result<()> {
+        self.shell(serial, "input keyevent 4").await.map(|_| ())
+    }
+
+    /// Type into whatever field has focus.
+    ///
+    /// LIMITATION, and it is a real one: `input text` speaks ASCII only. A
+    /// Khmer, Thai or emoji caption cannot be typed this way at all — Android
+    /// needs a custom IME for that, which would mean installing an APK into
+    /// the user's emulator, so this refuses instead of typing mojibake.
+    /// [`can_type`] lets the caller check first and tell the user plainly.
+    pub async fn type_text(&self, serial: &str, text: &str) -> Result<()> {
+        if !can_type(text) {
+            return Err(AppError::CaptionNotTypeable);
+        }
+        // `input text` takes spaces as %s, and treats several characters as
+        // syntax. Chunked because very long arguments get truncated.
+        for chunk in chunk_text(text, 200) {
+            let escaped = escape_input_text(&chunk);
+            self.shell(serial, &format!("input text {}", shell_quote(&escaped)))
+                .await?;
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        }
+        Ok(())
     }
 
     /// Grab the framebuffer as PNG bytes.
@@ -616,6 +808,32 @@ impl Adb {
         }
         Ok(out.stdout)
     }
+}
+
+/// Pull the package name out of a `dumpsys window` focus line.
+///
+/// Lines look like:
+/// `mCurrentFocus=Window{2983e33 u0 com.pkg/com.pkg.SomeActivity}`
+///
+/// The first token containing a `/` is the `package/activity` pair; the window
+/// id before it never contains one.
+fn parse_foreground_package(out: &str) -> Option<String> {
+    out.split_whitespace()
+        .find_map(|tok| tok.split_once('/').map(|(p, _)| p.to_string()))
+        .map(|p| p.trim_start_matches('{').to_string())
+        .filter(|p| p.contains('.'))
+}
+
+/// Escape a value for a SQL string literal in a `content query --where`.
+fn sql_escape(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// The last two path components, for a suffix match: specific enough to
+/// identify the file, short enough not to depend on the storage root.
+fn path_suffix(remote: &str) -> String {
+    let tail: Vec<&str> = remote.rsplit('/').take(2).collect();
+    format!("/{}", tail.into_iter().rev().collect::<Vec<_>>().join("/"))
 }
 
 /// Whether the boot animation is done — or was never running.
@@ -658,6 +876,191 @@ pub fn looks_like_serial(s: &str) -> bool {
             !h.is_empty() && p.parse::<u16>().is_ok()
         })
         || s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// One element of the on-screen view hierarchy, as `uiautomator dump` reports it.
+///
+/// Generic Android: this is the same hierarchy Appium and Espresso read. It
+/// carries no knowledge of any particular app.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UiNode {
+    pub text: String,
+    pub resource_id: String,
+    pub content_desc: String,
+    pub class: String,
+    pub clickable: bool,
+    pub enabled: bool,
+    /// Screen rectangle: (left, top, right, bottom).
+    pub bounds: (i32, i32, i32, i32),
+}
+
+impl UiNode {
+    /// Point to tap: the centre of the node.
+    pub fn center(&self) -> (i32, i32) {
+        let (l, t, r, b) = self.bounds;
+        ((l + r) / 2, (t + b) / 2)
+    }
+
+    /// A zero-area node cannot be tapped, and matching one would make the
+    /// automation tap the corner of the screen.
+    pub fn is_tappable(&self) -> bool {
+        let (l, t, r, b) = self.bounds;
+        self.enabled && r > l && b > t
+    }
+}
+
+/// How to recognise a node.
+#[derive(Debug, Clone)]
+pub enum Match {
+    /// Exact visible label, case-insensitive.
+    Text(String),
+    /// Visible label contains this, case-insensitive.
+    TextContains(String),
+    /// Accessibility label, case-insensitive exact.
+    Desc(String),
+    /// The tail of a `resource-id`, e.g. `id/post_button`. Matched on the
+    /// suffix so the package prefix does not have to be hard-coded.
+    ResourceId(String),
+    /// Any node of this widget class, e.g. `android.widget.EditText`.
+    Class(String),
+}
+
+impl Match {
+    fn matches(&self, n: &UiNode) -> bool {
+        match self {
+            Match::Text(v) => n.text.eq_ignore_ascii_case(v),
+            Match::TextContains(v) => n.text.to_lowercase().contains(&v.to_lowercase()),
+            Match::Desc(v) => n.content_desc.eq_ignore_ascii_case(v),
+            Match::ResourceId(v) => n.resource_id.ends_with(v.as_str()),
+            Match::Class(v) => n.class == *v,
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        match self {
+            Match::Text(v) | Match::TextContains(v) => format!("\u{201c}{v}\u{201d}"),
+            Match::Desc(v) => format!("the {v} control"),
+            Match::ResourceId(v) => format!("`{v}`"),
+            Match::Class(v) => format!("a {v}"),
+        }
+    }
+}
+
+/// Find the first node satisfying a matcher.
+///
+/// `clickable_only` matters: apps routinely put the visible label in a
+/// non-clickable `TextView` inside a clickable container. Tapping the label's
+/// centre usually still works, so this prefers a clickable node and falls back
+/// to any tappable one rather than giving up.
+pub fn find_node(nodes: &[UiNode], m: &Match, clickable_only: bool) -> Option<UiNode> {
+    let candidates = nodes.iter().filter(|n| n.is_tappable() && m.matches(n));
+    let mut fallback = None;
+    for n in candidates {
+        if n.clickable {
+            return Some(n.clone());
+        }
+        if fallback.is_none() {
+            fallback = Some(n.clone());
+        }
+    }
+    if clickable_only {
+        fallback.filter(|_| true)
+    } else {
+        fallback
+    }
+}
+
+/// Parse a `uiautomator dump` document into a flat node list.
+///
+/// A hand-rolled scan rather than an XML crate: the format is one self-closing
+/// tag shape with fixed attributes, the documents run to hundreds of KB, and
+/// adding a parser dependency for `attr="value"` is not worth it. Unknown or
+/// malformed nodes are skipped, never fatal — a partial hierarchy still lets
+/// the automation find its button.
+pub fn parse_ui_nodes(xml: &str) -> Vec<UiNode> {
+    let mut out = Vec::new();
+    for chunk in xml.split("<node ").skip(1) {
+        let head = chunk.split('>').next().unwrap_or("");
+        let Some(bounds) = attr(head, "bounds").and_then(|b| parse_bounds(&b)) else {
+            continue;
+        };
+        out.push(UiNode {
+            text: attr(head, "text").unwrap_or_default(),
+            resource_id: attr(head, "resource-id").unwrap_or_default(),
+            content_desc: attr(head, "content-desc").unwrap_or_default(),
+            class: attr(head, "class").unwrap_or_default(),
+            clickable: attr(head, "clickable").as_deref() == Some("true"),
+            enabled: attr(head, "enabled").as_deref() != Some("false"),
+            bounds,
+        });
+    }
+    out
+}
+
+/// Read one `name="value"` attribute out of a tag head.
+fn attr(head: &str, name: &str) -> Option<String> {
+    let key = format!("{name}=\"");
+    let start = head.find(&key)? + key.len();
+    let rest = &head[start..];
+    let end = rest.find('"')?;
+    Some(unescape_xml(&rest[..end]))
+}
+
+fn unescape_xml(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+}
+
+/// `[0,66][1080,2148]` -> (0, 66, 1080, 2148).
+fn parse_bounds(raw: &str) -> Option<(i32, i32, i32, i32)> {
+    let nums: Vec<i32> = raw
+        .split(|c: char| !c.is_ascii_digit() && c != '-')
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    (nums.len() == 4).then(|| (nums[0], nums[1], nums[2], nums[3]))
+}
+
+/// Whether `input text` can carry this string at all — see [`Adb::type_text`].
+pub fn can_type(text: &str) -> bool {
+    text.chars().all(|c| c.is_ascii() && (c == '\n' || !c.is_control()))
+}
+
+/// `input text` reads a space as an argument separator and `%s` as a space;
+/// several other characters are shell/`input` syntax.
+fn escape_input_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            ' ' => out.push_str("%s"),
+            '\n' => out.push_str("%s"),
+            '(' | ')' | '<' | '>' | '|' | ';' | '&' | '*' | '\\' | '~' | '"' | '`' | '$' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Split into pieces small enough for one `input text` call.
+fn chunk_text(s: &str, max: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for c in s.chars() {
+        if cur.len() >= max {
+            out.push(std::mem::take(&mut cur));
+        }
+        cur.push(c);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 /// Quote one argument for the device's `sh`. Paths we build contain no quotes,
@@ -782,6 +1185,54 @@ mod tests {
     /// The bug this test exists for: LDPlayer disables the boot animation, so
     /// the property is empty. Reading that as "still booting" makes every
     /// Connect time out against a perfectly healthy emulator.
+    /// The bug this exists for: MediaStore records
+    /// `/storage/emulated/0/...` for a file pushed to `/sdcard/...`, so an
+    /// exact query on the pushed path finds nothing. The suffix is what both
+    /// spellings share.
+    #[test]
+    fn a_path_suffix_is_independent_of_the_storage_root() {
+        assert_eq!(
+            path_suffix("/sdcard/Movies/SocialPublisher/clip.mp4"),
+            "/SocialPublisher/clip.mp4"
+        );
+        assert_eq!(
+            path_suffix("/storage/emulated/0/Movies/SocialPublisher/clip.mp4"),
+            "/SocialPublisher/clip.mp4",
+            "both spellings of the same file must share a suffix"
+        );
+    }
+
+    /// Captured verbatim from a real Android 9 emulator. The second case is
+    /// what a not-signed-in app actually produces — Play Services' add-account
+    /// screen — and reading that as "the app is ready" would send someone to a
+    /// composer that never opened.
+    #[test]
+    fn the_foreground_package_is_read_from_a_real_focus_line() {
+        assert_eq!(
+            parse_foreground_package(
+                "  mCurrentFocus=Window{2983e33 u0 com.google.android.youtube/com.google.android.youtube.HomeActivity}"
+            )
+            .as_deref(),
+            Some("com.google.android.youtube")
+        );
+        assert_eq!(
+            parse_foreground_package(
+                "  mCurrentFocus=Window{2983e33 u0 com.google.android.gms/com.google.android.gms.auth.uiflows.addaccount.AccountAddedActivity}"
+            )
+            .as_deref(),
+            Some("com.google.android.gms"),
+            "a login prompt is not the app we asked for"
+        );
+        assert_eq!(parse_foreground_package("  mCurrentFocus=null"), None);
+        assert_eq!(parse_foreground_package(""), None);
+    }
+
+    #[test]
+    fn sql_literals_are_escaped() {
+        assert_eq!(sql_escape("it's.mp4"), "it''s.mp4");
+        assert_eq!(sql_escape("plain.mp4"), "plain.mp4");
+    }
+
     #[test]
     fn an_absent_boot_animation_counts_as_finished() {
         assert!(boot_animation_finished(""), "LDPlayer reports no bootanim at all");
@@ -814,6 +1265,67 @@ mod tests {
         assert!(is_refusal("cannot connect to 127.0.0.1:5555: no connection could be made because the target machine actively refused it. (10061)"));
         assert!(is_refusal("failed to connect to '127.0.0.1:5555': connection refused"));
         assert!(!is_refusal("connected to 127.0.0.1:5555"));
+    }
+
+    /// A real filename from a downloaded social video. Unquoted, `am` reads
+    /// only up to the first space and treats the next word as the package.
+    /// Captured verbatim from a real Android 9 emulator.
+    #[test]
+    fn a_real_ui_dump_is_parsed() {
+        let xml = r#"<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation="0"><node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="com.android.settings" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[0,0][1080,2148]"><node index="0" text="Post" resource-id="com.facebook.katana:id/post_button" class="android.widget.Button" package="com.facebook.katana" content-desc="Post" checkable="false" checked="false" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[880,120][1040,200]"/></node></hierarchy>"#;
+
+        let nodes = parse_ui_nodes(xml);
+        assert_eq!(nodes.len(), 2);
+
+        let button = find_node(&nodes, &Match::Text("post".into()), true).unwrap();
+        assert!(button.clickable);
+        assert_eq!(button.center(), (960, 160));
+        assert_eq!(
+            find_node(&nodes, &Match::ResourceId("id/post_button".into()), true).unwrap(),
+            button
+        );
+        assert_eq!(find_node(&nodes, &Match::Desc("Post".into()), true).unwrap(), button);
+        assert!(find_node(&nodes, &Match::Text("Publish".into()), true).is_none());
+    }
+
+    #[test]
+    fn a_zero_area_node_is_never_tapped() {
+        let xml = r#"<node text="Post" resource-id="" class="x" content-desc="" clickable="true" enabled="true" bounds="[0,0][0,0]"/>"#;
+        let nodes = parse_ui_nodes(xml);
+        assert_eq!(nodes.len(), 1);
+        assert!(!nodes[0].is_tappable(), "an invisible node would tap the screen corner");
+        assert!(find_node(&nodes, &Match::Text("Post".into()), true).is_none());
+    }
+
+    #[test]
+    fn xml_entities_in_labels_are_decoded() {
+        let xml = r#"<node text="Tom &amp; Jerry" resource-id="" class="x" content-desc="" clickable="true" enabled="true" bounds="[0,0][10,10]"/>"#;
+        assert_eq!(parse_ui_nodes(xml)[0].text, "Tom & Jerry");
+    }
+
+    #[test]
+    fn only_ascii_captions_can_be_typed() {
+        assert!(can_type("Check out my new video!"));
+        assert!(!can_type("សូមស្វាគមន៍"), "Khmer needs a custom IME, not input text");
+        assert!(!can_type("nice 🔥"), "emoji cannot go through input text");
+    }
+
+    #[test]
+    fn input_text_escaping_handles_spaces_and_syntax() {
+        assert_eq!(escape_input_text("a b"), "a%sb");
+        assert_eq!(escape_input_text("hi (you)"), r"hi%s\(you\)");
+        assert_eq!(escape_input_text("a\nb"), "a%sb");
+    }
+
+    #[test]
+    fn a_scan_uri_with_spaces_stays_one_argument() {
+        let remote = "/sdcard/Movies/SocialPublisher/2.5M views _ One Hit_.mp4";
+        let arg = shell_quote(&format!("file://{remote}"));
+        assert!(arg.starts_with('\'') && arg.ends_with('\''), "must be quoted: {arg}");
+        assert!(
+            arg.contains("2.5M views _ One Hit_.mp4"),
+            "the whole path must survive: {arg}"
+        );
     }
 
     #[test]

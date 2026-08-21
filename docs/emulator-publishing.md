@@ -554,6 +554,39 @@ ADB's output is sanitised before it reaches a job's error field: `adb:` and
 
 ---
 
+## 11b. Automatic posting (opt-in)
+
+With **Settings → Tap Post automatically** on, the connector drives the app's
+composer to completion instead of handing it back: it reads the view hierarchy
+(`uiautomator dump`), finds the real Post button by label, and taps it.
+
+Off by default, deliberately. Everything below the composer uses Android's
+published contracts (`adb push`, MediaStore, `ACTION_SEND`) and does not change
+when an app is redesigned. Tapping Post reads **on-screen labels**, so an app
+update can break it — and a mis-tap in a composer publishes something that
+cannot be un-published.
+
+Three rules make that safe:
+
+1. **Prove the screen first.** Every recipe that types runs a `Step::Expect`
+   beforehand. Without it the automation acts wherever it happens to be — a
+   real failure: YouTube opened on its home screen, a bare `EditText` matcher
+   found the SEARCH BOX, and the caption was typed into it.
+2. **Never match a bare text field.** No recipe may use `Match::Class` for a
+   caption target, and any field whose id or label mentions search/query/find is
+   refused outright. Both are enforced by tests.
+3. **Never guess.** A control that cannot be found ends the run with a hand-off
+   naming the control, not a tap at a plausible position.
+
+Known limits:
+
+- **Non-ASCII captions cannot be typed.** `input text` is ASCII-only; Khmer or
+  emoji would need a custom IME installed on the device. Facebook is exempt —
+  the caption rides in `EXTRA_TEXT`.
+- **Album posts stay manual.** Several files can only be attached through the
+  app's own gallery grid, and driving a multi-select grid by label is exactly
+  the blind tapping rule 3 forbids.
+
 ## 12. Security and safety
 
 The app relies entirely on sessions you established yourself, inside the
