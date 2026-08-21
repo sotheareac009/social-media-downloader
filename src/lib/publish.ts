@@ -32,6 +32,8 @@ export interface Account {
   platform: Platform;
   ldplayer_instance_id: string;
   package_name: string;
+  /** The name the app shows on its composer; checked before every post. */
+  profile_name: string | null;
   created_at: number;
 }
 
@@ -42,10 +44,31 @@ export interface AccountView extends Account {
   detail: string | null;
   /** False for "Lite" apps, which expose no labels for automation to read. */
   supports_auto_post: boolean;
+  /** False while a platform is switched off: listed, but not a publish target. */
+  available: boolean;
+  /** Pages this account can post as; the picker offers these instead of it. */
+  pages: AccountPage[];
+}
+
+/** One identity an account can publish under. */
+export interface AccountPage {
+  name: string;
+  /** When the app last confirmed the Page is still there. */
+  last_seen: number;
+}
+
+/** Where one post goes: an account, and which identity on it. */
+export interface PublishTarget {
+  account_id: string;
+  /** null posts as the profile itself. */
+  page: string | null;
 }
 
 /** How several selected assets become posts. */
 export type PostMode = "album" | "single";
+
+/** What a video becomes when Facebook offers the choice. */
+export type VideoFormat = "post" | "reel";
 
 export interface PublishJob {
   id: string;
@@ -110,6 +133,10 @@ export const publishAddAccount = (args: {
 export const publishRenameAccount = (id: string, name: string) =>
   invoke<void>("publish_rename_account", { id, name });
 
+/** Record who this account posts as. An empty string switches the check off. */
+export const publishSetProfileName = (id: string, profileName: string) =>
+  invoke<void>("publish_set_profile_name", { id, profileName });
+
 export const publishRemoveAccount = (id: string) =>
   invoke<void>("publish_remove_account", { id });
 
@@ -123,9 +150,20 @@ export const publishRemoveAccount = (id: string) =>
 export const publishSubmit = (args: {
   paths: string[];
   caption: string;
-  accountIds: string[];
+  targets: PublishTarget[];
   mode: PostMode;
+  videoFormat: VideoFormat;
 }) => invoke<PublishJob[]>("publish_submit", args);
+
+/** Read this account's Pages out of the Facebook app on its emulator. */
+export const publishDiscoverPages = (id: string) =>
+  invoke<string[]>("publish_discover_pages", { id });
+
+export const publishAddPage = (id: string, pageName: string) =>
+  invoke<void>("publish_add_page", { id, pageName });
+
+export const publishRemovePage = (id: string, pageName: string) =>
+  invoke<void>("publish_remove_page", { id, pageName });
 
 export const publishJobs = () => invoke<PublishJob[]>("publish_jobs");
 

@@ -1116,3 +1116,85 @@
   color: var(--text-secondary);
   max-width: 62ch;
 }
+
+/* The same note, but it is a button: clicking it edits the value it states.
+   Left-aligned and full-width inside its column so it reads as the note it
+   looks like rather than a control that happens to contain a sentence. */
+.acctrow__note--action {
+  display: block;
+  width: 100%;
+  border: 0;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.acctrow__note--action:hover {
+  color: var(--text-primary);
+}
+
+/* Search over the publish targets. Sits between the label row and the grid,
+   full width, because it filters everything below it. */
+.pubform__search {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+/* Pages an account posts as. Indented under the account because they belong
+   to it, but listed rather than folded away: they are what gets picked on the
+   Publish page, so seeing them here is seeing the real targets. */
+.acctrow__pages {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-subtle, var(--surface-3));
+  background: var(--surface-2);
+  max-width: 62ch;
+}
+
+.acctrow__pageshead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  font-weight: 560;
+  color: var(--text-secondary);
+}
+
+.acctrow__pagelist {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.acctrow__page {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  background: var(--surface-3);
+}
+
+.acctrow__pagename {
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.acctrow__pageadd {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.acctrow__pageadd .input {
+  flex: 1;
+  min-width: 0;
+}

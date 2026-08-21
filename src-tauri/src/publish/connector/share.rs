@@ -58,7 +58,6 @@ impl PlatformConnector for ShareConnector {
 
     async fn publish(&self, ctx: &PublishContext) -> Result<Outcome> {
         let label = self.platform.label();
-        let noun = noun_for(ctx);
 
         // Wake the app first. Sending a share intent to an app that has not
         // run since boot frequently lands on a blank screen while it
@@ -71,28 +70,169 @@ impl PlatformConnector for ShareConnector {
 
         let adb = ctx.manager.adb()?;
 
-        // An album cannot be pre-attached. `ACTION_SEND_MULTIPLE` needs
-        // EXTRA_STREAM as a ParcelableArrayList<Uri>, and `am start` has no
-        // flag that builds one — `--eu` takes a single URI, and `--esa` would
-        // pass Strings, which every receiving app rejects with a
-        // ClassCastException. So the files are staged and the person selects
-        // them, which is honest, rather than firing an intent we know fails.
+        // An album cannot be pre-attached as ONE post. `ACTION_SEND_MULTIPLE`
+        // needs EXTRA_STREAM as a ParcelableArrayList<Uri>, and `am start` has
+        // no flag that builds one — checked against the device's own `am
+        // help`, which offers lists of Strings, Integers, Longs, Floats and
+        // Doubles, and single Uris via `--eu`. Nothing else.
+        //
+        // So a carousel is out, but the files need not be: each is posted on
+        // its own through the route that does work, which finishes the job
+        // instead of handing it back. That needs the final tap automated —
+        // without it, N posts would mean N manual taps, and staging the album
+        // for one hand-picked carousel is the better trade, because it is at
+        // least the post the person asked for.
         if ctx.is_album() {
-            // Not automatable, and not for want of trying: the files can only
-            // be attached through the app's own gallery picker, and driving a
-            // multi-select grid by label is exactly the kind of blind tapping
-            // that posts the wrong thing.
-            ctx.step(0.92, &format!("{} files are ready in the gallery", ctx.media.len()));
-            return Ok(Outcome::ReadyForUser(album_message(ctx, label)));
+            if !ctx.auto_post {
+                ctx.step(0.92, &format!("{} files are ready in the gallery", ctx.media.len()));
+                return Ok(Outcome::ReadyForUser(album_message(ctx, label)));
+            }
+            return self.publish_separately(ctx, &adb, label).await;
         }
 
-        let item = ctx.first();
+        self.publish_one(ctx, &adb, ctx.first(), None).await
+    }
+}
+
+impl ShareConnector {
+    /// Post every file in an album as its own post, in the order the person
+    /// arranged them.
+    ///
+    /// Stops at the first one that does not go out. Carrying on would mean
+    /// firing more intents at an app that has already shown it is not in a
+    /// state to post — most often a login or a checkpoint, which the next file
+    /// would hit too — and every attempt past that point leaves one more
+    /// half-finished composer on someone's account.
+    async fn publish_separately(
+        &self,
+        ctx: &PublishContext,
+        adb: &crate::ldplayer::adb::Adb,
+        label: &str,
+    ) -> Result<Outcome> {
+        let total = ctx.media.len();
+        ctx.step(
+            0.75,
+            &format!("Posting {total} files to {label} as {total} separate posts…"),
+        );
+
+        let mut posted = 0usize;
+        for (i, item) in ctx.media.iter().enumerate() {
+            if i > 0 {
+                // Let the app finish returning to its feed. Firing the next
+                // share intent while the previous composer is still animating
+                // away lands it on the wrong screen.
+                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            }
+
+            match self.publish_one(ctx, adb, item, Some((i + 1, total))).await? {
+                Outcome::Published => posted += 1,
+                stopped => return Ok(stopped_partway(posted, total, i + 1, stopped)),
+            }
+        }
+
+        ctx.step(1.0, &format!("Posted {posted} separate posts to {label}"));
+        Ok(Outcome::Published)
+    }
+
+    /// Hand one file to the app and, when asked, drive the composer to Post.
+    ///
+    /// `seq` is `(n, total)` when this is one file of an album being posted
+    /// separately, and `None` for an ordinary single post. It only shapes the
+    /// progress lines, and that is worth its weight: "2 of 3: Waiting for the
+    /// Facebook composer…" is the difference between a job that looks stuck
+    /// and one a person can follow.
+    async fn publish_one(
+        &self,
+        ctx: &PublishContext,
+        adb: &crate::ldplayer::adb::Adb,
+        item: &crate::publish::connector::StagedMedia,
+        seq: Option<(usize, usize)>,
+    ) -> Result<Outcome> {
+        let Some(page) = ctx.post_as_page.as_deref() else {
+            return self.post_as_current_identity(ctx, adb, item, seq).await;
+        };
+
+        // Posting as a Page means switching the whole app over, so the switch
+        // has to be undone whatever happens next — including a failure. An app
+        // left active as a Page publishes the NEXT job there too, and that job
+        // did nothing wrong.
+        // Start clean before switching. The profile switcher is reached from
+        // the app's own home screen, and a publish that stopped half way
+        // leaves a composer sitting on top of it — that composer has a "Menu"
+        // control of its own and no switcher behind it, so the switch would
+        // fail on exactly the accounts that had already had one bad run.
+        ctx.step(0.76, &format!("Restarting {}…", self.platform.label()));
+        adb.relaunch_app(&ctx.serial, &ctx.package).await?;
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        ctx.step(0.78, &format!("Switching {} to {page}…", self.platform.label()));
+        crate::publish::connector::pages::switch_to(adb, &ctx.serial, page).await?;
+
+        let outcome = self.post_as_current_identity(ctx, adb, item, seq).await;
+        self.restore_identity(ctx, adb).await;
+        outcome
+    }
+
+    /// Switch back to the profile after a Page post.
+    ///
+    /// Best effort, and deliberately not fatal: the post has already happened
+    /// by the time this runs, so failing the job over the cleanup would report
+    /// a successful publish as a failure. The identity check on the next job
+    /// is what actually protects against a session left switched — this just
+    /// means it rarely has to.
+    async fn restore_identity(&self, ctx: &PublishContext, adb: &crate::ldplayer::adb::Adb) {
+        let Some(profile) = ctx.profile_name.as_deref() else {
+            // Nothing to switch back TO. Say so loudly: the app is still the
+            // Page, and the person needs to know before they queue anything.
+            ctx.step(
+                0.99,
+                "Posted, but this account has no profile name saved, so the app is still                  switched to the Page — run Find Pages to learn it",
+            );
+            return;
+        };
+
+        // Clean task again: if the post FAILED, its composer is still open,
+        // and that is the one screen the switcher cannot be reached from. The
+        // post has already happened or already failed by now, so there is
+        // nothing left in that composer worth keeping.
+        ctx.step(0.99, &format!("Switching back to {profile}…"));
+        adb.relaunch_app(&ctx.serial, &ctx.package).await.ok();
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        if crate::publish::connector::pages::switch_to(adb, &ctx.serial, profile)
+            .await
+            .is_err()
+        {
+            ctx.step(
+                0.99,
+                &format!(
+                    "Posted, but couldn't switch back to {profile} — check the instance                      before the next job"
+                ),
+            );
+        }
+    }
+
+    /// One post, as whoever the app is currently signed in as.
+    async fn post_as_current_identity(
+        &self,
+        ctx: &PublishContext,
+        adb: &crate::ldplayer::adb::Adb,
+        item: &crate::publish::connector::StagedMedia,
+        seq: Option<(usize, usize)>,
+    ) -> Result<Outcome> {
+        let label = self.platform.label();
+        let noun = noun_for_item(item);
+        let tag = match seq {
+            Some((n, total)) => format!("{n} of {total}: "),
+            None => String::new(),
+        };
+
         let Some(uri) = item.content_uri.as_deref() else {
             // No MediaStore URI means the gallery cannot offer the file
             // either, so the honest move is to say where it is and let the
             // person pick it, rather than fire an intent that will fail with a
             // permission error.
-            ctx.step(0.9, &format!("Opened the app; pick the {noun} from the gallery"));
+            ctx.step(0.9, &format!("{tag}Opened the app; pick the {noun} from the gallery"));
             return Ok(Outcome::ReadyForUser(format!(
                 "{label} is open on this instance. The {noun} is on the device at {}, \
                  but Android did not index it, so choose it from the gallery manually.",
@@ -100,21 +240,21 @@ impl PlatformConnector for ShareConnector {
             )));
         };
 
-        ctx.step(0.82, &format!("Handing the {noun} to {label}…"));
+        ctx.step(0.82, &format!("{tag}Handing the {noun} to {label}…"));
         let caption = self.honours_caption().then(|| ctx.caption.as_str());
         adb.share_to(&ctx.serial, &ctx.package, uri, item.collection.mime(), caption)
             .await?;
 
         // Give the composer time to come up. Twenty seconds is not generous —
         // a cold app on a loaded emulator regularly needs most of it.
-        ctx.step(0.9, &format!("Waiting for the {label} composer…"));
+        ctx.step(0.9, &format!("{tag}Waiting for the {label} composer…"));
         let seen = self
-            .wait_for_foreground(ctx, &adb, std::time::Duration::from_secs(20))
+            .wait_for_foreground(ctx, adb, std::time::Duration::from_secs(20))
             .await;
         self.capture(ctx).await;
 
         if let Foreground::Other(pkg) = &seen {
-            ctx.step(0.92, &format!("{pkg} is on screen instead of {label}"));
+            ctx.step(0.92, &format!("{tag}{pkg} is on screen instead of {label}"));
             let because = explain_foreground(pkg)
                 .map(|r| format!(" — {r}"))
                 .unwrap_or_else(|| format!(" — `{pkg}` is on screen instead"));
@@ -129,16 +269,16 @@ impl PlatformConnector for ShareConnector {
         // automated: the composer is open with the media attached. Only now
         // does the app get driven, and only if the user asked for it.
         if ctx.auto_post {
-            match autopost::run(ctx, &adb, &autopost::recipe(self.platform)).await? {
+            match autopost::run(ctx, adb, self.platform).await? {
                 autopost::Run::Posted => {
-                    ctx.step(1.0, &format!("Posted to {label}"));
+                    ctx.step(1.0, &format!("{tag}Posted to {label}"));
                     return Ok(Outcome::Published);
                 }
                 // Not a failure: the media is attached and the composer is
                 // open. The automation stopped somewhere it should not guess,
                 // and said where.
                 autopost::Run::HandedBack(why) => {
-                    ctx.step(0.97, "Stopped — needs you");
+                    ctx.step(0.97, &format!("{tag}Stopped — needs you"));
                     return Ok(Outcome::Interrupted(why));
                 }
             }
@@ -234,19 +374,39 @@ fn explain_foreground(pkg: &str) -> Option<&'static str> {
     None
 }
 
-/// "video", "photo", or "files" for a mixed album — the word the message uses.
-fn noun_for(ctx: &PublishContext) -> &'static str {
-    if ctx.is_mixed() {
-        return "files";
+/// "video" or "photo" for one file — the word a per-file message uses.
+///
+/// Deliberately per-file rather than per-job: when an album is posted file by
+/// file, each post really is one photo, and "2 of 3: Handing the photos to
+/// Facebook" reads as though all three went into that one post.
+fn noun_for_item(item: &crate::publish::connector::StagedMedia) -> &'static str {
+    match item.collection {
+        MediaCollection::Video => "video",
+        MediaCollection::Image => "photo",
     }
-    match ctx.first().collection {
-        MediaCollection::Video => {
-            if ctx.is_album() { "videos" } else { "video" }
-        }
-        MediaCollection::Image => {
-            if ctx.is_album() { "photos" } else { "photo" }
-        }
-    }
+}
+
+/// Report an album that stopped part way through.
+///
+/// The count leads, because it is the thing the person has to act on: posts
+/// that already went out cannot be taken back, and a message that only
+/// explains the failure leaves them guessing how much of the album is live.
+fn stopped_partway(posted: usize, total: usize, at: usize, stopped: Outcome) -> Outcome {
+    let reason = match stopped {
+        Outcome::ReadyForUser(why) | Outcome::Interrupted(why) => why,
+        // Not reachable: the caller only calls this for a non-Published
+        // outcome. Worth a sentence rather than a panic — a publish is a bad
+        // place to discover an unwrap.
+        Outcome::Published => "it stopped without saying why".to_string(),
+    };
+
+    let done = if posted == 0 {
+        "Nothing was posted".to_string()
+    } else {
+        format!("{posted} of {total} went out as separate posts, and they are live")
+    };
+
+    Outcome::Interrupted(format!("{done}. File {at} stopped: {reason}"))
 }
 
 /// What to tell the user once an album is staged.
@@ -282,6 +442,45 @@ fn album_message(ctx: &PublishContext, label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::publish::connector::StagedMedia;
+
+    /// The bug this exists for: an album job stopped dead with "they can't be
+    /// attached from outside the app". That is true of a carousel — verified
+    /// against the device's own `am help`, which has no list-of-Uri extra —
+    /// but it is not true of the files, which can each be posted on their own.
+    /// So each file gets the per-file word, not the album's plural.
+    #[test]
+    fn each_file_of_a_split_album_is_described_on_its_own() {
+        let photo = StagedMedia {
+            file_name: "a.jpg".into(),
+            remote_path: "/sdcard/Pictures/a.jpg".into(),
+            content_uri: Some("content://media/external/images/media/1".into()),
+            collection: MediaCollection::Image,
+        };
+        let video = StagedMedia { collection: MediaCollection::Video, ..photo.clone() };
+
+        assert_eq!(noun_for_item(&photo), "photo");
+        assert_eq!(noun_for_item(&video), "video");
+    }
+
+    /// Posts that already went out cannot be taken back, so a partial album
+    /// has to lead with how many are live — a message that only explains the
+    /// failure leaves someone guessing what is on their profile.
+    #[test]
+    fn a_part_posted_album_says_how_much_is_already_live() {
+        let out = stopped_partway(2, 3, 3, Outcome::Interrupted("Facebook asked you to log in".into()));
+        let Outcome::Interrupted(msg) = out else {
+            panic!("a part-posted album is not a clean success");
+        };
+        assert!(msg.contains("2 of 3"), "{msg}");
+        assert!(msg.contains("live"), "{msg}");
+        assert!(msg.contains("log in"), "the reason must survive: {msg}");
+
+        // Nothing posted is a different sentence, not "0 of 3 are live".
+        let none = stopped_partway(0, 2, 1, Outcome::Interrupted("the composer never opened".into()));
+        let Outcome::Interrupted(msg) = none else { panic!("still not a success") };
+        assert!(msg.starts_with("Nothing was posted"), "{msg}");
+    }
 
     #[test]
     fn only_facebook_is_claimed_to_honour_extra_text() {

@@ -223,6 +223,9 @@ pub enum AppError {
     #[error("{0}")]
     PackagePlatformMismatch(String),
 
+    #[error("publishing to {0} is not switched on yet")]
+    PlatformUnavailable(String),
+
     #[error("no publishing job with that id")]
     PublishJobNotFound(String),
 
@@ -296,6 +299,7 @@ impl AppError {
             Self::CaptionNotTypeable => "caption_not_typeable",
             Self::AccountNotFound(_) => "account_not_found",
             Self::PackagePlatformMismatch(_) => "package_platform_mismatch",
+            Self::PlatformUnavailable(_) => "platform_unavailable",
             Self::PublishJobNotFound(_) => "publish_job_not_found",
             Self::JobNotRetryable(_) => "job_not_retryable",
             Self::NoAccountsSelected => "no_accounts_selected",

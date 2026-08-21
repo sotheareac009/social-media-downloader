@@ -30,6 +30,24 @@ impl Platform {
         Platform::Youtube,
     ];
 
+    /// The platforms publishing is switched ON for.
+    ///
+    /// Facebook only for now: it is the one whose composer has been driven
+    /// end to end against a real instance, screen by screen. The others keep
+    /// their variants, packages, connectors and recipes — none of that is
+    /// deleted — so switching one back on is an entry in this list rather
+    /// than a rebuild.
+    ///
+    /// Deliberately narrower than [`Self::ALL`], which stays the complete set:
+    /// an account stored for a parked platform must still parse, so it can be
+    /// seen and removed rather than becoming a row nobody can read or delete.
+    pub const AVAILABLE: &'static [Platform] = &[Platform::Facebook];
+
+    /// Whether publishing to this platform is switched on.
+    pub fn is_available(self) -> bool {
+        Self::AVAILABLE.contains(&self)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Platform::Facebook => "facebook",
@@ -133,6 +151,14 @@ pub struct Account {
     pub ldplayer_instance_id: String,
     /// The exact package on that device, which may be a Lite variant.
     pub package_name: String,
+    /// The display name this account posts under, as the app itself renders
+    /// it on its composer — "Sambath Sotheareach", not a handle or an id.
+    ///
+    /// Set, it is checked against the composer before anything is submitted,
+    /// so a session that has been switched to another identity is caught
+    /// before it posts rather than after. Unset, no check runs and the
+    /// account behaves exactly as it did before this existed.
+    pub profile_name: Option<String>,
     pub created_at: i64,
 }
 
@@ -152,6 +178,78 @@ pub enum AccountStatus {
     DeviceMissing,
 }
 
+/// Which kind of post a video becomes on Facebook.
+///
+/// Sharing a video can put up a chooser — Reel, Post, Story — and the answer
+/// changes what gets published, not just how it looks: a Reel is a different
+/// surface with a different composer. It is the person's call, so it is
+/// carried on the job rather than guessed from the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoFormat {
+    /// An ordinary feed post.
+    Post,
+    Reel,
+}
+
+impl VideoFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VideoFormat::Post => "post",
+            VideoFormat::Reel => "reel",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            VideoFormat::Post => "Post",
+            VideoFormat::Reel => "Reel",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "post" => Some(VideoFormat::Post),
+            "reel" => Some(VideoFormat::Reel),
+            _ => None,
+        }
+    }
+}
+
+impl Default for VideoFormat {
+    /// A feed post: it is what "publish this video" means to most people, and
+    /// it is the flow the caption and Page targeting were built around.
+    fn default() -> Self {
+        VideoFormat::Post
+    }
+}
+
+/// Where one post is going: an account, and which identity on it.
+///
+/// An account is a signed-in app; a Page is one of the identities that app can
+/// publish under. Selecting three Pages on one account is three targets on one
+/// account, not three accounts — which is exactly what the picker shows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishTarget {
+    pub account_id: String,
+    /// `None` posts as the profile itself.
+    #[serde(default)]
+    pub page: Option<String>,
+}
+
+/// A Facebook Page an account can post as.
+///
+/// Not an account: a Page has no login and no device of its own. It is one
+/// more identity the same signed-in app can publish under, which is why it
+/// hangs off an account rather than sitting beside one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountPage {
+    pub name: String,
+    /// When the app last confirmed this Page exists, so a stale list can say
+    /// so rather than quietly offering somewhere that is no longer yours.
+    pub last_seen: i64,
+}
+
 /// An account plus everything the UI needs to render its row.
 #[derive(Debug, Clone, Serialize)]
 pub struct AccountView {
@@ -165,6 +263,15 @@ pub struct AccountView {
     /// False for apps that expose no accessibility labels, so the UI can say
     /// so before a job is queued rather than after it stops.
     pub supports_auto_post: bool,
+    /// Whether publishing to this account's platform is switched on. An
+    /// account for a parked platform stays listed — hiding it would leave
+    /// something in the database nobody could see or delete — but it is not
+    /// offered as a target.
+    pub available: bool,
+    /// Pages this account can post as. Empty until they are discovered or
+    /// added, and the publish picker offers these instead of the profile when
+    /// there are any — posting to Pages is what the account is for.
+    pub pages: Vec<AccountPage>,
 }
 
 /// A local file staged for publishing. The file itself is never copied into
@@ -297,6 +404,23 @@ mod tests {
                 assert_eq!(Platform::for_package(pkg), Some(*p), "{pkg}");
             }
         }
+    }
+
+    /// Facebook is the only platform switched on right now. AVAILABLE is
+    /// deliberately a subset of ALL rather than a replacement for it: a stored
+    /// account for a parked platform still has to parse, or it becomes a row
+    /// in the database that cannot be read, shown, or deleted.
+    #[test]
+    fn only_switched_on_platforms_are_offered() {
+        assert_eq!(Platform::AVAILABLE, &[Platform::Facebook]);
+        assert!(Platform::Facebook.is_available());
+        assert!(!Platform::Youtube.is_available());
+
+        for p in Platform::AVAILABLE {
+            assert!(Platform::ALL.contains(p), "{p:?} must stay in ALL");
+        }
+        // A parked platform still round-trips, so its accounts stay readable.
+        assert_eq!(Platform::parse("youtube"), Some(Platform::Youtube));
     }
 
     #[test]

@@ -696,6 +696,42 @@ impl Adb {
         )))
     }
 
+    /// Launch an app on a clean task, discarding whatever it had open.
+    ///
+    /// WHY THIS EXISTS: `am start` on a package that already has a task
+    /// RESUMES that task. A publish that stopped half way leaves Facebook's
+    /// composer on top, so the next launch lands straight back in it — force
+    /// stopping does not help, because the task is restored from recents.
+    /// Anything that needs the app's own home screen (reading the Page list,
+    /// switching profile) gets a wrong screen forever.
+    ///
+    /// `-S` stops the app first and `--activity-clear-task` drops the task, so
+    /// the app starts where a user tapping its icon from cold would.
+    ///
+    /// THE COST, stated plainly: an unfinished composer is discarded. That is
+    /// why this is not what ordinary publishing uses — [`Self::launch_app`]
+    /// still resumes — and why callers of this are the ones that are about to
+    /// drive the app themselves anyway.
+    pub async fn relaunch_app(&self, serial: &str, package: &str) -> Result<()> {
+        if !self.is_installed(serial, package).await? {
+            return Err(AppError::AppNotInstalled(package.to_string()));
+        }
+
+        if let Some(component) = self.launcher_activity(serial, package).await {
+            let cmd = format!(
+                "am start -S --activity-clear-task -n {}",
+                shell_quote(&component)
+            );
+            if self.start_activity(serial, &cmd).await.is_ok() {
+                return Ok(());
+            }
+        }
+
+        // No resolvable component: fall back to the ordinary launch, which at
+        // least opens the app. A resumed composer is better than no app.
+        self.launch_app(serial, package).await
+    }
+
     /// The component the launcher would start for `package`, e.g.
     /// `com.facebook.katana/.LoginActivity`.
     ///
@@ -744,6 +780,16 @@ impl Adb {
         self.shell(serial, &format!("am force-stop {}", shell_quote(package)))
             .await
             .map(|_| ())
+    }
+
+    /// The `package/activity` on screen, for telling one screen of an app from
+    /// another. See [`parse_foreground_activity`].
+    pub async fn foreground_activity(&self, serial: &str) -> Option<String> {
+        let out = self
+            .shell(serial, "dumpsys window | grep -E 'mCurrentFocus'")
+            .await
+            .ok()?;
+        parse_foreground_activity(&out)
     }
 
     /// Package name of whatever is on screen. Used to confirm an app actually
@@ -855,6 +901,25 @@ impl Adb {
         self.tap(serial, x, y).await
     }
 
+    /// Drag from one point to another over `ms`.
+    ///
+    /// Generic on purpose: this layer knows how to move a finger, not what is
+    /// being scrolled. A duration long enough to read as a drag rather than a
+    /// fling matters — a fling lands somewhere the caller cannot predict, and
+    /// a list that scrolled too far has skipped rows nobody will see.
+    pub async fn swipe(
+        &self,
+        serial: &str,
+        from: (i32, i32),
+        to: (i32, i32),
+        ms: u32,
+    ) -> Result<()> {
+        let ((x1, y1), (x2, y2)) = (from, to);
+        self.shell(serial, &format!("input swipe {x1} {y1} {x2} {y2} {ms}"))
+            .await
+            .map(|_| ())
+    }
+
     pub async fn press_back(&self, serial: &str) -> Result<()> {
         self.shell(serial, "input keyevent 4").await.map(|_| ())
     }
@@ -917,6 +982,21 @@ fn parse_foreground_package(out: &str) -> Option<String> {
         .find_map(|tok| tok.split_once('/').map(|(p, _)| p.to_string()))
         .map(|p| p.trim_start_matches('{').to_string())
         .filter(|p| p.contains('.'))
+}
+
+/// The full `package/activity` on screen, e.g.
+/// `com.facebook.katana/com.facebook.composer.activity.ComposerActivity`.
+///
+/// Worth having separately from [`parse_foreground_package`]: WHICH screen of
+/// an app is in front cannot be answered by labels alone. Facebook's feed
+/// carries "What's on your mind?" in its status box, exactly like its
+/// composer does, so a label test says "a post is open" while the user is
+/// looking at their feed. The activity name does not have that problem.
+fn parse_foreground_activity(out: &str) -> Option<String> {
+    out.split_whitespace()
+        .find(|tok| tok.contains('/'))
+        .map(|tok| tok.trim_start_matches('{').trim_end_matches('}').to_string())
+        .filter(|c| c.contains('.'))
 }
 
 /// Escape a value for a SQL string literal in a `content query --where`.
@@ -1013,6 +1093,13 @@ pub enum Match {
     TextContains(String),
     /// Accessibility label, case-insensitive exact.
     Desc(String),
+    /// Accessibility label contains this, case-insensitive.
+    ///
+    /// For labels that carry state in them: Facebook's profile switcher is
+    /// "Open profile switcher" until a Page has a notification, and then it is
+    /// "Open profile switcher, you have notifications". An exact match finds
+    /// it on a quiet account and loses it on a busy one.
+    DescContains(String),
     /// The tail of a `resource-id`, e.g. `id/post_button`. Matched on the
     /// suffix so the package prefix does not have to be hard-coded.
     ResourceId(String),
@@ -1021,11 +1108,18 @@ pub enum Match {
 }
 
 impl Match {
-    fn matches(&self, n: &UiNode) -> bool {
+    /// Whether one node satisfies this matcher.
+    ///
+    /// Public because recognising a screen is not always about tapping it:
+    /// deciding which composer an app opened is a read, and going through
+    /// [`find_node`] for that would drag in a tappability rule that has
+    /// nothing to do with the question.
+    pub fn matches(&self, n: &UiNode) -> bool {
         match self {
             Match::Text(v) => n.text.eq_ignore_ascii_case(v),
             Match::TextContains(v) => n.text.to_lowercase().contains(&v.to_lowercase()),
             Match::Desc(v) => n.content_desc.eq_ignore_ascii_case(v),
+            Match::DescContains(v) => n.content_desc.to_lowercase().contains(&v.to_lowercase()),
             Match::ResourceId(v) => n.resource_id.ends_with(v.as_str()),
             Match::Class(v) => n.class == *v,
         }
@@ -1034,7 +1128,7 @@ impl Match {
     pub fn describe(&self) -> String {
         match self {
             Match::Text(v) | Match::TextContains(v) => format!("\u{201c}{v}\u{201d}"),
-            Match::Desc(v) => format!("the {v} control"),
+            Match::Desc(v) | Match::DescContains(v) => format!("the {v} control"),
             Match::ResourceId(v) => format!("`{v}`"),
             Match::Class(v) => format!("a {v}"),
         }
@@ -1437,6 +1531,35 @@ mod tests {
             arg.contains("2.5M views _ One Hit_.mp4"),
             "the whole path must survive: {arg}"
         );
+    }
+
+    /// The bug this exists for: telling one screen of an app from another was
+    /// being done with labels, and Facebook's FEED carries "What's on your
+    /// mind?" in its status box exactly like its composer does. Reading Pages
+    /// then refused to start, reporting an unfinished post, on an account
+    /// whose Facebook was sitting idle on the feed. The activity name is not
+    /// ambiguous the way a label is.
+    #[test]
+    fn the_screen_in_front_is_identified_by_activity_not_by_label() {
+        let composer = "mCurrentFocus=Window{76f4cd7 u0                         com.facebook.katana/com.facebook.composer.activity.ComposerActivity}";
+        let feed = "mCurrentFocus=Window{aac95ae u0                     com.facebook.katana/com.facebook.katana.LoginActivity}";
+
+        let seen = parse_foreground_activity(composer).unwrap();
+        assert!(seen.to_lowercase().contains("composer"), "{seen}");
+
+        let seen = parse_foreground_activity(feed).unwrap();
+        assert!(!seen.to_lowercase().contains("composer"), "the feed is not a composer");
+
+        // Both still name the same app, so the package read is unaffected.
+        assert_eq!(
+            parse_foreground_package(composer).as_deref(),
+            Some("com.facebook.katana")
+        );
+
+        // A dialog window carries no component at all — captured from a real
+        // "More options" sheet. Guessing a screen from that is worse than
+        // admitting we do not know.
+        assert_eq!(parse_foreground_activity("mCurrentFocus=Window{1ca9ce3 u0 More options}"), None);
     }
 
     #[test]

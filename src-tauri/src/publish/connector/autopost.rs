@@ -28,7 +28,7 @@ use std::time::Duration;
 use crate::errors::Result;
 use crate::ldplayer::adb::{can_type, Adb, Match, UiNode};
 use crate::publish::connector::PublishContext;
-use crate::publish::model::Platform;
+use crate::publish::model::{Platform, VideoFormat};
 
 /// How long to wait for any single expected control to appear.
 const STEP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -52,7 +52,30 @@ pub enum Step {
     /// because a text field was found and nothing had checked which one.
     Expect { label: &'static str, any_of: Vec<Match> },
     /// Type the caption into a matched field.
-    Caption { into: Vec<Match> },
+    ///
+    /// `optional` is for flows where the field may genuinely not be there:
+    /// Facebook's Reels editor has no caption box at all until its second
+    /// screen, and refusing to post a reel because a field we were not sure
+    /// about was missing helps nobody.
+    Caption { into: Vec<Match>, optional: bool },
+    /// Answer the Reel / Post / Story chooser, if the app puts one up.
+    ///
+    /// Sharing a video to Facebook sometimes offers a choice of what it should
+    /// become, and the answer is the person's — it is carried on the job, not
+    /// decided here. Skipped silently when no chooser appears, because whether
+    /// one does depends on the video and the app version.
+    ChooseFormat,
+    /// Confirm the composer is posting as the identity the account expects.
+    ///
+    /// WHY THIS EXISTS: the app posts as whoever is currently active, and
+    /// nothing in a share intent says otherwise. A session left switched to
+    /// another profile publishes to that profile silently, and a post cannot
+    /// be taken back. Reading the name off the composer is the one moment
+    /// where that is answerable rather than assumed.
+    ///
+    /// Skipped when the account has no expected name, so this can ship
+    /// without changing what existing accounts do.
+    VerifyAuthor,
     /// Let the screen settle. Used sparingly; waiting on a control is better.
     Settle(u64),
 }
@@ -68,6 +91,14 @@ impl Step {
 
     fn expect(label: &'static str, any_of: Vec<Match>) -> Self {
         Step::Expect { label, any_of }
+    }
+
+    fn caption(into: Vec<Match>) -> Self {
+        Step::Caption { into, optional: false }
+    }
+
+    fn caption_if_present(into: Vec<Match>) -> Self {
+        Step::Caption { into, optional: true }
     }
 }
 
@@ -154,6 +185,64 @@ fn has_labels(nodes: &[UiNode]) -> bool {
         .any(|n| !n.text.trim().is_empty() || !n.content_desc.trim().is_empty())
 }
 
+/// The option to tap for `want` on a Reel / Post / Story chooser.
+///
+/// SAFETY RULE, and it is the whole design of this function: it returns
+/// something only when at least two different formats are on screen. A lone
+/// "Post" is not a chooser — it is the composer's submit button, and tapping
+/// that before the caption is typed publishes an empty post. Requiring a
+/// visible alternative is what tells a choice apart from a button.
+fn format_option(nodes: &[UiNode], want: VideoFormat) -> Option<UiNode> {
+    let kinds: [(&str, &[&str]); 3] = [
+        ("post", &["Post", "Feed post", "Feed"]),
+        ("reel", &["Reel", "Reels"]),
+        ("story", &["Story", "Stories"]),
+    ];
+
+    let hit = |labels: &[&str]| -> Option<UiNode> {
+        labels.iter().find_map(|l| {
+            let by_text = Match::Text((*l).into());
+            let by_desc = Match::Desc((*l).into());
+            nodes
+                .iter()
+                .find(|n| n.is_tappable() && (by_text.matches(n) || by_desc.matches(n)))
+                .cloned()
+        })
+    };
+
+    let present: Vec<&str> = kinds
+        .iter()
+        .filter(|(_, labels)| hit(labels).is_some())
+        .map(|(kind, _)| *kind)
+        .collect();
+    if present.len() < 2 {
+        return None;
+    }
+
+    let wanted = match want {
+        VideoFormat::Post => kinds[0].1,
+        VideoFormat::Reel => kinds[1].1,
+    };
+    hit(wanted)
+}
+
+/// Whether the composer says it is posting as `expected`.
+///
+/// Compared trimmed, because the app pads some of these labels — a real dump
+/// carried both "Sambath Sotheareach" and "Sambath Sotheareach " — and an
+/// identity check that fails on a trailing space would block every post.
+///
+/// Exact rather than substring: "Acme Store" must not satisfy a check for
+/// "Acme", or the safeguard would wave through the very confusion it exists
+/// to catch.
+fn author_is(nodes: &[UiNode], expected: &str) -> bool {
+    let expected = expected.trim();
+    nodes.iter().any(|n| {
+        n.text.trim().eq_ignore_ascii_case(expected)
+            || n.content_desc.trim().eq_ignore_ascii_case(expected)
+    })
+}
+
 /// Whether the caption is already sitting in a text field on this screen.
 ///
 /// WHY THIS EXISTS: the share intent delivers the caption via `EXTRA_TEXT`,
@@ -224,6 +313,95 @@ fn visible_labels(nodes: &[UiNode]) -> String {
         .join(", ")
 }
 
+/// Whether this is Facebook's Reels editor rather than its post composer.
+///
+/// Sharing a video to Facebook does not always land in the same place: a video
+/// can open the Reels editor instead, which has no caption box, no author
+/// line, and a different order — trim and effects first, Next, and only then a
+/// description and "Share now". Running the post recipe there fails at the
+/// screen check, which is what it is for, but the answer is a different recipe
+/// rather than a hand-off.
+///
+/// Matched on the editor's own tools. "Add audio" is the giveaway: the post
+/// composer has no such control.
+fn is_reel_editor(nodes: &[UiNode]) -> bool {
+    let anchors = [
+        Match::TextContains("Add audio".into()),
+        Match::DescContains("Add audio".into()),
+        Match::TextContains("Discover suggestions".into()),
+    ];
+    anchors.iter().any(|m| nodes.iter().any(|n| m.matches(n)))
+}
+
+/// The recipe to run, chosen from what is actually on screen.
+pub fn recipe_for(platform: Platform, nodes: &[UiNode]) -> Vec<Step> {
+    if platform == Platform::Facebook && is_reel_editor(nodes) {
+        return reel_recipe();
+    }
+    recipe(platform)
+}
+
+/// Facebook's Reels flow.
+///
+/// Built from a real editor screen: a row of Audio / Edit / Effects / Text /
+/// Stickers tools and a Next arrow, then a second screen carrying the
+/// description and "Share now".
+///
+/// The caption step is optional here, and deliberately: the second screen's
+/// field has not been read from a live instance, so its labels are the best
+/// guess in this file. A reel that posts without its description is a worse
+/// outcome than one with it — but far better than one that does not post at
+/// all because a matcher was wrong.
+fn reel_recipe() -> Vec<Step> {
+    vec![
+        Step::Settle(2),
+        Step::ChooseFormat,
+        Step::Settle(2),
+        Step::expect(
+            "Facebook's Reels editor",
+            vec![
+                Match::TextContains("Add audio".into()),
+                Match::DescContains("Add audio".into()),
+                Match::TextContains("Discover suggestions".into()),
+            ],
+        ),
+        // The editor's Next arrow. Required, not optional: without it the run
+        // would sit on the editing screen and tap Share on nothing.
+        Step::tap(
+            "the Reels editor's Next button",
+            vec![Match::Text("Next".into()), Match::Desc("Next".into())],
+        ),
+        Step::Settle(3),
+        Step::expect(
+            "the Reels description screen",
+            vec![
+                Match::TextContains("Share now".into()),
+                Match::DescContains("Share now".into()),
+                Match::TextContains("Describe your reel".into()),
+                Match::TextContains("Add a description".into()),
+            ],
+        ),
+        // Only meaningful once an account has been told who it posts as; it
+        // skips itself otherwise. Placed here because this is the first Reels
+        // screen that names an audience at all.
+        Step::VerifyAuthor,
+        Step::caption_if_present(vec![
+            Match::TextContains("Describe your reel".into()),
+            Match::TextContains("Add a description".into()),
+            Match::TextContains("Say something about".into()),
+        ]),
+        Step::tap(
+            "the Share now button",
+            vec![
+                Match::Text("Share now".into()),
+                Match::Desc("Share now".into()),
+                Match::Text("Share".into()),
+                Match::Text("Post".into()),
+            ],
+        ),
+    ]
+}
+
 /// The composer recipe for a platform.
 ///
 /// Labels only — no coordinates. A tap at a fixed position is a different
@@ -236,6 +414,10 @@ pub fn recipe(platform: Platform) -> Vec<Step> {
         // screenshots, not guesses: "Create post", "New post", "What's on your
         // mind?", "Say something about this photo…", "Next", "Post".
         Platform::Facebook => vec![
+            Step::Settle(2),
+            // Answering this decides WHICH composer opens next, so it has to
+            // come before the screen check that identifies one.
+            Step::ChooseFormat,
             Step::Settle(2),
             Step::expect(
                 "Facebook's composer",
@@ -263,12 +445,16 @@ pub fn recipe(platform: Platform) -> Vec<Step> {
             // that screen. Tapping Next first left the caption step waiting
             // out its timeout on a screen the field was no longer on, which
             // handed back a post that was one tap from going out.
-            Step::Caption {
-                into: vec![
+            // Before Next, because the author's name is only rendered on this
+            // first screen — the "Post settings" screen that carries SHARE
+            // does not show it, so checking there would be checking nothing.
+            // Tapping Next cannot change who is posting, so confirming here
+            // holds for the submit two screens later.
+            Step::VerifyAuthor,
+            Step::caption(vec![
                     Match::TextContains("Say something about".into()),
                     Match::TextContains("What's on your mind".into()),
-                ],
-            },
+                ]),
             Step::maybe("the composer's Next button", vec![Match::Text("Next".into())]),
             // Next lands on a "Post settings" screen whose submit button is
             // SHARE, not Post — so both names are here, and `Match::Text` is
@@ -302,9 +488,7 @@ pub fn recipe(platform: Platform) -> Vec<Step> {
                     Match::TextContains("New reel".into()),
                 ],
             ),
-            Step::Caption {
-                into: vec![Match::TextContains("Write a caption".into())],
-            },
+            Step::caption(vec![Match::TextContains("Write a caption".into())]),
             Step::tap(
                 "the Share button",
                 vec![Match::Text("Share".into()), Match::Desc("Share".into())],
@@ -321,9 +505,7 @@ pub fn recipe(platform: Platform) -> Vec<Step> {
                     Match::TextContains("Post to".into()),
                 ],
             ),
-            Step::Caption {
-                into: vec![Match::TextContains("Describe your video".into())],
-            },
+            Step::caption(vec![Match::TextContains("Describe your video".into())]),
             Step::tap(
                 "the Post button",
                 vec![Match::Text("Post".into()), Match::Desc("Post".into())],
@@ -346,12 +528,10 @@ pub fn recipe(platform: Platform) -> Vec<Step> {
                     Match::TextContains("Details".into()),
                 ],
             ),
-            Step::Caption {
-                into: vec![
+            Step::caption(vec![
                     Match::TextContains("Add a title".into()),
                     Match::TextContains("Title".into()),
-                ],
-            },
+                ]),
             Step::maybe("the Next button", vec![Match::Text("Next".into())]),
             Step::tap(
                 "the Upload button",
@@ -370,10 +550,9 @@ pub fn recipe(platform: Platform) -> Vec<Step> {
 /// Every exit that is not `Posted` carries a sentence naming what it was
 /// looking for and what is left to do, because a half-finished composer the
 /// user cannot interpret is worse than never having automated it.
-pub async fn run(ctx: &PublishContext, adb: &Adb, steps: &[Step]) -> Result<Run> {
+pub async fn run(ctx: &PublishContext, adb: &Adb, platform: Platform) -> Result<Run> {
     let label = ctx.platform_label;
     let noun = ctx.noun();
-    let total = steps.len() as f64;
 
     // Can this app be automated at all?
     //
@@ -383,7 +562,7 @@ pub async fn run(ctx: &PublishContext, adb: &Adb, steps: &[Step]) -> Result<Run>
     // matcher can ever succeed there, so trying step after step and blaming the
     // screen is dishonest: the answer is "not this app", and it will not change
     // on a retry.
-    match adb.ui_dump(&ctx.serial).await {
+    let opening = match adb.ui_dump(&ctx.serial).await {
         Ok(nodes) if !has_labels(&nodes) => {
             return Ok(Run::HandedBack(format!(
                 "{label} draws its own screen and gives Android no readable labels, so \
@@ -393,14 +572,21 @@ pub async fn run(ctx: &PublishContext, adb: &Adb, steps: &[Step]) -> Result<Run>
                  automation.)"
             )));
         }
-        Ok(_) => {}
+        Ok(nodes) => nodes,
         Err(e) => {
             return Ok(Run::HandedBack(format!(
                 "Couldn't read {label}'s screen ({e}), so nothing was tapped. The {noun} \
                  is attached — finish this one in LDPlayer."
             )))
         }
-    }
+    };
+
+    // Which composer did the app actually open? Sharing a video to Facebook
+    // lands in the Reels editor as readily as the post composer, and the two
+    // want different steps in a different order. Choosing from the screen in
+    // front of us beats assuming the app did what it did last time.
+    let steps = recipe_for(platform, &opening);
+    let total = steps.len() as f64;
 
     for (i, step) in steps.iter().enumerate() {
         // Progress across the automation band, 0.80 -> 0.97.
@@ -501,7 +687,48 @@ pub async fn run(ctx: &PublishContext, adb: &Adb, steps: &[Step]) -> Result<Run>
                 }
             }
 
-            Step::Caption { into } => {
+            Step::ChooseFormat => {
+                let want = ctx.video_format;
+                let Ok(nodes) = adb.ui_dump(&ctx.serial).await else {
+                    // No chooser can be confirmed, so none is answered. The
+                    // steps after this one wait on their own anchors anyway.
+                    continue;
+                };
+                let Some(option) = format_option(&nodes, want) else {
+                    continue;
+                };
+                ctx.step(progress, &format!("Choosing {}", want.label()));
+                adb.tap_node(&ctx.serial, &option).await?;
+                tokio::time::sleep(Duration::from_millis(1800)).await;
+            }
+
+            Step::VerifyAuthor => {
+                let Some(expected) = ctx.expected_author.as_deref() else {
+                    continue;
+                };
+                ctx.step(progress, &format!("Checking this posts as {expected}…"));
+
+                let nodes = match adb.ui_dump(&ctx.serial).await {
+                    Ok(nodes) => nodes,
+                    // Cannot read the screen, so cannot confirm the identity.
+                    // Posting anyway would be the guess this step exists to
+                    // refuse.
+                    Err(e) => {
+                        return Ok(Run::HandedBack(format!(
+                            "Couldn't read {label}'s screen to confirm this would post as                              {expected} ({e}), so nothing was submitted. The {noun} is                              attached — finish this one in LDPlayer."
+                        )))
+                    }
+                };
+
+                if !author_is(&nodes, expected) {
+                    return Ok(Run::HandedBack(format!(
+                        "This composer isn't posting as {expected}, so nothing was                          submitted — a post cannot be taken back, and publishing to the                          wrong profile or Page is the one mistake worth stopping for.                          What's on screen: {}. Check which profile {label} is switched                          to on this instance.",
+                        visible_labels(&nodes)
+                    )));
+                }
+            }
+
+            Step::Caption { into, optional } => {
                 if ctx.caption.trim().is_empty() {
                     continue;
                 }
@@ -582,6 +809,14 @@ pub async fn run(ctx: &PublishContext, adb: &Adb, steps: &[Step]) -> Result<Run>
                             ctx.step(progress, "Caption is already filled in");
                             continue;
                         }
+                        // A flow that may not have a caption box here says so,
+                        // and the post still goes out. Refusing to publish
+                        // over a field we were never sure existed would be the
+                        // automation inventing a problem.
+                        if *optional {
+                            ctx.step(progress, "No caption field on this screen — posting without one");
+                            continue;
+                        }
                         return Ok(Run::HandedBack(format!(
                             "The {noun} is attached but the caption field never appeared in \
                              {label}. Add the caption there and tap Post."
@@ -611,6 +846,20 @@ pub async fn run(ctx: &PublishContext, adb: &Adb, steps: &[Step]) -> Result<Run>
 mod tests {
     use super::*;
     use crate::ldplayer::adb::{find_node, parse_ui_nodes};
+
+    /// The recipe's screen check. Found rather than indexed: steps get added
+    /// ahead of it — answering the Reel/Post chooser, for one — and a test
+    /// that hard-codes position 1 fails for a reason that has nothing to do
+    /// with what it is checking.
+    fn screen_check(steps: &[Step]) -> &'static str {
+        steps
+            .iter()
+            .find_map(|s| match s {
+                Step::Expect { label, .. } => Some(*label),
+                _ => None,
+            })
+            .expect("every Facebook recipe confirms the screen before acting")
+    }
 
     fn nodes(text: &str) -> Vec<UiNode> {
         parse_ui_nodes(&format!(
@@ -672,10 +921,14 @@ mod tests {
         );
         let nodes = parse_ui_nodes(screen);
 
-        let expect = match &recipe(Platform::Facebook)[1] {
-            Step::Expect { any_of, .. } => any_of.clone(),
-            _ => panic!("the screen check is the step after Settle"),
-        };
+        let steps = recipe(Platform::Facebook);
+        let expect = steps
+            .iter()
+            .find_map(|s| match s {
+                Step::Expect { any_of, .. } => Some(any_of.clone()),
+                _ => None,
+            })
+            .expect("the composer is confirmed before anything is typed");
         assert!(
             expect.iter().any(|m| find_node(&nodes, m, false).is_some()),
             "this composer must be recognised, not handed back"
@@ -736,6 +989,162 @@ mod tests {
             .find_map(|m| find_node(&nodes, m, false))
             .expect("SHARE must be found");
         assert_eq!(hit.text, "SHARE", "a Share-to-… row is not the submit button");
+    }
+
+    /// The name is compared trimmed because a real dump of this account's own
+    /// profile carried both "Sambath Sotheareach" and "Sambath Sotheareach "
+    /// — an identity check that tripped on a trailing space would block every
+    /// post instead of the wrong ones.
+    #[test]
+    fn the_author_check_reads_the_name_the_app_renders() {
+        let composer = concat!(
+            r#"<node text="New post" resource-id="" class="android.widget.TextView" content-desc="" clickable="false" enabled="true" bounds="[200,90][500,150]"/>"#,
+            r#"<node text="Sambath Sotheareach " resource-id="" class="android.widget.TextView" content-desc="" clickable="false" enabled="true" bounds="[160,220][490,270]"/>"#,
+        );
+        let nodes = parse_ui_nodes(composer);
+        assert!(author_is(&nodes, "Sambath Sotheareach"));
+
+        // A different identity is exactly what this must catch: the app posts
+        // as whoever is active, and a switched session is silent.
+        assert!(!author_is(&nodes, "Acme Store"));
+    }
+
+    /// Exact, not substring: a Page called "Acme" must not be satisfied by a
+    /// composer posting as "Acme Store", or the check waves through the
+    /// confusion it exists to stop.
+    #[test]
+    fn a_similar_name_is_not_the_same_identity() {
+        let nodes = parse_ui_nodes(
+            r#"<node text="Acme Store" resource-id="" class="android.widget.TextView" content-desc="" clickable="false" enabled="true" bounds="[160,220][490,270]"/>"#,
+        );
+        assert!(!author_is(&nodes, "Acme"));
+        assert!(author_is(&nodes, "acme store"), "case alone must not fail a post");
+    }
+
+    /// The name is only rendered on the composer; the "Post settings" screen
+    /// that carries SHARE does not show it. Checking after Next would be
+    /// checking an empty screen, so the order is part of the safeguard.
+    #[test]
+    fn the_author_is_checked_before_the_composer_is_left() {
+        let steps = recipe(Platform::Facebook);
+        let verify = steps
+            .iter()
+            .position(|s| matches!(s, Step::VerifyAuthor))
+            .expect("Facebook confirms who it posts as");
+        let next = steps
+            .iter()
+            .position(|s| match s {
+                Step::Tap { any_of, .. } => any_of
+                    .iter()
+                    .any(|m| matches!(m, Match::Text(t) if t.eq_ignore_ascii_case("next"))),
+                _ => false,
+            })
+            .expect("Facebook advances past the first screen");
+        assert!(verify < next, "the identity must be confirmed while it is on screen");
+    }
+
+    /// Built from the Reels editor a shared video actually opened: an audio
+    /// bar across the top, a tool row, and a Next arrow. None of the post
+    /// composer's labels are on it, which is why the post recipe rejected the
+    /// screen and handed back a video that was one flow away from posting.
+    const REEL_EDITOR: &str = concat!(
+        r#"<node text="Add audio" resource-id="" class="android.widget.TextView" content-desc="" clickable="true" enabled="true" bounds="[240,80][560,130]"/>"#,
+        r#"<node text="Discover suggestions" resource-id="" class="android.widget.TextView" content-desc="" clickable="false" enabled="true" bounds="[240,130][620,170]"/>"#,
+        r#"<node text="Audio" resource-id="" class="android.widget.TextView" content-desc="" clickable="true" enabled="true" bounds="[40,1330][120,1370]"/>"#,
+        r#"<node text="Effects" resource-id="" class="android.widget.TextView" content-desc="" clickable="true" enabled="true" bounds="[290,1330][380,1370]"/>"#,
+        r#"<node text="Next" resource-id="" class="android.widget.Button" content-desc="" clickable="true" enabled="true" bounds="[650,1230][760,1370]"/>"#,
+    );
+
+    #[test]
+    fn a_shared_video_that_opens_reels_gets_the_reels_recipe() {
+        let nodes = parse_ui_nodes(REEL_EDITOR);
+        assert!(is_reel_editor(&nodes));
+
+        // And the recipe chosen for it is not the post one, which would fail
+        // its screen check here.
+        let steps = recipe_for(Platform::Facebook, &nodes);
+        assert!(screen_check(&steps).contains("Reels"), "{}", screen_check(&steps));
+    }
+
+    /// The post composer must keep its own recipe. The two flows differ in
+    /// step order, so picking the wrong one is not a near miss.
+    #[test]
+    fn the_ordinary_composer_still_gets_the_post_recipe() {
+        let composer = parse_ui_nodes(
+            r#"<node text="New post" resource-id="" class="android.widget.TextView" content-desc="" clickable="false" enabled="true" bounds="[200,90][500,150]"/>"#,
+        );
+        assert!(!is_reel_editor(&composer));
+        let steps = recipe_for(Platform::Facebook, &composer);
+        assert!(screen_check(&steps).contains("composer"), "{}", screen_check(&steps));
+    }
+
+    /// Reels goes Next FIRST and describes the post afterwards — the reverse
+    /// of the post composer, where the caption box is on the first screen and
+    /// Next leaves it. Getting this backwards is what the two recipes exist to
+    /// keep apart.
+    #[test]
+    fn reels_advances_before_it_describes_the_post() {
+        let steps = reel_recipe();
+        let next = steps
+            .iter()
+            .position(|s| match s {
+                Step::Tap { any_of, .. } => any_of
+                    .iter()
+                    .any(|m| matches!(m, Match::Text(t) if t.eq_ignore_ascii_case("next"))),
+                _ => false,
+            })
+            .expect("the editor advances");
+        let caption = steps
+            .iter()
+            .position(|s| matches!(s, Step::Caption { .. }))
+            .expect("a reel can carry a description");
+        assert!(next < caption, "the description screen is behind Next");
+
+        // The description field has not been read from a live instance, so a
+        // missing one must not block the post.
+        match &steps[caption] {
+            Step::Caption { optional, .. } => assert!(*optional),
+            _ => unreachable!(),
+        }
+    }
+
+    /// THE HAZARD this guards: "Post" is a chooser option AND the composer's
+    /// submit button. Tapping it as a chooser while the composer is up would
+    /// publish before the caption is typed — unrecoverable. So a choice is
+    /// only recognised when a second format is on screen to choose between.
+    #[test]
+    fn a_lone_post_button_is_not_a_format_chooser() {
+        let composer = parse_ui_nodes(concat!(
+            r#"<node text="New post" resource-id="" class="android.widget.TextView" content-desc="" clickable="false" enabled="true" bounds="[200,90][500,150]"/>"#,
+            r#"<node text="Post" resource-id="" class="android.widget.Button" content-desc="" clickable="true" enabled="true" bounds="[486,105][614,165]"/>"#,
+        ));
+        assert!(format_option(&composer, VideoFormat::Post).is_none());
+        assert!(format_option(&composer, VideoFormat::Reel).is_none());
+    }
+
+    #[test]
+    fn a_real_chooser_answers_with_the_format_the_job_asked_for() {
+        let chooser = parse_ui_nodes(concat!(
+            r#"<node text="Reel" resource-id="" class="android.widget.TextView" content-desc="" clickable="true" enabled="true" bounds="[100,600][400,700]"/>"#,
+            r#"<node text="Post" resource-id="" class="android.widget.TextView" content-desc="" clickable="true" enabled="true" bounds="[100,720][400,820]"/>"#,
+            r#"<node text="Story" resource-id="" class="android.widget.TextView" content-desc="" clickable="true" enabled="true" bounds="[100,840][400,940]"/>"#,
+        ));
+
+        assert_eq!(format_option(&chooser, VideoFormat::Reel).unwrap().text, "Reel");
+        assert_eq!(format_option(&chooser, VideoFormat::Post).unwrap().text, "Post");
+    }
+
+    /// A chooser offering only Story and Reel cannot answer "Post". Tapping
+    /// the nearest thing would publish the wrong kind of post, so it taps
+    /// nothing and the screen check downstream reports what it found.
+    #[test]
+    fn an_unavailable_format_is_not_substituted() {
+        let chooser = parse_ui_nodes(concat!(
+            r#"<node text="Reel" resource-id="" class="android.widget.TextView" content-desc="" clickable="true" enabled="true" bounds="[100,600][400,700]"/>"#,
+            r#"<node text="Story" resource-id="" class="android.widget.TextView" content-desc="" clickable="true" enabled="true" bounds="[100,840][400,940]"/>"#,
+        ));
+        assert!(format_option(&chooser, VideoFormat::Post).is_none());
+        assert!(format_option(&chooser, VideoFormat::Reel).is_some());
     }
 
     #[test]
@@ -819,7 +1228,7 @@ mod tests {
     fn no_recipe_types_into_an_unqualified_text_field() {
         for p in Platform::ALL {
             for step in recipe(*p) {
-                if let Step::Caption { into } = step {
+                if let Step::Caption { into, .. } = step {
                     for m in &into {
                         assert!(
                             !matches!(m, Match::Class(_)),

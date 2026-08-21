@@ -7,10 +7,18 @@ import { StatusBadge } from "@/components/publish/StatusDot";
 import { JobList } from "@/pages/publisher/JobList";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { ldplayerPickMedia, mediaKindOf, type MediaCollection } from "@/lib/ldplayer";
-import { ACCOUNT_STATUS_LABEL, publishSubmit, type PostMode } from "@/lib/publish";
+import {
+  ACCOUNT_STATUS_LABEL,
+  publishSubmit,
+  type PostMode,
+  type VideoFormat,
+} from "@/lib/publish";
 import { UploadIcon, SendIcon } from "@/components/ui/icons";
 
 /** Captions longer than this are a paste accident, not a caption. */
+/// How many targets the picker shows before you have to search for one.
+const TARGETS_SHOWN = 5;
+
 const CAPTION_MAX = 2200;
 
 /**
@@ -27,13 +35,76 @@ export function PublishPage({ onNavigate }: { onNavigate: (route: "pub-accounts"
 
   const [paths, setPaths] = useState<string[]>([]);
   const [mode, setMode] = useState<PostMode>("album");
+  const [videoFormat, setVideoFormat] = useState<VideoFormat>("post");
   const [caption, setCaption] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [query, setQuery] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
+  // `available` keeps accounts for a switched-off platform out of the target
+  // list. They stay on the Accounts page, where they can be seen and removed
+  // — hiding a row everywhere would leave something in the database that
+  // nobody could get at.
   const usable = useMemo(
-    () => accounts.filter((a) => a.status !== "device_missing"),
+    () => accounts.filter((a) => a.status !== "device_missing" && a.available),
     [accounts],
+  );
+
+  // What you actually pick is an identity to post AS, not an app to post
+  // through. An account with Pages contributes one target per Page and does
+  // not offer the profile: posting to Pages is what these accounts are for,
+  // and a profile sitting among them is the row people click by mistake.
+  //
+  // An account with no Pages yet still offers itself, so posting keeps
+  // working before any Page has been added.
+  const targets = useMemo(
+    () =>
+      usable.flatMap((account) =>
+        account.pages.length > 0
+          ? account.pages.map((page) => ({
+              key: `${account.id}::${page.name}`,
+              account,
+              page: page.name as string | null,
+              label: page.name,
+            }))
+          : [{ key: account.id, account, page: null as string | null, label: account.name }],
+      ),
+    [usable],
+  );
+
+  // Search results, or null when nothing has been typed. Matching the owning
+  // account and emulator as well as the Page name is what makes "everything on
+  // instance 2" a findable set rather than a memory exercise.
+  const matches = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return null;
+    return targets.filter(
+      (t) =>
+        t.label.toLowerCase().includes(q) ||
+        t.account.name.toLowerCase().includes(q) ||
+        (t.account.device_name ?? "").toLowerCase().includes(q),
+    );
+  }, [targets, query]);
+
+  // A handful by default, the rest by searching: a person with forty Pages
+  // scrolls past thirty-nine to reach the one they want, and a wall of
+  // checkboxes next to a Publish button is its own hazard.
+  //
+  // Anything already picked stays on screen whatever the filter says —
+  // a selection you cannot see is one you cannot undo, and it still posts.
+  const visible = useMemo(() => {
+    const base = new Set((matches ?? targets.slice(0, TARGETS_SHOWN)).map((t) => t.key));
+    return targets.filter((t) => base.has(t.key) || selected.has(t.key));
+  }, [matches, targets, selected]);
+
+  const hidden = targets.length - visible.length;
+
+  // Only videos get the Reel/Post question, so only they show it. Matched on
+  // extension, the same way the device layer decides which MediaStore
+  // collection a file belongs in.
+  const hasVideo = useMemo(
+    () => paths.some((p) => /\.(mp4|mov|mkv|webm|avi|m4v)$/i.test(p)),
+    [paths],
   );
 
   const canPublish = paths.length > 0 && selected.size > 0 && !submitting;
@@ -42,6 +113,7 @@ export function PublishPage({ onNavigate }: { onNavigate: (route: "pub-accounts"
   // "6 posts" and "2 posts" are very different things to do to a real account.
   const jobCount =
     mode === "album" ? selected.size : selected.size * paths.length;
+
 
   const toggle = (id: string) =>
     setSelected((prev) => {
@@ -71,8 +143,11 @@ export function PublishPage({ onNavigate }: { onNavigate: (route: "pub-accounts"
       const created = await publishSubmit({
         paths,
         caption,
-        accountIds: [...selected],
+        targets: targets
+          .filter((t) => selected.has(t.key))
+          .map((t) => ({ account_id: t.account.id, page: t.page })),
         mode,
+        videoFormat,
       });
       toast(
         "success",
@@ -147,6 +222,35 @@ export function PublishPage({ onNavigate }: { onNavigate: (route: "pub-accounts"
           )}
         </div>
 
+        {hasVideo && (
+          <div className="pubform__field">
+            <label className="pubform__label">Video goes out as</label>
+            <div className="modepick">
+              <FormatOption
+                format="post"
+                current={videoFormat}
+                onPick={setVideoFormat}
+                title="Feed post"
+                detail="An ordinary post on the timeline."
+              />
+              <FormatOption
+                format="reel"
+                current={videoFormat}
+                onPick={setVideoFormat}
+                title="Reel"
+                detail="Facebook's short-form video surface, with its own editor."
+              />
+            </div>
+            <div className="pubform__hint">
+              <span>
+                Facebook asks which of these a shared video should become. This answers
+                it for you — on the versions that don't ask, the app decides and this
+                has no effect.
+              </span>
+            </div>
+          </div>
+        )}
+
         {paths.length > 1 && (
           <div className="pubform__field">
             <label className="pubform__label">Post as</label>
@@ -205,24 +309,40 @@ export function PublishPage({ onNavigate }: { onNavigate: (route: "pub-accounts"
         <div className="pubform__field">
           <div className="pubform__labelrow">
             <label className="pubform__label">Accounts</label>
-            {usable.length > 0 && (
+            {/* Acts on what is on screen, not on every Page that exists.
+                "Select all" quietly meaning forty live posts is not a button
+                anyone should be able to press by accident. */}
+            {visible.length > 0 && (
               <button
                 className="linkbtn"
                 type="button"
                 onClick={() =>
-                  setSelected(
-                    selected.size === usable.length
-                      ? new Set()
-                      : new Set(usable.map((a) => a.id)),
-                  )
+                  setSelected((prev) => {
+                    const allShown = visible.every((t) => prev.has(t.key));
+                    const next = new Set(prev);
+                    for (const t of visible) {
+                      if (allShown) next.delete(t.key);
+                      else next.add(t.key);
+                    }
+                    return next;
+                  })
                 }
               >
-                {selected.size === usable.length ? "Clear all" : "Select all"}
+                {visible.every((t) => selected.has(t.key)) ? "Clear these" : "Select these"}
               </button>
             )}
           </div>
 
-          {usable.length === 0 ? (
+          {targets.length > TARGETS_SHOWN && (
+            <input
+              className="input input--sm pubform__search"
+              value={query}
+              placeholder={`Search ${targets.length} Pages by name, account or emulator`}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          )}
+
+          {targets.length === 0 ? (
             <div className="empty">
               <div className="empty__title">No accounts to publish to</div>
               <div className="empty__text">
@@ -234,16 +354,16 @@ export function PublishPage({ onNavigate }: { onNavigate: (route: "pub-accounts"
             </div>
           ) : (
             <div className="pickgrid">
-              {usable.map((account) => {
-                const on = selected.has(account.id);
+              {visible.map(({ key, account, page, label }) => {
+                const on = selected.has(key);
                 return (
                   <button
-                    key={account.id}
+                    key={key}
                     type="button"
                     className={`pick ${on ? "pick--on" : ""} ${
                       account.status === "connected" ? "" : "pick--dim"
                     }`.trim()}
-                    onClick={() => toggle(account.id)}
+                    onClick={() => toggle(key)}
                     aria-pressed={on}
                   >
                     <span className="pick__box" aria-hidden>
@@ -251,8 +371,12 @@ export function PublishPage({ onNavigate }: { onNavigate: (route: "pub-accounts"
                     </span>
                     <PlatformMark platform={account.platform} size={26} />
                     <span className="pick__text">
-                      <span className="pick__name">{account.name}</span>
+                      <span className="pick__name">{label}</span>
+                      {/* Which signed-in app and which emulator this Page
+                          posts through — with Pages from several accounts in
+                          one list, the name alone does not say. */}
                       <span className="pick__meta">
+                        {page ? `${account.name} · ` : ""}
                         {account.device_name ?? account.ldplayer_instance_id}
                       </span>
                     </span>
@@ -266,6 +390,23 @@ export function PublishPage({ onNavigate }: { onNavigate: (route: "pub-accounts"
               })}
             </div>
           )}
+
+          {/* Say what is not on screen. A picker that silently shows five of
+              forty looks like an account list that lost most of itself. */}
+          {hidden > 0 && (
+            <div className="pubform__hint">
+              <span>
+                {matches
+                  ? `${hidden} more not matching “${query.trim()}”`
+                  : `Showing ${visible.length} of ${targets.length} — search to find the rest`}
+              </span>
+            </div>
+          )}
+          {matches?.length === 0 && (
+            <div className="pubform__hint">
+              <span>Nothing matches “{query.trim()}”.</span>
+            </div>
+          )}
         </div>
 
         <footer className="pubform__foot">
@@ -273,12 +414,12 @@ export function PublishPage({ onNavigate }: { onNavigate: (route: "pub-accounts"
             {paths.length === 0
               ? "Choose at least one video or photo"
               : selected.size === 0
-                ? "Select at least one account"
+                ? "Select at least one Page or account"
                 : `${jobCount} ${jobCount === 1 ? "post" : "posts"} across ${
                     selected.size
-                  } ${selected.size === 1 ? "account" : "accounts"}`}
-            {[...selected].some(
-              (id) => usable.find((a) => a.id === id)?.status === "device_offline",
+                  } ${selected.size === 1 ? "target" : "targets"}`}
+            {targets.some(
+              (t) => selected.has(t.key) && t.account.status === "device_offline",
             ) && " · stopped emulators will be started for you"}
           </div>
           <Button
@@ -381,6 +522,38 @@ function AssetCard({
         </button>
       </div>
     </div>
+  );
+}
+
+function FormatOption({
+  format,
+  current,
+  onPick,
+  title,
+  detail,
+}: {
+  format: VideoFormat;
+  current: VideoFormat;
+  onPick: (f: VideoFormat) => void;
+  title: string;
+  detail: string;
+}) {
+  const on = current === format;
+  return (
+    <button
+      className={`modeopt ${on ? "modeopt--on" : ""}`.trim()}
+      type="button"
+      onClick={() => onPick(format)}
+      aria-pressed={on}
+    >
+      <span className="modeopt__radio" aria-hidden>
+        {on ? "●" : ""}
+      </span>
+      <span className="modeopt__text">
+        <span className="modeopt__title">{title}</span>
+        <span className="modeopt__detail">{detail}</span>
+      </span>
+    </button>
   );
 }
 

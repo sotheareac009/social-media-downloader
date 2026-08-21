@@ -18,7 +18,9 @@ use std::sync::Mutex;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::errors::{AppError, Result};
-use crate::publish::model::{Account, JobStatus, MediaItem, Platform, PublishJob};
+use crate::publish::model::{
+    Account, AccountPage, JobStatus, MediaItem, Platform, PublishJob, VideoFormat,
+};
 
 /// A job as it is stored, before the account and media names are joined on.
 #[derive(Debug, Clone)]
@@ -33,6 +35,10 @@ pub struct JobRow {
     pub error_code: Option<String>,
     pub error: Option<String>,
     pub screenshot_path: Option<String>,
+    /// The Page this post goes out as. `None` posts as the profile itself.
+    pub target_page: Option<String>,
+    /// Reel or feed post, for a video that the app offers a choice about.
+    pub video_format: VideoFormat,
     pub created_at: i64,
     pub started_at: Option<i64>,
     pub completed_at: Option<i64>,
@@ -72,6 +78,17 @@ impl PublishStore {
                 -- means a second LDPlayer instance, which is exactly how the
                 -- user already thinks about it.
                 UNIQUE (ldplayer_instance_id, package_name)
+            );
+
+            -- Pages an account can post as. Not accounts in their own right:
+            -- a Page has no login and no device of its own, it is one more
+            -- identity the same signed-in app can post under.
+            CREATE TABLE IF NOT EXISTS publish_account_pages (
+                account_id TEXT NOT NULL,
+                page_name  TEXT NOT NULL,
+                last_seen  INTEGER NOT NULL,
+                PRIMARY KEY (account_id, page_name),
+                FOREIGN KEY (account_id) REFERENCES publish_accounts(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS publish_media (
@@ -136,6 +153,9 @@ impl PublishStore {
         add_column_if_missing(conn, "publish_jobs", "step", "TEXT")?;
         add_column_if_missing(conn, "publish_jobs", "screenshot_path", "TEXT")?;
         add_column_if_missing(conn, "publish_media", "duration_seconds", "REAL")?;
+        add_column_if_missing(conn, "publish_accounts", "profile_name", "TEXT")?;
+        add_column_if_missing(conn, "publish_jobs", "target_page", "TEXT")?;
+        add_column_if_missing(conn, "publish_jobs", "video_format", "TEXT")?;
         Ok(())
     }
 
@@ -199,7 +219,8 @@ impl PublishStore {
     fn account_for(&self, device_id: &str, package: &str) -> Result<Option<Account>> {
         let conn = self.lock()?;
         conn.query_row(
-            "SELECT id, name, platform, ldplayer_instance_id, package_name, created_at
+            "SELECT id, name, platform, ldplayer_instance_id, package_name, created_at,
+                    profile_name
                FROM publish_accounts WHERE ldplayer_instance_id = ?1 AND package_name = ?2",
             params![device_id, package],
             account_from_row,
@@ -211,7 +232,8 @@ impl PublishStore {
     pub fn accounts(&self) -> Result<Vec<Account>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, platform, ldplayer_instance_id, package_name, created_at
+            "SELECT id, name, platform, ldplayer_instance_id, package_name, created_at,
+                    profile_name
                FROM publish_accounts ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map([], account_from_row)?;
@@ -221,7 +243,8 @@ impl PublishStore {
     pub fn account(&self, id: &str) -> Result<Account> {
         let conn = self.lock()?;
         conn.query_row(
-            "SELECT id, name, platform, ldplayer_instance_id, package_name, created_at
+            "SELECT id, name, platform, ldplayer_instance_id, package_name, created_at,
+                    profile_name
                FROM publish_accounts WHERE id = ?1",
             params![id],
             account_from_row,
@@ -240,6 +263,89 @@ impl PublishStore {
             return Err(AppError::AccountNotFound(id.to_string()));
         }
         Ok(())
+    }
+
+    /// Record the display name this account posts under.
+    ///
+    /// An empty name clears it, which switches the check back off. That is a
+    /// real thing to want: a name the app renders differently from what was
+    /// typed would otherwise block every post with no way back.
+    pub fn set_account_profile_name(&self, id: &str, profile_name: &str) -> Result<()> {
+        let trimmed = profile_name.trim();
+        let value = (!trimmed.is_empty()).then_some(trimmed);
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "UPDATE publish_accounts SET profile_name = ?1 WHERE id = ?2",
+            params![value, id],
+        )?;
+        if n == 0 {
+            return Err(AppError::AccountNotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Replace the Pages known for an account.
+    ///
+    /// A whole-list replace rather than an upsert: a Page the person no longer
+    /// administers has to disappear from the picker, and the only way to know
+    /// it is gone is that a fresh read of the app did not mention it.
+    pub fn set_account_pages(&self, account_id: &str, pages: &[String]) -> Result<()> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM publish_account_pages WHERE account_id = ?1",
+            params![account_id],
+        )?;
+        let seen = now_unix();
+        for page in pages {
+            let name = page.trim();
+            if name.is_empty() {
+                continue;
+            }
+            tx.execute(
+                "INSERT OR REPLACE INTO publish_account_pages (account_id, page_name, last_seen)
+                 VALUES (?1, ?2, ?3)",
+                params![account_id, name, seen],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Add one Page by hand, leaving the rest alone.
+    pub fn add_account_page(&self, account_id: &str, page_name: &str) -> Result<()> {
+        let name = page_name.trim();
+        if name.is_empty() {
+            return Err(AppError::Internal("a Page needs a name".into()));
+        }
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO publish_account_pages (account_id, page_name, last_seen)
+             VALUES (?1, ?2, ?3)",
+            params![account_id, name, now_unix()],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_account_page(&self, account_id: &str, page_name: &str) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "DELETE FROM publish_account_pages WHERE account_id = ?1 AND page_name = ?2",
+            params![account_id, page_name],
+        )?;
+        Ok(())
+    }
+
+    pub fn account_pages(&self, account_id: &str) -> Result<Vec<AccountPage>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT page_name, last_seen FROM publish_account_pages
+              WHERE account_id = ?1 ORDER BY page_name COLLATE NOCASE ASC",
+        )?;
+        let rows = stmt.query_map(params![account_id], |r| {
+            Ok(AccountPage { name: r.get(0)?, last_seen: r.get(1)? })
+        })?;
+        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
     }
 
     pub fn remove_account(&self, id: &str) -> Result<()> {
@@ -303,8 +409,9 @@ impl PublishStore {
         conn.execute(
             "INSERT INTO publish_jobs
                  (id, media_id, account_id, caption, status, progress, step,
-                  error_code, error, screenshot_path, created_at, started_at, completed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                  error_code, error, screenshot_path, target_page, video_format,
+                  created_at, started_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 job.id,
                 job.media_id,
@@ -316,6 +423,8 @@ impl PublishStore {
                 job.error_code,
                 job.error,
                 job.screenshot_path,
+                job.target_page,
+                job.video_format.as_str(),
                 job.created_at,
                 job.started_at,
                 job.completed_at
@@ -358,7 +467,8 @@ impl PublishStore {
         let conn = self.lock()?;
         conn.query_row(
             "SELECT id, media_id, account_id, caption, status, progress, step,
-                    error_code, error, screenshot_path, created_at, started_at, completed_at
+                    error_code, error, screenshot_path, created_at, started_at,
+                    completed_at, target_page, video_format
                FROM publish_jobs WHERE id = ?1",
             params![id],
             job_from_row,
@@ -372,7 +482,8 @@ impl PublishStore {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT id, media_id, account_id, caption, status, progress, step,
-                    error_code, error, screenshot_path, created_at, started_at, completed_at
+                    error_code, error, screenshot_path, created_at, started_at,
+                    completed_at, target_page, video_format
                FROM publish_jobs ORDER BY created_at DESC, rowid DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], job_from_row)?;
@@ -533,6 +644,7 @@ fn account_from_row(r: &Row<'_>) -> rusqlite::Result<Account> {
         ldplayer_instance_id: r.get(3)?,
         package_name: r.get(4)?,
         created_at: r.get(5)?,
+        profile_name: r.get(6)?,
     })
 }
 
@@ -552,6 +664,13 @@ fn job_from_row(r: &Row<'_>) -> rusqlite::Result<JobRow> {
         created_at: r.get(10)?,
         started_at: r.get(11)?,
         completed_at: r.get(12)?,
+        target_page: r.get(13)?,
+        // An unknown or absent value reads as the default rather than failing
+        // the row: a job written before this column existed is still a job.
+        video_format: r
+            .get::<_, Option<String>>(14)?
+            .and_then(|v| VideoFormat::parse(&v))
+            .unwrap_or_default(),
     })
 }
 
@@ -592,6 +711,8 @@ mod tests {
             error_code: None,
             error: None,
             screenshot_path: None,
+            target_page: None,
+            video_format: VideoFormat::default(),
             created_at: now_unix(),
             started_at: None,
             completed_at: None,
@@ -700,6 +821,76 @@ mod tests {
     }
 
 
+    /// The Page a job posts as has to survive the round trip, because it is
+    /// what the identity check is compared against when the job runs. Losing
+    /// it would silently turn a Page post into a profile post.
+    #[test]
+    fn a_job_remembers_which_page_it_posts_as() {
+        let s = store();
+        let a = s.add_account("FB", Platform::Facebook, "ld:0", "com.facebook.katana").unwrap();
+        let m = media(&s);
+
+        let mut row = job(&s, &a, &m);
+        row.id = uuid::Uuid::new_v4().to_string();
+        row.target_page = Some("Acme Store".into());
+        s.add_job(&row, &[m.id.clone()]).unwrap();
+
+        assert_eq!(s.job(&row.id).unwrap().target_page.as_deref(), Some("Acme Store"));
+        // A profile post carries none, which is what keeps the check falling
+        // back to the account's own name.
+        let plain = job(&s, &a, &m);
+        assert_eq!(s.job(&plain.id).unwrap().target_page, None);
+    }
+
+    /// Pages are what people publish to, so the list has to be replaceable as
+    /// a whole: a Page someone no longer administers must leave the picker,
+    /// and the only evidence it is gone is that a fresh read did not name it.
+    #[test]
+    fn a_page_list_is_replaced_wholesale_not_merged() {
+        let s = store();
+        let a = s.add_account("FB", Platform::Facebook, "ld:0", "com.facebook.katana").unwrap();
+
+        s.set_account_pages(&a.id, &["Acme Store".into(), "Acme Support".into()]).unwrap();
+        let names: Vec<String> = s.account_pages(&a.id).unwrap().into_iter().map(|p| p.name).collect();
+        assert_eq!(names, vec!["Acme Store", "Acme Support"]);
+
+        // Support is gone from the app, so it must be gone from the picker.
+        s.set_account_pages(&a.id, &["Acme Store".into()]).unwrap();
+        let names: Vec<String> = s.account_pages(&a.id).unwrap().into_iter().map(|p| p.name).collect();
+        assert_eq!(names, vec!["Acme Store"]);
+    }
+
+    #[test]
+    fn pages_are_added_and_removed_one_at_a_time() {
+        let s = store();
+        let a = s.add_account("FB", Platform::Facebook, "ld:0", "com.facebook.katana").unwrap();
+
+        s.add_account_page(&a.id, "  Acme Store  ").unwrap();
+        assert_eq!(s.account_pages(&a.id).unwrap()[0].name, "Acme Store", "padding is not a name");
+
+        // Adding the same Page twice is one Page, not a duplicate row that
+        // would publish the same post twice.
+        s.add_account_page(&a.id, "Acme Store").unwrap();
+        assert_eq!(s.account_pages(&a.id).unwrap().len(), 1);
+
+        assert!(s.add_account_page(&a.id, "   ").is_err(), "a Page needs a name");
+
+        s.remove_account_page(&a.id, "Acme Store").unwrap();
+        assert!(s.account_pages(&a.id).unwrap().is_empty());
+    }
+
+    /// Deleting an account must take its Pages with it. A Page row pointing at
+    /// an account that no longer exists would be offered by nothing and
+    /// deletable by nobody.
+    #[test]
+    fn removing_an_account_removes_its_pages() {
+        let s = store();
+        let a = s.add_account("FB", Platform::Facebook, "ld:0", "com.facebook.katana").unwrap();
+        s.add_account_page(&a.id, "Acme Store").unwrap();
+        s.remove_account(&a.id).unwrap();
+        assert!(s.account_pages(&a.id).unwrap().is_empty());
+    }
+
     /// A database written by an earlier build must gain the new columns rather
     /// than erroring on open. This is what makes shipping an update safe.
     #[test]
@@ -780,6 +971,8 @@ mod tests {
             error_code: None,
             error: None,
             screenshot_path: None,
+            target_page: None,
+            video_format: VideoFormat::default(),
             created_at: now_unix(),
             started_at: None,
             completed_at: None,
@@ -816,6 +1009,8 @@ mod tests {
             error_code: None,
             error: None,
             screenshot_path: None,
+            target_page: None,
+            video_format: VideoFormat::default(),
             created_at: now_unix(),
             started_at: None,
             completed_at: None,

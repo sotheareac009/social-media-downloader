@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { useToast } from "@/components/ui/Toast";
 import { usePublish } from "@/components/publish/PublishProvider";
-import { PlatformMark } from "@/components/publish/PlatformMark";
+import { PlatformMark, platformLabel } from "@/components/publish/PlatformMark";
 import { StatusBadge } from "@/components/publish/StatusDot";
 import {
   DEVICE_STATE_LABEL,
@@ -18,6 +18,10 @@ import {
   publishDiscoverAccounts,
   publishRemoveAccount,
   publishRenameAccount,
+  publishSetProfileName,
+  publishAddPage,
+  publishDiscoverPages,
+  publishRemovePage,
   type AccountStatus,
   type AccountView,
   type DiscoveredApp,
@@ -184,6 +188,30 @@ export function PublisherAccountsPage() {
                 }
                 onRemove={() =>
                   act(account.id, "Remove", () => publishRemoveAccount(account.id))
+                }
+                onSetProfileName={(profileName) =>
+                  act(account.id, "Save", () =>
+                    publishSetProfileName(account.id, profileName),
+                  )
+                }
+                onAddPage={(pageName) =>
+                  act(account.id, "Add Page", () => publishAddPage(account.id, pageName))
+                }
+                onFindPages={() =>
+                  act(account.id, "Find Pages", async () => {
+                    const found = await publishDiscoverPages(account.id);
+                    toast(
+                      "success",
+                      found.length === 0
+                        ? "No Pages found on this account."
+                        : `Found ${found.length} ${found.length === 1 ? "Page" : "Pages"}: ${found.join(", ")}`,
+                    );
+                  })
+                }
+                onRemovePage={(pageName) =>
+                  act(account.id, "Remove Page", () =>
+                    publishRemovePage(account.id, pageName),
+                  )
                 }
               />
             ))}
@@ -410,14 +438,25 @@ function AccountRow({
   busy,
   onRename,
   onRemove,
+  onSetProfileName,
+  onAddPage,
+  onRemovePage,
+  onFindPages,
 }: {
   account: AccountView;
   busy: boolean;
   onRename: (name: string) => void;
   onRemove: () => void;
+  onSetProfileName: (profileName: string) => void;
+  onAddPage: (pageName: string) => void;
+  onRemovePage: (pageName: string) => void;
+  onFindPages: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(account.name);
+  const [editingProfile, setEditingProfile] = useState(false);
+  const [profileDraft, setProfileDraft] = useState(account.profile_name ?? "");
+  const [pageDraft, setPageDraft] = useState("");
 
   return (
     <div className="acctrow">
@@ -450,6 +489,106 @@ function AccountRow({
           {account.device_name ?? account.ldplayer_instance_id} · {account.package_name}
         </div>
         {account.detail && <div className="acctrow__detail">{account.detail}</div>}
+        {!account.available && (
+          <div className="acctrow__note">
+            Publishing to {platformLabel(account.platform)} is
+            switched off for now, so this account isn’t offered as a target. It stays
+            here, and can be removed, until the platform is turned back on.
+          </div>
+        )}
+        {/* Pages are the things people actually publish to, so they are listed
+            on the account rather than hidden behind it. Adding one here is the
+            manual route; reading them out of the app itself comes next. */}
+        {account.platform === "facebook" && (
+          <div className="acctrow__pages">
+            <div className="acctrow__pageshead">
+              <span>
+                {account.pages.length === 0
+                  ? "No Pages yet — read them from the app, or add one by hand"
+                  : `Posts to ${account.pages.length} ${
+                      account.pages.length === 1 ? "Page" : "Pages"
+                    }`}
+              </span>
+              {/* Reads the app's own profile switcher. Needs the emulator
+                  running, which is why it says so rather than failing oddly. */}
+              <Button
+                variant="ghost"
+                disabled={busy || account.status !== "connected"}
+                onClick={onFindPages}
+              >
+                {account.pages.length === 0 ? "Find Pages" : "Refresh"}
+              </Button>
+            </div>
+            {account.pages.length > 0 && (
+              <ul className="acctrow__pagelist">
+                {account.pages.map((page) => (
+                  <li key={page.name} className="acctrow__page">
+                    <span className="acctrow__pagename">{page.name}</span>
+                    <button
+                      className="linkbtn"
+                      type="button"
+                      disabled={busy}
+                      onClick={() => onRemovePage(page.name)}
+                    >
+                      Remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <form
+              className="acctrow__pageadd"
+              onSubmit={(e) => {
+                e.preventDefault();
+                const name = pageDraft.trim();
+                if (!name) return;
+                onAddPage(name);
+                setPageDraft("");
+              }}
+            >
+              <input
+                className="input input--sm"
+                value={pageDraft}
+                placeholder="Page name, exactly as Facebook shows it"
+                onChange={(e) => setPageDraft(e.target.value)}
+              />
+              <Button variant="ghost" type="submit" disabled={busy || !pageDraft.trim()}>
+                Add Page
+              </Button>
+            </form>
+          </div>
+        )}
+        {/* Identity check. Empty means off, which is why the prompt says what
+            turning it on buys rather than just naming the field. */}
+        {editingProfile ? (
+          <form
+            className="acctrow__edit"
+            onSubmit={(e) => {
+              e.preventDefault();
+              onSetProfileName(profileDraft.trim());
+              setEditingProfile(false);
+            }}
+          >
+            <input
+              className="input input--sm"
+              value={profileDraft}
+              autoFocus
+              placeholder="Name exactly as the app shows it on the composer"
+              onChange={(e) => setProfileDraft(e.target.value)}
+              onBlur={() => setEditingProfile(false)}
+            />
+          </form>
+        ) : (
+          <button
+            className="acctrow__note acctrow__note--action"
+            type="button"
+            onClick={() => setEditingProfile(true)}
+          >
+            {account.profile_name
+              ? `Posts as ${account.profile_name} — checked before anything is submitted`
+              : "Set who this posts as, and every post is checked against it before it goes out"}
+          </button>
+        )}
         {/* Said here, before jobs are queued, rather than after one stops. */}
         {!account.supports_auto_post && (
           <div className="acctrow__note">

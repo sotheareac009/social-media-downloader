@@ -26,6 +26,7 @@ use crate::ldplayer::manager::{now_unix, LdPlayerManager};
 use crate::publish::connector::{self, Outcome, PublishContext, StagedMedia};
 use crate::publish::model::{
     Account, AccountStatus, AccountView, JobStatus, MediaItem, Platform, PostMode, PublishJob,
+    PublishTarget, VideoFormat,
 };
 use crate::publish::store::{JobRow, PublishStore};
 
@@ -145,6 +146,10 @@ impl PublishQueue {
             };
 
             out.push(AccountView {
+                available: account.platform.is_available(),
+                // Best effort: a page list that cannot be read must not stop
+                // the account list from rendering.
+                pages: self.store.account_pages(&account.id).unwrap_or_default(),
                 supports_auto_post: Platform::supports_auto_post(&account.package_name),
                 device_name: device.map(|d| d.name.clone()),
                 device_online: device.is_some_and(|d| d.is_online()),
@@ -165,7 +170,50 @@ impl PublishQueue {
         Ok(installed
             .into_iter()
             .filter_map(|pkg| Platform::for_package(&pkg).map(|p| (p, pkg)))
+            .filter(|(platform, _)| platform.is_available())
             .collect())
+    }
+
+    /// Read an account's Pages out of the app and store them.
+    ///
+    /// Replaces the stored list rather than adding to it: a Page someone no
+    /// longer administers has to leave the picker, and its absence from a
+    /// fresh read is the only evidence of that there is.
+    pub async fn discover_pages(&self, account_id: &str) -> Result<Vec<String>> {
+        let account = self.store.account(account_id)?;
+        if account.platform != Platform::Facebook {
+            return Err(AppError::Internal(format!(
+                "{} has no Pages to read",
+                account.platform.label()
+            )));
+        }
+
+        let serial = self.devices.serial_for_device(&account.ldplayer_instance_id).await?;
+        let adb = self.devices.adb()?;
+
+        // Start the app on a CLEAN task. An ordinary launch resumes whatever
+        // it had open, and a publish that stopped half way leaves the composer
+        // on top — which has its own "Menu" control and no profile switcher
+        // behind it, so every read would come back empty on an account with
+        // Pages. The cost is that an unfinished composer is discarded, which
+        // is the right trade for a screen only a failed job left behind.
+        adb.relaunch_app(&serial, &account.package_name).await?;
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let found = connector::pages::discover(&adb, &serial).await?;
+        self.store.set_account_pages(account_id, &found.pages)?;
+
+        // Learn the profile's own name while the sheet is open. It is what the
+        // app gets switched back to after a Page post, and what an ordinary
+        // post is checked against — so reading it here is the difference
+        // between a working identity check and asking someone to type their
+        // own name correctly. An existing value is left alone: it may have
+        // been corrected by hand for exactly that reason.
+        if let Some(profile) = found.profile.as_deref() {
+            if account.profile_name.is_none() {
+                self.store.set_account_profile_name(account_id, profile)?;
+            }
+        }
+        Ok(found.pages)
     }
 
     pub fn add_account(
@@ -178,6 +226,12 @@ impl PublishQueue {
         // Refuse a package that doesn't belong to the platform it claims:
         // it would produce an account that opens the wrong app and fails in a
         // way nobody could diagnose from the UI.
+        // A platform that is switched off cannot be added, whatever the UI
+        // sends. The picker already hides them; this is the half that holds
+        // when a stale window, an old build or a direct call says otherwise.
+        if !platform.is_available() {
+            return Err(AppError::PlatformUnavailable(platform.label().to_string()));
+        }
         if !platform.packages().contains(&package) {
             return Err(AppError::PackagePlatformMismatch(format!(
                 "{package} is not a {} app",
@@ -197,10 +251,11 @@ impl PublishQueue {
         queue: Arc<PublishQueue>,
         paths: &[String],
         caption: &str,
-        account_ids: &[String],
+        targets: &[PublishTarget],
         mode: PostMode,
+        video_format: VideoFormat,
     ) -> Result<Vec<PublishJob>> {
-        if account_ids.is_empty() {
+        if targets.is_empty() {
             return Err(AppError::NoAccountsSelected);
         }
         if paths.is_empty() {
@@ -218,8 +273,8 @@ impl PublishQueue {
 
         // Validate accounts up front too — a job pointing at a deleted account
         // would fail one worker-slot later, for no reason.
-        for account_id in account_ids {
-            self.store.account(account_id)?;
+        for target in targets {
+            self.store.account(&target.account_id)?;
         }
 
         // Album: one job per account carrying every asset, so the person makes
@@ -229,8 +284,9 @@ impl PublishQueue {
             PostMode::Single => media.iter().cloned().map(|m| vec![m]).collect(),
         };
 
-        let mut created = Vec::with_capacity(account_ids.len() * batches.len());
-        for account_id in account_ids {
+        let mut created = Vec::with_capacity(targets.len() * batches.len());
+        for target in targets {
+            let account_id = &target.account_id;
             for batch in &batches {
                 let ids: Vec<String> = batch.iter().map(|m| m.id.clone()).collect();
                 let row = JobRow {
@@ -244,6 +300,8 @@ impl PublishQueue {
                     error_code: None,
                     error: None,
                     screenshot_path: None,
+                    target_page: target.page.clone(),
+                    video_format,
                     created_at: now_unix(),
                     started_at: None,
                     completed_at: None,
@@ -572,6 +630,17 @@ impl PublishQueue {
             caption: row.caption.clone(),
             platform_label: account.platform.label(),
             auto_post: settings.auto_post,
+            // A Page post must go out as the Page, so the Page name is what
+            // the composer is checked against. Falling back to the profile
+            // name keeps ordinary posts checked too — the guard against a
+            // session someone left switched to something else.
+            expected_author: row
+                .target_page
+                .clone()
+                .or_else(|| account.profile_name.clone()),
+            post_as_page: row.target_page.clone(),
+            video_format: row.video_format,
+            profile_name: account.profile_name.clone(),
             report: {
                 let store = self.store.clone();
                 let app = app.clone();

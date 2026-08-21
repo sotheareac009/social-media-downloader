@@ -36,9 +36,10 @@ use async_trait::async_trait;
 use crate::errors::Result;
 use crate::ldplayer::adb::MediaCollection;
 use crate::ldplayer::manager::LdPlayerManager;
-use crate::publish::model::Platform;
+use crate::publish::model::{Platform, VideoFormat};
 
 pub mod autopost;
+pub mod pages;
 pub mod share;
 
 /// One asset sitting on the device, ready to hand to an app.
@@ -78,6 +79,23 @@ pub struct PublishContext {
     pub platform_label: &'static str,
     /// Whether the user asked for the final Post tap to be automated.
     pub auto_post: bool,
+    /// Who this post must go out as, as the app renders the name on its own
+    /// composer. `None` means the account has never been told, and no check
+    /// runs — the behaviour every account had before this existed.
+    ///
+    /// This is an identity check, not a login: the name is read off the
+    /// screen and compared. Nothing here knows a password, and nothing here
+    /// can change who is signed in.
+    pub expected_author: Option<String>,
+    /// The Page this post must go out as, if any. Facebook publishes as
+    /// whoever is active, so this is switched to before the share intent and
+    /// switched away from afterwards.
+    pub post_as_page: Option<String>,
+    /// Reel or feed post, when the app asks which a video should become.
+    pub video_format: VideoFormat,
+    /// The profile to switch back to once a Page post is done. Without it the
+    /// app is left active as the Page, and the NEXT job posts there too.
+    pub profile_name: Option<String>,
     /// Report a step to the UI. Called with a coarse 0–1 fraction and a
     /// sentence a non-technical person can read.
     pub report: Box<dyn Fn(f64, &str) + Send + Sync>,

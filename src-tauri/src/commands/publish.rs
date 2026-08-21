@@ -6,7 +6,9 @@ use serde::Serialize;
 use tauri::{AppHandle, State};
 
 use crate::errors::{AppError, Result};
-use crate::publish::model::{Account, AccountView, Platform, PostMode, PublishJob};
+use crate::publish::model::{
+    Account, AccountView, Platform, PostMode, PublishJob, PublishTarget, VideoFormat,
+};
 use crate::publish::queue::{PublishQueue, QueueSummary};
 
 type Queue<'a> = State<'a, Arc<PublishQueue>>;
@@ -30,7 +32,9 @@ pub struct PlatformInfo {
 
 #[tauri::command]
 pub async fn publish_platforms() -> Result<Vec<PlatformInfo>> {
-    Ok(Platform::ALL
+    // AVAILABLE, not ALL: the picker must not offer a platform a job cannot
+    // be run against.
+    Ok(Platform::AVAILABLE
         .iter()
         .map(|p| PlatformInfo {
             id: *p,
@@ -88,6 +92,17 @@ pub async fn publish_rename_account(queue: Queue<'_>, id: String, name: String) 
     queue.store().rename_account(&id, name)
 }
 
+/// Record the name this account posts under, so every post can be checked
+/// against it first. An empty string clears it and switches the check off.
+#[tauri::command]
+pub async fn publish_set_profile_name(
+    queue: Queue<'_>,
+    id: String,
+    profile_name: String,
+) -> Result<()> {
+    queue.store().set_account_profile_name(&id, &profile_name)
+}
+
 #[tauri::command]
 pub async fn publish_remove_account(queue: Queue<'_>, id: String) -> Result<()> {
     queue.store().remove_account(&id)
@@ -108,15 +123,42 @@ pub async fn publish_submit(
     queue: Queue<'_>,
     paths: Vec<String>,
     caption: String,
-    account_ids: Vec<String>,
+    targets: Vec<PublishTarget>,
     mode: String,
+    video_format: Option<String>,
 ) -> Result<Vec<PublishJob>> {
     let mode = PostMode::parse(&mode)
         .ok_or_else(|| AppError::Internal(format!("unknown post mode `{mode}`")))?;
+    // Absent means the default. An unrecognised value does not: publishing a
+    // Reel when a feed post was asked for is not a rounding error.
+    let video_format = match video_format.as_deref() {
+        None => VideoFormat::default(),
+        Some(v) => VideoFormat::parse(v)
+            .ok_or_else(|| AppError::Internal(format!("unknown video format `{v}`")))?,
+    };
     let handle = queue.inner().clone();
     handle
-        .submit(&app, handle.clone(), &paths, &caption, &account_ids, mode)
+        .submit(&app, handle.clone(), &paths, &caption, &targets, mode, video_format)
         .await
+}
+
+// ------------------------------------------------------------------- pages
+
+/// The Pages an account can post as, as the dashboard lists them.
+/// Read this account's Pages out of the Facebook app and store them.
+#[tauri::command]
+pub async fn publish_discover_pages(queue: Queue<'_>, id: String) -> Result<Vec<String>> {
+    queue.inner().discover_pages(&id).await
+}
+
+#[tauri::command]
+pub async fn publish_add_page(queue: Queue<'_>, id: String, page_name: String) -> Result<()> {
+    queue.store().add_account_page(&id, &page_name)
+}
+
+#[tauri::command]
+pub async fn publish_remove_page(queue: Queue<'_>, id: String, page_name: String) -> Result<()> {
+    queue.store().remove_account_page(&id, &page_name)
 }
 
 #[tauri::command]
