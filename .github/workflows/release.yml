@@ -93,11 +93,6 @@ jobs:
 
       # Tests are cheap next to a full Tauri build, and a broken build is worth
       # catching before spending ten minutes bundling it.
-      - name: Test
-        run: |
-          npm run build
-          cargo test --manifest-path src-tauri/Cargo.toml
-
       # Ship yt-dlp and ffmpeg inside the installer so a fresh Windows machine
       # works with no first-run download at all. Fetched here rather than
       # committed: they total ~190 MB and go stale quickly, so a copy in git
@@ -135,6 +130,11 @@ jobs:
             if (-not (Test-Path "$bin/$f")) { throw "bundled tool missing: $f" }
           }
           Get-ChildItem $bin | Format-Table Name, Length
+
+      - name: Test
+        run: |
+          npm run build
+          cargo test --manifest-path src-tauri/Cargo.toml
 
       - uses: tauri-apps/tauri-action@v0
         env:
