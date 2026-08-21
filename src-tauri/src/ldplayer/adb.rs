@@ -268,20 +268,36 @@ impl Adb {
     /// Wait until `serial` answers, polling rather than using
     /// `adb wait-for-device` — that blocks forever on an emulator that never
     /// finishes booting, and a hung Publish is worse than a failed one.
+    ///
+    /// The error names which of the three gates failed. A timeout that only
+    /// says "not responding" hides the difference between a device adb cannot
+    /// see, one it sees as `offline`, and one that is simply still booting —
+    /// and those have three different fixes.
     pub async fn wait_for_device(&self, serial: &str, timeout: Duration) -> Result<()> {
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            if self
+            let listed = self
                 .devices()
                 .await
-                .map(|d| d.iter().any(|x| x.serial == serial && x.is_online()))
-                .unwrap_or(false)
-                && self.is_booted(serial).await
-            {
-                return Ok(());
-            }
+                .unwrap_or_default()
+                .into_iter()
+                .find(|d| d.serial == serial);
+
+            let reason = match &listed {
+                None => AppError::InstanceOffline(serial.to_string()),
+                Some(d) if !d.is_online() => {
+                    AppError::DeviceNotReady(serial.to_string(), d.state.clone())
+                }
+                Some(_) => {
+                    if self.is_booted(serial).await {
+                        return Ok(());
+                    }
+                    AppError::AndroidNotBooted(serial.to_string())
+                }
+            };
+
             if std::time::Instant::now() >= deadline {
-                return Err(AppError::InstanceOffline(serial.to_string()));
+                return Err(reason);
             }
             tokio::time::sleep(Duration::from_millis(1500)).await;
         }
@@ -289,22 +305,37 @@ impl Adb {
 
     /// True once Android itself — not just the emulator shell — is up.
     ///
-    /// `sys.boot_completed` flips well before the launcher is usable, so
-    /// `bootanim` is checked too; starting an app during the boot animation
-    /// reliably lands on a blank screen.
+    /// `sys.boot_completed` flips slightly before the launcher is usable, so
+    /// the boot animation service is consulted as a second opinion — starting
+    /// an app mid-animation reliably lands on a blank screen.
+    ///
+    /// THE TRAP: LDPlayer ships with the boot animation disabled (a large part of
+    /// why it starts so fast), so `init.svc.bootanim` comes back
+    /// EMPTY, not "stopped". Comparing that to "stopped" marks a
+    /// fully-booted emulator as forever-booting. Only an explicit "running"
+    /// means the animation is actually playing; absent means there is no such
+    /// service to wait for.
     pub async fn is_booted(&self, serial: &str) -> bool {
-        let booted = self
-            .shell(serial, "getprop sys.boot_completed")
-            .await
-            .map(|s| s.trim() == "1")
-            .unwrap_or(false);
+        // Two properties, because different Android builds set different ones.
+        // Either being "1" is proof enough.
+        let mut booted = false;
+        for prop in ["sys.boot_completed", "dev.bootcomplete"] {
+            if let Ok(v) = self.shell(serial, &format!("getprop {prop}")).await {
+                if v.trim() == "1" {
+                    booted = true;
+                    break;
+                }
+            }
+        }
         if !booted {
             return false;
         }
-        self.shell(serial, "getprop init.svc.bootanim")
+
+        let bootanim = self
+            .shell(serial, "getprop init.svc.bootanim")
             .await
-            .map(|s| s.trim() == "stopped")
-            .unwrap_or(true)
+            .unwrap_or_default();
+        boot_animation_finished(&bootanim)
     }
 
     /// A human-readable model name, for the device list.
@@ -587,6 +618,16 @@ impl Adb {
     }
 }
 
+/// Whether the boot animation is done — or was never running.
+///
+/// Anything other than an explicit "running" counts as finished. An empty or
+/// absent property means the device has no boot animation service at all,
+/// which is the normal state on LDPlayer and must not be read as "still
+/// booting".
+fn boot_animation_finished(value: &str) -> bool {
+    !value.trim().eq_ignore_ascii_case("running")
+}
+
 /// Whether adb's failure text describes a closed port rather than a bad
 /// address. `10061` is winsock's WSAECONNREFUSED, which is how this presents
 /// on Windows; the wording differs per platform, so both are matched.
@@ -736,6 +777,19 @@ mod tests {
             "indexing into the wrong table hides the file from every picker"
         );
         assert_eq!(MediaCollection::Image.mime(), "image/*");
+    }
+
+    /// The bug this test exists for: LDPlayer disables the boot animation, so
+    /// the property is empty. Reading that as "still booting" makes every
+    /// Connect time out against a perfectly healthy emulator.
+    #[test]
+    fn an_absent_boot_animation_counts_as_finished() {
+        assert!(boot_animation_finished(""), "LDPlayer reports no bootanim at all");
+        assert!(boot_animation_finished("   "));
+        assert!(boot_animation_finished("stopped"));
+        assert!(boot_animation_finished("restarting"));
+        assert!(!boot_animation_finished("running"));
+        assert!(!boot_animation_finished("RUNNING"));
     }
 
     #[test]

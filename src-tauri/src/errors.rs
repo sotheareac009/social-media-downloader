@@ -173,6 +173,14 @@ pub enum AppError {
     /// means ADB debugging is switched off inside LDPlayer, which is its
     /// default on several builds — so this gets its own variant rather than
     /// being reported as a generic connection failure the user cannot act on.
+    /// adb can see the device but it is not in the `device` state.
+    #[error("adb can see `{0}` but reports it as `{1}` — restarting that instance usually clears this")]
+    DeviceNotReady(String, String),
+
+    /// Connected and online, but Android itself has not finished starting.
+    #[error("`{0}` is connected, but Android hasn't finished starting yet")]
+    AndroidNotBooted(String),
+
     #[error("{0} isn't accepting ADB connections. In LDPlayer, open that instance's Settings → Other settings, set ADB debugging to \"Open local connection\", then restart the instance.")]
     AdbDebuggingOff(String),
 
@@ -265,6 +273,8 @@ impl AppError {
             Self::InstanceNotFound(_) => "instance_not_found",
             Self::InstanceOffline(_) => "instance_offline",
             Self::AdbDebuggingOff(_) => "adb_debugging_off",
+            Self::DeviceNotReady(..) => "device_not_ready",
+            Self::AndroidNotBooted(_) => "android_not_booted",
             Self::NotAnLdplayerInstance(_) => "not_an_ldplayer_instance",
             Self::MediaFileMissing(_) => "media_file_missing",
             Self::MediaTransferFailed(_) => "media_transfer_failed",
