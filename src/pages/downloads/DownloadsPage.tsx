@@ -578,7 +578,7 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
         <h1 className="page__title">Download public videos</h1>
         <p className="page__lede">
           Paste a link — or a whole list, one per line — for public YouTube,
-          Facebook and TikTok videos, Shorts and reels. A TikTok profile or
+          Facebook and TikTok videos, Shorts and reels, Instagram posts, Instagram profile, X (Twitter) posts. A TikTok profile or
           YouTube channel link grabs everything they've posted. No account
           needed: these are posts anyone can already open in a browser.
         </p>

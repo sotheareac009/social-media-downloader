@@ -140,6 +140,72 @@ pub enum AppError {
     #[error("that licence key needs a newer version of the app")]
     LicenseUnsupported,
 
+
+    // ----------------------------------------------- emulator publishing
+    //
+    // These describe the *device*, never the social account: there is no
+    // credential in this path to leak, because the login stays inside the
+    // Android app.
+
+    #[error("ADB was not found. Install LDPlayer, or set the ADB path in Settings.")]
+    AdbMissing,
+
+    #[error("ADB failed: {0}")]
+    AdbFailed(String),
+
+    #[error("LDPlayer was not found on this computer. Set its folder in Settings if it is installed somewhere unusual.")]
+    LdPlayerMissing,
+
+    #[error("LDPlayer reported a problem: {0}")]
+    LdPlayerFailed(String),
+
+    /// A hand-typed connect address that isn't `host:port`.
+    #[error("`{0}` isn't a device address — expected something like 127.0.0.1:5555")]
+    InvalidDeviceAddress(String),
+
+    #[error("no LDPlayer instance with id `{0}`")]
+    InstanceNotFound(String),
+
+    #[error("the emulator `{0}` is not responding; start it in LDPlayer and try again")]
+    InstanceOffline(String),
+
+    /// Asked to start or stop something this app does not control - a phone,
+    /// or another vendor's emulator.
+    #[error("`{0}` is not an LDPlayer instance, so this app can't start or stop it")]
+    NotAnLdplayerInstance(String),
+
+    #[error("could not find the video file `{0}`")]
+    MediaFileMissing(String),
+
+    #[error("copying the video to the emulator failed: {0}")]
+    MediaTransferFailed(String),
+
+    /// The file is on the device but Android's gallery cannot see it, which
+    /// means every app's media picker will come up empty.
+    #[error("the video was copied but Android's gallery did not index it, so the app won't see it")]
+    MediaScanFailed,
+
+    #[error("`{0}` is not installed on that emulator")]
+    AppNotInstalled(String),
+
+    #[error("could not open `{0}` on the emulator")]
+    AppLaunchFailed(String),
+
+    #[error("no account with id `{0}`")]
+    AccountNotFound(String),
+
+    #[error("{0}")]
+    PackagePlatformMismatch(String),
+
+    #[error("no publishing job with that id")]
+    PublishJobNotFound(String),
+
+    #[error("a job that is `{0}` can't be retried")]
+    JobNotRetryable(String),
+
+    #[error("choose at least one account to publish to")]
+    NoAccountsSelected,
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -181,6 +247,24 @@ impl AppError {
             Self::LicenseInvalid => "license_invalid",
             Self::LicenseExpired => "license_expired",
             Self::LicenseUnsupported => "license_unsupported",
+            Self::AdbMissing => "adb_missing",
+            Self::AdbFailed(_) => "adb_failed",
+            Self::LdPlayerMissing => "ldplayer_missing",
+            Self::LdPlayerFailed(_) => "ldplayer_failed",
+            Self::InvalidDeviceAddress(_) => "invalid_device_address",
+            Self::InstanceNotFound(_) => "instance_not_found",
+            Self::InstanceOffline(_) => "instance_offline",
+            Self::NotAnLdplayerInstance(_) => "not_an_ldplayer_instance",
+            Self::MediaFileMissing(_) => "media_file_missing",
+            Self::MediaTransferFailed(_) => "media_transfer_failed",
+            Self::MediaScanFailed => "media_scan_failed",
+            Self::AppNotInstalled(_) => "app_not_installed",
+            Self::AppLaunchFailed(_) => "app_launch_failed",
+            Self::AccountNotFound(_) => "account_not_found",
+            Self::PackagePlatformMismatch(_) => "package_platform_mismatch",
+            Self::PublishJobNotFound(_) => "publish_job_not_found",
+            Self::JobNotRetryable(_) => "job_not_retryable",
+            Self::NoAccountsSelected => "no_accounts_selected",
             Self::Internal(_) => "internal",
         }
     }

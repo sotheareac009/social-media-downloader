@@ -5,6 +5,11 @@ import { HomePage } from "@/pages/home/HomePage";
 import { TelegramPage } from "@/pages/telegram/TelegramPage";
 import { FacebookPage } from "@/pages/facebook/FacebookPage";
 import { UploadPage } from "@/pages/upload/UploadPage";
+import { PublisherDashboardPage } from "@/pages/publisher/DashboardPage";
+import { PublisherAccountsPage } from "@/pages/publisher/AccountsPage";
+import { PublishPage } from "@/pages/publisher/PublishPage";
+import { PublisherSettingsPage } from "@/pages/publisher/SettingsPage";
+import { PublishProvider } from "@/components/publish/PublishProvider";
 import { authGetAccounts, subscribeToAuthEvents } from "@/lib/auth";
 import { ToastProvider } from "@/components/ui/Toast";
 import {
@@ -19,17 +24,32 @@ import { BrowserNotice } from "@/components/app/BrowserNotice";
 import { SetupOverlay } from "@/components/setup/SetupOverlay";
 import { HIDE_UPLOAD } from "@/lib/flags";
 import {
+  BoltIcon,
   DownloadIcon,
   GlobeIcon,
   HomeIcon,
   MoonIcon,
+  SendIcon,
+  SlidersIcon,
   SunIcon,
   UploadIcon,
   UsersIcon,
 } from "@/components/ui/icons";
 
 type Theme = "light" | "dark";
-type Route = "home" | "accounts" | "downloads" | "upload" | "telegram" | "facebook";
+type Route =
+  | "home"
+  | "accounts"
+  | "downloads"
+  | "upload"
+  | "telegram"
+  | "facebook"
+  // Emulator publishing. Prefixed so they can never collide with the
+  // OAuth-based "accounts" route, which is a different feature entirely.
+  | "pub-home"
+  | "pub-accounts"
+  | "pub-publish"
+  | "pub-settings";
 const THEME_KEY = "md.theme";
 
 export default function App() {
@@ -90,6 +110,7 @@ export default function App() {
       <NetStatusProvider>
       <EngineStatusProvider>
       <LicenseGate>
+      <PublishProvider>
       <SetupOverlay />
       <div className="app">
         <Sidebar
@@ -111,9 +132,14 @@ export default function App() {
             {route === "accounts" && <AccountsPage onNavigate={setRoute} />}
             {route === "telegram" && <TelegramPage onBack={() => setRoute("accounts")} />}
             {route === "facebook" && <FacebookPage onBack={() => setRoute("accounts")} />}
+            {route === "pub-home" && <PublisherDashboardPage onNavigate={setRoute} />}
+            {route === "pub-accounts" && <PublisherAccountsPage />}
+            {route === "pub-publish" && <PublishPage onNavigate={setRoute} />}
+            {route === "pub-settings" && <PublisherSettingsPage />}
           </div>
         </main>
       </div>
+      </PublishProvider>
       </LicenseGate>
       </EngineStatusProvider>
       </NetStatusProvider>
@@ -221,6 +247,50 @@ function Sidebar({
             <UsersIcon size={16} />
           </span>
           Accounts
+        </button>
+      </nav>
+
+      <nav className="sidebar__section">
+        <div className="sidebar__label">Publishing</div>
+        <button
+          className={`navitem ${route === "pub-home" ? "navitem--active" : ""}`}
+          type="button"
+          onClick={() => onNavigate("pub-home")}
+        >
+          <span className="navitem__icon">
+            <BoltIcon size={16} />
+          </span>
+          Dashboard
+        </button>
+        <button
+          className={`navitem ${route === "pub-accounts" ? "navitem--active" : ""}`}
+          type="button"
+          onClick={() => onNavigate("pub-accounts")}
+        >
+          <span className="navitem__icon">
+            <UsersIcon size={16} />
+          </span>
+          Emulator accounts
+        </button>
+        <button
+          className={`navitem ${route === "pub-publish" ? "navitem--active" : ""}`}
+          type="button"
+          onClick={() => onNavigate("pub-publish")}
+        >
+          <span className="navitem__icon">
+            <SendIcon size={16} />
+          </span>
+          Publish
+        </button>
+        <button
+          className={`navitem ${route === "pub-settings" ? "navitem--active" : ""}`}
+          type="button"
+          onClick={() => onNavigate("pub-settings")}
+        >
+          <span className="navitem__icon">
+            <SlidersIcon size={16} />
+          </span>
+          Settings
         </button>
       </nav>
 

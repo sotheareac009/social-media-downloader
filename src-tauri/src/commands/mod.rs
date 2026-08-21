@@ -7,3 +7,5 @@ pub mod tools;
 pub mod upload;
 pub mod youtube_accounts;
 pub mod license;
+pub mod ldplayer;
+pub mod publish;

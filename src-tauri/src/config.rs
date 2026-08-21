@@ -89,6 +89,7 @@ pub fn read(key: &str) -> Option<String> {
         "INSTAGRAM_CLIENT_SECRET" => option_env!("INSTAGRAM_CLIENT_SECRET"),
         "INSTAGRAM_REDIRECT_URI" => option_env!("INSTAGRAM_REDIRECT_URI"),
         "LICENSE_PUBLIC_KEY" => option_env!("LICENSE_PUBLIC_KEY"),
+        "LICENSE_DISABLED" => option_env!("LICENSE_DISABLED"),
         // Not an OAuth value: an explicit path to the yt-dlp binary, for the
         // common case where a GUI app doesn't inherit the shell's PATH.
         "MEDIA_DOWNLOADER_YTDLP" => option_env!("MEDIA_DOWNLOADER_YTDLP"),

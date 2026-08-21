@@ -198,6 +198,15 @@ fn verifying_key() -> Option<VerifyingKey> {
 /// False when no public key was compiled in, so `npm run tauri dev` is not
 /// gated behind a key. Release builds set `LICENSE_PUBLIC_KEY`.
 pub fn is_enforced() -> bool {
+    // Escape hatch: a build can ship licence-free — usable with no key — even
+    // when a public key is compiled in, by setting LICENSE_DISABLED=true. For
+    // free or internal builds.
+    if let Some(v) = config::read("LICENSE_DISABLED") {
+        let v = v.trim().to_ascii_lowercase();
+        if v == "1" || v == "true" || v == "yes" {
+            return false;
+        }
+    }
     verifying_key().is_some()
 }
 

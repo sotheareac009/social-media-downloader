@@ -22,6 +22,8 @@ pub mod errors;
 pub mod tiktok;
 pub mod license;
 pub mod facebook;
+pub mod ldplayer;
+pub mod publish;
 pub mod process;
 pub mod telegram;
 pub mod tools;
@@ -37,6 +39,9 @@ use crate::auth::manager::AuthManager;
 use crate::auth::storage::OsCredentialStore;
 use crate::db::AccountDb;
 use crate::download::manager::DownloadManager;
+use crate::ldplayer::manager::LdPlayerManager;
+use crate::publish::queue::PublishQueue;
+use crate::publish::store::PublishStore;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -76,6 +81,27 @@ pub fn run() {
                 default_downloads,
                 data_dir.clone(),
             )));
+
+            // Emulator publishing. Its store is a separate SQLite file from
+            // `accounts.sqlite3` on purpose - see the note in
+            // `publish::store`.
+            let devices = Arc::new(LdPlayerManager::new(data_dir.clone()));
+            let publish_store = Arc::new(PublishStore::open(&data_dir.join("publisher.sqlite3"))?);
+
+            // A job still marked "uploading" from a previous run has nothing
+            // driving it, so it would sit in the UI forever. Fail those once,
+            // at startup, before anything can read them.
+            match publish_store.fail_interrupted() {
+                Ok(0) => {}
+                Ok(n) => eprintln!("[publish] failed {n} job(s) interrupted by a previous exit"),
+                Err(e) => eprintln!("[publish] could not tidy interrupted jobs: {e}"),
+            }
+
+            app.manage(Arc::new(PublishQueue::new(
+                publish_store,
+                devices.clone(),
+            )));
+            app.manage(devices);
 
             Ok(())
         })
@@ -142,6 +168,35 @@ pub fn run() {
             commands::youtube_accounts::youtube_account_add,
             commands::youtube_accounts::youtube_account_remove,
             commands::youtube_accounts::youtube_account_upload,
+            commands::ldplayer::ldplayer_environment,
+            commands::ldplayer::ldplayer_redetect,
+            commands::ldplayer::ldplayer_get_settings,
+            commands::ldplayer::ldplayer_set_settings,
+            commands::ldplayer::ldplayer_list_devices,
+            commands::ldplayer::ldplayer_start,
+            commands::ldplayer::ldplayer_stop,
+            commands::ldplayer::ldplayer_connect,
+            commands::ldplayer::ldplayer_connect_endpoint,
+            commands::ldplayer::ldplayer_packages,
+            commands::ldplayer::ldplayer_transfer_media,
+            commands::ldplayer::ldplayer_launch_app,
+            commands::ldplayer::ldplayer_stop_app,
+            commands::ldplayer::ldplayer_screenshot,
+            commands::ldplayer::ldplayer_pick_video,
+            commands::ldplayer::ldplayer_browse_path,
+            commands::publish::publish_platforms,
+            commands::publish::publish_accounts,
+            commands::publish::publish_discover_accounts,
+            commands::publish::publish_add_account,
+            commands::publish::publish_rename_account,
+            commands::publish::publish_remove_account,
+            commands::publish::publish_submit,
+            commands::publish::publish_jobs,
+            commands::publish::publish_summary,
+            commands::publish::publish_retry,
+            commands::publish::publish_cancel,
+            commands::publish::publish_remove_job,
+            commands::publish::publish_clear_finished,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
