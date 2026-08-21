@@ -66,7 +66,17 @@ async fn main() {
     };
 
     if devices.is_empty() {
-        println!("No devices. Start an LDPlayer instance and run this again.");
+        // The advice has to match the platform: telling a Mac user to start an
+        // LDPlayer instance sends them after software that does not exist here.
+        println!("No devices.");
+        if env.ldplayer_supported {
+            println!("Start an LDPlayer instance, and make sure ADB debugging is on in");
+            println!("that instance's Settings -> Other settings, then run this again.");
+        } else {
+            println!("Attach an Android device or start an emulator, then run this again:");
+            println!("  * a phone with USB debugging enabled, or");
+            println!("  * an Android Studio AVD (`emulator -avd <name>`).");
+        }
         return;
     }
 
