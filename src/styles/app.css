@@ -4109,3 +4109,69 @@
 /* upload summary reuses the download .summary look; add spacing + list gap */
 .up-summary { margin-top: 14px; }
 .up-summary .up-result__list { margin-top: 10px; }
+
+/* --- First-launch download progress --------------------------------------- */
+
+.setupbar {
+  margin: 18px 0 4px;
+}
+
+.setupbar__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 7px;
+}
+
+.setupbar__tool {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.setupbar__pct {
+  font-size: 13px;
+  font-weight: 620;
+  letter-spacing: -0.01em;
+  /* Tabular figures so the number doesn't jitter as digits change. */
+  font-variant-numeric: tabular-nums;
+}
+
+.setupbar__track {
+  height: 6px;
+  border-radius: var(--r-full);
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.setupbar__fill {
+  height: 100%;
+  border-radius: var(--r-full);
+  background: linear-gradient(90deg, var(--accent), var(--accent-hover));
+  /* Eased so the bar glides between the 250ms progress ticks instead of
+     stepping, which reads as a stalled download. */
+  transition: width var(--t-slow) var(--ease-out);
+}
+
+/* No Content-Length means no percentage, so show motion rather than a bar
+   frozen at zero — which looks identical to a hung download. */
+.setupbar__fill--unknown {
+  width: 35%;
+  animation: setupbar-sweep 1.4s var(--ease-in-out) infinite;
+}
+
+@keyframes setupbar-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(320%); }
+}
+
+.setupbar__meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 7px;
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}

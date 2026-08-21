@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  formatBytes,
+  formatEta,
   onToolsProgress,
   toolsInstall,
   toolsStatus,
@@ -17,6 +19,14 @@ const TOOLS: { id: string; label: string; note: string }[] = [
 
 type Phase = "checking" | "running" | "done" | "error" | "hidden";
 
+/** Byte-level progress for the download currently in flight. */
+interface Live {
+  tool: string;
+  downloaded: number;
+  total: number | null;
+  speed: number | null;
+}
+
 /**
  * First-launch setup. On mount it asks the backend what's missing; if the core
  * tools aren't present (and this platform can install them), it downloads them
@@ -26,6 +36,7 @@ type Phase = "checking" | "running" | "done" | "error" | "hidden";
 export function SetupOverlay() {
   const [phase, setPhase] = useState<Phase>("checking");
   const [states, setStates] = useState<Record<string, ToolState>>({});
+  const [live, setLive] = useState<Live | null>(null);
   const [error, setError] = useState<string | null>(null);
   const started = useRef(false);
 
@@ -34,6 +45,18 @@ export function SetupOverlay() {
     setError(null);
     const un = await onToolsProgress((p) => {
       setStates((prev) => ({ ...prev, [p.tool]: p.state }));
+      if (p.state === "downloading") {
+        setLive({
+          tool: p.tool,
+          downloaded: p.downloaded_bytes,
+          total: p.total_bytes,
+          speed: p.bytes_per_sec,
+        });
+      } else {
+        // Clear the bar as soon as this tool stops downloading, so a finished
+        // file never leaves a stale percentage on screen.
+        setLive((prev) => (prev?.tool === p.tool ? null : prev));
+      }
       if (p.state === "failed" && p.error) setError(p.error);
     });
     try {
@@ -87,6 +110,8 @@ export function SetupOverlay() {
               ? "Some tools couldn't be installed. You can retry, or install them yourself with Homebrew."
               : "Downloading the tools needed to fetch and process videos. This happens once, and only takes a moment."}
         </p>
+
+        {running && live && <DownloadBar live={live} />}
 
         <ul className="setup__list">
           {TOOLS.map((t) => {
@@ -160,4 +185,56 @@ function messageOf(e: unknown): string {
   }
   if (e instanceof Error) return e.message;
   return "Setup failed.";
+}
+
+/**
+ * Progress for the file currently downloading.
+ *
+ * ffmpeg is ~163 MB on Windows, and with no feedback at all people reasonably
+ * conclude the app has hung. A percentage, a size and a speed make the wait
+ * legible; the ETA is coarse on purpose, because a jittery countdown reads as
+ * broken.
+ */
+function DownloadBar({ live }: { live: Live }) {
+  const pct =
+    live.total && live.total > 0
+      ? Math.min(100, Math.round((live.downloaded / live.total) * 100))
+      : null;
+  const eta = formatEta(live.downloaded, live.total, live.speed);
+
+  return (
+    <div className="setupbar">
+      <div className="setupbar__head">
+        <span className="setupbar__tool">{live.tool}</span>
+        <span className="setupbar__pct">{pct !== null ? `${pct}%` : "…"}</span>
+      </div>
+
+      <div
+        className="setupbar__track"
+        role="progressbar"
+        aria-valuenow={pct ?? undefined}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label={`Downloading ${live.tool}`}
+      >
+        {/* Without Content-Length there is no percentage to show, so the bar
+            runs indeterminate rather than sitting at zero. */}
+        <div
+          className={`setupbar__fill ${pct === null ? "setupbar__fill--unknown" : ""}`.trim()}
+          style={pct !== null ? { width: `${pct}%` } : undefined}
+        />
+      </div>
+
+      <div className="setupbar__meta">
+        <span>
+          {formatBytes(live.downloaded)}
+          {live.total ? ` of ${formatBytes(live.total)}` : ""}
+        </span>
+        <span>
+          {live.speed ? `${formatBytes(live.speed)}/s` : ""}
+          {eta ? ` · ${eta}` : ""}
+        </span>
+      </div>
+    </div>
+  );
 }

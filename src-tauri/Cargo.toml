@@ -32,7 +32,7 @@ base64 = "0.22"
 url = "2"
 
 # HTTP client for token exchange + userinfo
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "stream"] }
 
 # OS secure credential storage
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
@@ -46,6 +46,9 @@ ed25519-dalek = "2"
 data-encoding = "2"
 
 # In-process zip extraction. Shelling out to `unzip` only ever worked on macOS.
+# Streaming download progress needs StreamExt over reqwest's byte stream.
+futures-util = { version = "0.3", default-features = false }
+
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 dotenvy = "0.15"

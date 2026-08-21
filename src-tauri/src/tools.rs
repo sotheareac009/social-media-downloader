@@ -74,6 +74,15 @@ pub struct ToolsProgress {
     pub total: u32,
     /// Present when state is "failed".
     pub error: Option<String>,
+    /// Bytes received so far for the current download.
+    pub downloaded_bytes: u64,
+    /// Total size when the server declares Content-Length. Absent for a
+    /// chunked response, in which case the UI shows bytes without a bar.
+    pub total_bytes: Option<u64>,
+    /// Recent throughput. Measured over the gap between emits rather than the
+    /// whole download, so it reflects the connection now instead of an average
+    /// dragged down by a slow start.
+    pub bytes_per_sec: Option<u64>,
 }
 
 /// The download slice for the running architecture, matching how macOS picks
@@ -92,25 +101,111 @@ fn mac_arch() -> &'static str {
 /// answer a valid URL with a 404 (observed: the same link 404s, then 200s on
 /// the next try). A few spaced retries turn that flakiness into a reliable
 /// install instead of a coin toss on the user's first launch.
-async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
+/// Throttles progress reporting and works out throughput.
+///
+/// A 163 MB download emits thousands of chunks; forwarding every one would
+/// flood the IPC channel and make the UI worse, not better. Emitting on a
+/// fixed interval keeps it readable and cheap.
+struct Reporter<F: FnMut(u64, Option<u64>, Option<u64>)> {
+    emit: F,
+    last_emit: std::time::Instant,
+    last_bytes: u64,
+}
+
+impl<F: FnMut(u64, Option<u64>, Option<u64>)> Reporter<F> {
+    const INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+    fn new(emit: F) -> Self {
+        Self {
+            emit,
+            last_emit: std::time::Instant::now(),
+            last_bytes: 0,
+        }
+    }
+
+    fn tick(&mut self, downloaded: u64, total: Option<u64>, force: bool) {
+        let elapsed = self.last_emit.elapsed();
+        if !force && elapsed < Self::INTERVAL {
+            return;
+        }
+        // Speed over this window only. `saturating_sub` guards the reset that
+        // happens when a retry restarts the download from zero.
+        let speed = if elapsed.as_secs_f64() > 0.0 {
+            Some((downloaded.saturating_sub(self.last_bytes) as f64 / elapsed.as_secs_f64()) as u64)
+        } else {
+            None
+        };
+        (self.emit)(downloaded, total, speed);
+        self.last_emit = std::time::Instant::now();
+        self.last_bytes = downloaded;
+    }
+}
+
+/// Download `url`, reporting progress as the body arrives.
+///
+/// Streams rather than buffering the whole body: `bytes()` returns nothing
+/// until the transfer finishes, so there is no way to show a user how far
+/// through a 163 MB archive they are.
+async fn fetch_bytes(
+    url: &str,
+    on_progress: &mut (dyn FnMut(u64, Option<u64>, Option<u64>) + Send),
+) -> Result<Vec<u8>> {
+    use futures_util::StreamExt;
+
     const ATTEMPTS: usize = 5;
     let mut last = String::from("no attempt made");
+
     for attempt in 0..ATTEMPTS {
         if attempt > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(700 * attempt as u64)).await;
         }
-        match reqwest::get(url).await {
-            Ok(resp) => match resp.error_for_status() {
-                Ok(ok) => match ok.bytes().await {
-                    Ok(b) if !b.is_empty() => return Ok(b.to_vec()),
-                    Ok(_) => last = "empty response".into(),
-                    Err(e) => last = format!("interrupted: {e}"),
-                },
-                Err(e) => last = format!("server said {e}"),
+
+        let resp = match reqwest::get(url).await {
+            Ok(r) => match r.error_for_status() {
+                Ok(ok) => ok,
+                Err(e) => {
+                    last = format!("server said {e}");
+                    continue;
+                }
             },
-            Err(e) => last = format!("request failed: {e}"),
+            Err(e) => {
+                last = format!("request failed: {e}");
+                continue;
+            }
+        };
+
+        let total = resp.content_length();
+        let mut buf: Vec<u8> = Vec::with_capacity(total.unwrap_or(0) as usize);
+        let mut reporter = Reporter::new(|d, t, s| on_progress(d, t, s));
+        let mut stream = resp.bytes_stream();
+        let mut failed = None;
+
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    buf.extend_from_slice(&bytes);
+                    reporter.tick(buf.len() as u64, total, false);
+                }
+                Err(e) => {
+                    failed = Some(format!("interrupted: {e}"));
+                    break;
+                }
+            }
         }
+
+        if let Some(e) = failed {
+            last = e;
+            continue;
+        }
+        if buf.is_empty() {
+            last = "empty response".into();
+            continue;
+        }
+
+        reporter.tick(buf.len() as u64, total, true);
+        return Ok(buf);
     }
+
     Err(AppError::Internal(format!(
         "download failed after {ATTEMPTS} tries ({last})"
     )))
@@ -118,8 +213,12 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
 
 /// Download `url` and write it to `dest`, then mark it executable. Whole-body
 /// (not streamed) because these are tens of MB and it keeps the code simple.
-async fn fetch_to(url: &str, dest: &Path) -> Result<()> {
-    let bytes = fetch_bytes(url).await?;
+async fn fetch_to(
+    url: &str,
+    dest: &Path,
+    on_progress: &mut (dyn FnMut(u64, Option<u64>, Option<u64>) + Send),
+) -> Result<()> {
+    let bytes = fetch_bytes(url, on_progress).await?;
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await.ok();
     }
@@ -155,8 +254,13 @@ fn make_executable(_path: &Path) -> Result<()> {
 /// Members are matched on FILE NAME, not full path. Windows ffmpeg builds nest
 /// their binaries (`ffmpeg-master-latest-win64-gpl/bin/ffmpeg.exe`) while the
 /// macOS ones sit at the root, and matching the leaf handles both.
-async fn fetch_zip_binaries(url: &str, members: &[&str], dir: &Path) -> Result<()> {
-    let bytes = fetch_bytes(url).await?;
+async fn fetch_zip_binaries(
+    url: &str,
+    members: &[&str],
+    dir: &Path,
+    on_progress: &mut (dyn FnMut(u64, Option<u64>, Option<u64>) + Send),
+) -> Result<()> {
+    let bytes = fetch_bytes(url, on_progress).await?;
     tokio::fs::create_dir_all(dir).await.ok();
 
     let wanted: Vec<String> = members.iter().map(|m| exe_name(m)).collect();
@@ -250,8 +354,32 @@ pub async fn install(app: &AppHandle) -> Result<ToolsStatus> {
                 step,
                 total,
                 error,
+                downloaded_bytes: 0,
+                total_bytes: None,
+                bytes_per_sec: None,
             },
         );
+    };
+
+    // A per-tool byte reporter. Built fresh for each download so the numbers
+    // always describe the file currently in flight.
+    let progress = |tool: &'static str, step: u32| {
+        let app = app.clone();
+        move |downloaded: u64, total_bytes: Option<u64>, bytes_per_sec: Option<u64>| {
+            let _ = app.emit(
+                "tools://progress",
+                ToolsProgress {
+                    tool: tool.into(),
+                    state: "downloading".into(),
+                    step,
+                    total,
+                    error: None,
+                    downloaded_bytes: downloaded,
+                    total_bytes,
+                    bytes_per_sec,
+                },
+            );
+        }
     };
 
     // 1. yt-dlp - a single binary published by the project, no archive.
@@ -264,7 +392,7 @@ pub async fn install(app: &AppHandle) -> Result<ToolsStatus> {
         } else {
             "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
         };
-        match fetch_to(url, &dir.join(exe_name("yt-dlp"))).await {
+        match fetch_to(url, &dir.join(exe_name("yt-dlp")), &mut progress("yt-dlp", 1)).await {
             Ok(()) => emit("yt-dlp", "installed", 1, None),
             Err(e) => {
                 emit("yt-dlp", "failed", 1, Some(e.to_string()));
@@ -284,7 +412,7 @@ pub async fn install(app: &AppHandle) -> Result<ToolsStatus> {
         emit("ffmpeg", "downloading", 2, None);
         emit("ffprobe", "downloading", 3, None);
         let url = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip";
-        match fetch_zip_binaries(url, &["ffmpeg", "ffprobe"], &dir).await {
+        match fetch_zip_binaries(url, &["ffmpeg", "ffprobe"], &dir, &mut progress("ffmpeg", 2)).await {
             Ok(()) => {
                 emit("ffmpeg", "installed", 2, None);
                 emit("ffprobe", "installed", 3, None);
@@ -302,7 +430,7 @@ pub async fn install(app: &AppHandle) -> Result<ToolsStatus> {
             let url = format!(
                 "https://ffmpeg.martin-riedl.de/redirect/latest/macos/{arch}/release/{member}.zip"
             );
-            match fetch_zip_binaries(&url, &[member], &dir).await {
+            match fetch_zip_binaries(&url, &[member], &dir, &mut progress(member, i)).await {
                 Ok(()) => emit(member, "installed", i, None),
                 Err(e) => {
                     emit(member, "failed", i, Some(e.to_string()));
