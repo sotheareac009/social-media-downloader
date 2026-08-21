@@ -26,6 +26,10 @@ jobs:
       TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
       TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
       TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+      # Compiled in via option_env! at build time. Without it the app
+      # reports licensing as OFF and ships ungated - a GitHub secret
+      # alone never reaches the compiler, it has to be passed here.
+      LICENSE_PUBLIC_KEY: ${{ secrets.LICENSE_PUBLIC_KEY }}
 
     steps:
       - uses: actions/checkout@v4
