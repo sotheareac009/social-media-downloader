@@ -22,7 +22,7 @@ import { licenseStatus, type LicenseStatus } from "@/lib/license";
 import { isTauri } from "@tauri-apps/api/core";
 import { BrowserNotice } from "@/components/app/BrowserNotice";
 import { SetupOverlay } from "@/components/setup/SetupOverlay";
-import { HIDE_UPLOAD } from "@/lib/flags";
+import { HIDE_UPLOAD, HIDE_PUBLISHING } from "@/lib/flags";
 import {
   BoltIcon,
   DownloadIcon,
@@ -72,6 +72,10 @@ export default function App() {
   useEffect(() => {
     if (route === "upload" && HIDE_UPLOAD) setRoute("home");
   }, [route]);
+  // Same for a build with publishing hidden: the pub-* routes do not exist.
+  useEffect(() => {
+    if (HIDE_PUBLISHING && route.startsWith("pub-")) setRoute("home");
+  }, [route]);
 
   useEffect(() => {
     let alive = true;
@@ -110,7 +114,7 @@ export default function App() {
       <NetStatusProvider>
       <EngineStatusProvider>
       <LicenseGate>
-      <PublishProvider>
+      <PublishScope>
       <SetupOverlay />
       <div className="app">
         <Sidebar
@@ -132,19 +136,35 @@ export default function App() {
             {route === "accounts" && <AccountsPage onNavigate={setRoute} />}
             {route === "telegram" && <TelegramPage onBack={() => setRoute("accounts")} />}
             {route === "facebook" && <FacebookPage onBack={() => setRoute("accounts")} />}
-            {route === "pub-home" && <PublisherDashboardPage onNavigate={setRoute} />}
-            {route === "pub-accounts" && <PublisherAccountsPage />}
-            {route === "pub-publish" && <PublishPage onNavigate={setRoute} />}
-            {route === "pub-settings" && <PublisherSettingsPage />}
+            {!HIDE_PUBLISHING && (
+              <>
+                {route === "pub-home" && <PublisherDashboardPage onNavigate={setRoute} />}
+                {route === "pub-accounts" && <PublisherAccountsPage />}
+                {route === "pub-publish" && <PublishPage onNavigate={setRoute} />}
+                {route === "pub-settings" && <PublisherSettingsPage />}
+              </>
+            )}
           </div>
         </main>
       </div>
-      </PublishProvider>
+      </PublishScope>
       </LicenseGate>
       </EngineStatusProvider>
       </NetStatusProvider>
     </ToastProvider>
   );
+}
+
+/**
+ * Mounts the publish provider only for builds that ship publishing.
+ *
+ * The provider scans for emulators on mount — `ldconsole` and `adb` — which a
+ * build with no Publishing section has no reason to do. The publisher pages
+ * are the only consumers, and they are not rendered either.
+ */
+function PublishScope({ children }: { children: ReactNode }) {
+  if (HIDE_PUBLISHING) return <>{children}</>;
+  return <PublishProvider>{children}</PublishProvider>;
 }
 
 /**
@@ -250,49 +270,51 @@ function Sidebar({
         </button>
       </nav>
 
-      <nav className="sidebar__section">
-        <div className="sidebar__label">Publishing</div>
-        <button
-          className={`navitem ${route === "pub-home" ? "navitem--active" : ""}`}
-          type="button"
-          onClick={() => onNavigate("pub-home")}
-        >
-          <span className="navitem__icon">
-            <BoltIcon size={16} />
-          </span>
-          Dashboard
-        </button>
-        <button
-          className={`navitem ${route === "pub-accounts" ? "navitem--active" : ""}`}
-          type="button"
-          onClick={() => onNavigate("pub-accounts")}
-        >
-          <span className="navitem__icon">
-            <UsersIcon size={16} />
-          </span>
-          Emulator accounts
-        </button>
-        <button
-          className={`navitem ${route === "pub-publish" ? "navitem--active" : ""}`}
-          type="button"
-          onClick={() => onNavigate("pub-publish")}
-        >
-          <span className="navitem__icon">
-            <SendIcon size={16} />
-          </span>
-          Publish
-        </button>
-        <button
-          className={`navitem ${route === "pub-settings" ? "navitem--active" : ""}`}
-          type="button"
-          onClick={() => onNavigate("pub-settings")}
-        >
-          <span className="navitem__icon">
-            <SlidersIcon size={16} />
-          </span>
-          Settings
-        </button>
-      </nav>
+      {!HIDE_PUBLISHING && (
+        <nav className="sidebar__section">
+          <div className="sidebar__label">Publishing</div>
+          <button
+            className={`navitem ${route === "pub-home" ? "navitem--active" : ""}`}
+            type="button"
+            onClick={() => onNavigate("pub-home")}
+          >
+            <span className="navitem__icon">
+              <BoltIcon size={16} />
+            </span>
+            Dashboard
+          </button>
+          <button
+            className={`navitem ${route === "pub-accounts" ? "navitem--active" : ""}`}
+            type="button"
+            onClick={() => onNavigate("pub-accounts")}
+          >
+            <span className="navitem__icon">
+              <UsersIcon size={16} />
+            </span>
+            Emulator accounts
+          </button>
+          <button
+            className={`navitem ${route === "pub-publish" ? "navitem--active" : ""}`}
+            type="button"
+            onClick={() => onNavigate("pub-publish")}
+          >
+            <span className="navitem__icon">
+              <SendIcon size={16} />
+            </span>
+            Publish
+          </button>
+          <button
+            className={`navitem ${route === "pub-settings" ? "navitem--active" : ""}`}
+            type="button"
+            onClick={() => onNavigate("pub-settings")}
+          >
+            <span className="navitem__icon">
+              <SlidersIcon size={16} />
+            </span>
+            Settings
+          </button>
+        </nav>
+      )}
 
       <NetIndicator />
 

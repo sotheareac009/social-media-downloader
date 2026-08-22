@@ -108,15 +108,34 @@ jobs:
           $bin = "src-tauri/resources/bin"
           New-Item -ItemType Directory -Force -Path $bin | Out-Null
 
-          Invoke-WebRequest -UseBasicParsing `
-            -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" `
-            -OutFile "$bin/yt-dlp.exe"
+          # curl.exe, not Invoke-WebRequest. IWR has no retry and buffers the
+          # whole body, so a dropped connection part way through a 100 MB
+          # download fails the entire build with "An existing connection was
+          # forcibly closed by the remote host" — which is what GitHub's CDN
+          # does under load, and it is not a reason to fail a release.
+          #
+          # --retry-all-errors is the important flag: without it curl retries
+          # only transfers the server explicitly failed, not the ones that
+          # simply died mid-stream, which is this exact case.
+          function Get-Tool($Uri, $OutFile) {
+            & curl.exe --location --fail --show-error --silent `
+              --retry 5 --retry-delay 3 --retry-all-errors `
+              --connect-timeout 30 --max-time 900 `
+              --output $OutFile $Uri
+            if ($LASTEXITCODE -ne 0) { throw "download failed ($LASTEXITCODE): $Uri" }
+            if (-not (Test-Path $OutFile)) { throw "download produced no file: $Uri" }
+            # A truncated download is worse than a failed one: it gets bundled
+            # and ships an installer whose tools do not run.
+            if ((Get-Item $OutFile).Length -lt 100kb) {
+              throw "download is too small to be real: $Uri"
+            }
+          }
+
+          Get-Tool "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" "$bin/yt-dlp.exe"
 
           $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
           $out = Join-Path $env:RUNNER_TEMP "ffmpeg-extract"
-          Invoke-WebRequest -UseBasicParsing `
-            -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip" `
-            -OutFile $zip
+          Get-Tool "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip" $zip
           Expand-Archive -Path $zip -DestinationPath $out -Force
 
           # The archive nests binaries under <name>/bin/, so search by filename.
