@@ -43,12 +43,6 @@ jobs:
       # reports licensing as OFF and ships ungated - a GitHub secret
       # alone never reaches the compiler, it has to be passed here.
       LICENSE_PUBLIC_KEY: ${{ secrets.LICENSE_PUBLIC_KEY }}
-      # Build-variant toggles chosen when the workflow is run. Vite exposes
-      # VITE_*-prefixed process env to the client at build time; LICENSE_DISABLED
-      # is read by Rust's option_env! and turns licensing off even with a key.
-      VITE_HIDE_UPLOAD: ${{ inputs.hide_upload }}
-      VITE_HIDE_PUBLISHING: ${{ inputs.hide_publishing }}
-      LICENSE_DISABLED: ${{ inputs.license_disabled }}
 
     steps:
       - uses: actions/checkout@v4
@@ -129,6 +123,14 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Build Windows installer
+        # Build-variant toggles, applied ONLY to the real build — not the Test
+        # step, where LICENSE_DISABLED would wrongly turn licensing off during
+        # cargo test. Vite exposes VITE_*-prefixed process env to the client;
+        # LICENSE_DISABLED is read by Rust's option_env! at compile time.
+        env:
+          VITE_HIDE_UPLOAD: ${{ inputs.hide_upload }}
+          VITE_HIDE_PUBLISHING: ${{ inputs.hide_publishing }}
+          LICENSE_DISABLED: ${{ inputs.license_disabled }}
         run: npm run build:windows
 
       - uses: actions/upload-artifact@v4

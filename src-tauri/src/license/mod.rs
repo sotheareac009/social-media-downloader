@@ -275,6 +275,7 @@ mod tests {
 
     fn with_public_key<T>(public: &str, f: impl FnOnce() -> T) -> T {
         let _guard = env_guard();
+        std::env::remove_var("LICENSE_DISABLED");
         std::env::set_var("LICENSE_PUBLIC_KEY", public);
         let out = f();
         std::env::remove_var("LICENSE_PUBLIC_KEY");
@@ -384,6 +385,8 @@ mod tests {
     fn licensing_is_off_when_no_public_key_is_compiled_in() {
         let _guard = env_guard();
         std::env::remove_var("LICENSE_PUBLIC_KEY");
+        // A free build sets LICENSE_DISABLED; it must not leak into this test.
+        std::env::remove_var("LICENSE_DISABLED");
 
         // A release build bakes the key in with `option_env!`, so "no key
         // configured" is not reachable there - removing the runtime variable
