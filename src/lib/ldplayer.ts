@@ -82,8 +82,30 @@ export const ldplayerListDevices = () =>
 export const ldplayerStart = (deviceId: string) =>
   invoke<DeviceView>("ldplayer_start", { deviceId });
 
-export const ldplayerAutoscrollStart = (deviceIds: string[], intervalMs: number) =>
-  invoke<void>("ldplayer_autoscroll_start", { deviceIds, intervalMs });
+export const ldplayerAutoscrollStart = (
+  deviceIds: string[],
+  intervalMs: number,
+  /** Priority list of packages to try; first installed one opens. Omit to scroll the current screen. */
+  packages?: string[],
+) =>
+  invoke<void>("ldplayer_autoscroll_start", {
+    deviceIds,
+    intervalMs,
+    packages: packages && packages.length > 0 ? packages : null,
+  });
+
+/**
+ * Social apps for the auto-scroll picker. Each has a priority list of package
+ * names — the first one installed on a device wins, so "Facebook" opens the
+ * full app when present and falls back to Facebook Lite otherwise.
+ */
+export const SCROLL_APPS: { id: string; label: string; packages: string[] }[] = [
+  { id: "facebook", label: "Facebook", packages: ["com.facebook.katana", "com.facebook.lite"] },
+  { id: "instagram", label: "Instagram", packages: ["com.instagram.android"] },
+  { id: "tiktok", label: "TikTok", packages: ["com.zhiliaoapp.musically", "com.ss.android.ugc.trill"] },
+  { id: "youtube", label: "YouTube", packages: ["com.google.android.youtube"] },
+  { id: "x", label: "X (Twitter)", packages: ["com.twitter.android"] },
+];
 
 export const ldplayerAutoscrollStop = () =>
   invoke<void>("ldplayer_autoscroll_stop");

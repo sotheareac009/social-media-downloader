@@ -69,6 +69,9 @@ pub async fn ldplayer_autoscroll_start(
     manager: Manager<'_>,
     device_ids: Vec<String>,
     interval_ms: u64,
+    // Priority list of app packages to try; the first one installed on each
+    // device is opened (e.g. full Facebook, then Facebook Lite).
+    packages: Option<Vec<String>>,
 ) -> Result<()> {
     if device_ids.is_empty() {
         return Err(AppError::Internal("pick at least one instance to scroll".into()));
@@ -81,6 +84,37 @@ pub async fn ldplayer_autoscroll_start(
     let interval = Duration::from_millis(interval_ms.max(500));
 
     tauri::async_runtime::spawn(async move {
+        // One-click flow: bring every device online first — a stopped LDPlayer
+        // instance is launched and waited for; an adb device must already be
+        // running — then open the chosen app on each. For each device the first
+        // installed package from the priority list wins, so "Facebook" opens the
+        // full app when present and falls back to Facebook Lite otherwise.
+        let candidates = packages.unwrap_or_default();
+        for id in &device_ids {
+            if mgr.autoscroll_should_stop() {
+                break;
+            }
+            // Boot + wait. If it can't come online, skip it; the swipe loop
+            // will simply have nothing to do for that device.
+            if mgr.ensure_online(Some(&app), id).await.is_err() {
+                continue;
+            }
+            for pkg in &candidates {
+                if mgr.launch_app(Some(&app), id, pkg).await.is_ok() {
+                    break;
+                }
+            }
+        }
+        // Let the app settle on its feed before the first swipe.
+        if !candidates.is_empty() {
+            let mut waited = Duration::ZERO;
+            let load = Duration::from_secs(5);
+            while waited < load && !mgr.autoscroll_should_stop() {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                waited += Duration::from_millis(250);
+            }
+        }
+
         while !mgr.autoscroll_should_stop() {
             for id in &device_ids {
                 if mgr.autoscroll_should_stop() {

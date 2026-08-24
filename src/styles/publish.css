@@ -1278,3 +1278,25 @@
   font-size: 12.5px;
   color: var(--accent-text);
 }
+
+.scrolllist__kind {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-tertiary);
+  padding: 1px 7px;
+  border-radius: var(--r-full);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-1);
+}
+
+.scrollctl__select {
+  padding: 7px 9px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-default);
+  background: var(--surface-1);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.scrollctl__loading { font-size: 11px; color: var(--text-tertiary); }
