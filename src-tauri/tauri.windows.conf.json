@@ -1,3 +1,7 @@
 {
-  "bundle": {}
+  "bundle": {
+    "resources": {
+      "resources/bin": "bin"
+    }
+  }
 }
