@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/Button";
 import { useToast } from "@/components/ui/Toast";
 import { AlertIcon, CheckIcon, UploadIcon, XIcon } from "@/components/ui/icons";
 import { SourceLogo, SOURCE_COLOR, type SourceId } from "@/components/home/SourceLogo";
+import { isUploadTargetHidden } from "@/lib/flags";
 
 type ItemStatus = "pending" | "uploading" | "done" | "failed";
 interface Item {
@@ -54,6 +55,17 @@ async function readFileBytes(path: string): Promise<Uint8Array> {
   const res = await fetch(convertFileSrc(path));
   const buf = await res.arrayBuffer();
   return new Uint8Array(buf);
+}
+
+/**
+ * Drops the destinations this build is configured not to offer.
+ *
+ * Applied at every load, so a hidden platform never reaches the selector, the
+ * chosen set, or the publish loop — there is one source of truth for what
+ * exists rather than a filter per render.
+ */
+function visibleTargets(list: UploadTarget[]): UploadTarget[] {
+  return list.filter((t) => !isUploadTargetHidden(t.id));
 }
 
 /** Filename without its extension, used as each video's default title. */
@@ -100,7 +112,7 @@ export function UploadPage() {
 
   useEffect(() => {
     void (async () => {
-      const list = await uploadTargets().catch(() => []);
+      const list = visibleTargets(await uploadTargets().catch(() => []));
       if (!mounted.current) return;
       setTargets(list);
       const firstReady = list.find((t) => t.ready);
@@ -109,6 +121,9 @@ export function UploadPage() {
   }, []);
 
   const loadYtAccounts = useCallback(async () => {
+    // A build with YouTube hidden has no card to fill, and no reason to touch
+    // the stored uploader accounts.
+    if (isUploadTargetHidden("youtube")) return;
     const list = await youtubeAccountsList().catch(() => []);
     if (!mounted.current) return;
     setYtAccounts(list);
@@ -164,7 +179,7 @@ export function UploadPage() {
         setYtSelected((prev) => new Set(prev).add(acct.id));
         // The youtube target flips to ready once an account exists.
         const list = await uploadTargets().catch(() => null);
-        if (list && mounted.current) setTargets(list);
+        if (list && mounted.current) setTargets(visibleTargets(list));
         toast("success", `Added ${acct.channel_title ?? acct.display_name}.`);
       }
     } catch (e) {
@@ -186,7 +201,7 @@ export function UploadPage() {
         });
         await loadYtAccounts();
         const list = await uploadTargets().catch(() => null);
-        if (list && mounted.current) setTargets(list);
+        if (list && mounted.current) setTargets(visibleTargets(list));
       } catch (e) {
         toast("error", messageOf(e));
       }

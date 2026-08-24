@@ -17,6 +17,10 @@ on:
         description: "Hide the Publishing section"
         type: boolean
         default: false
+      upload_hidden_targets:
+        description: "Upload destinations to hide (comma-separated: youtube,facebook,tiktok,x,telegram)"
+        type: string
+        default: ""
       license_disabled:
         description: "Free build — no licence key required"
         type: boolean
@@ -136,6 +140,7 @@ jobs:
         env:
           VITE_HIDE_UPLOAD: ${{ inputs.hide_upload }}
           VITE_HIDE_PUBLISHING: ${{ inputs.hide_publishing }}
+          VITE_UPLOAD_HIDDEN_TARGETS: ${{ inputs.upload_hidden_targets }}
           LICENSE_DISABLED: ${{ inputs.license_disabled }}
         run: npm run build:windows
 
