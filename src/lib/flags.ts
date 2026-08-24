@@ -11,3 +11,6 @@ const truthy = (v?: string) => v === "true" || v === "1" || v === "yes";
 
 export const HIDE_UPLOAD = truthy(import.meta.env.VITE_HIDE_UPLOAD);
 export const HIDE_PUBLISHING = truthy(import.meta.env.VITE_HIDE_PUBLISHING);
+
+/** VITE_HIDE_AUTOSCROLL=true hides the standalone Auto-scroll section. */
+export const HIDE_AUTOSCROLL = truthy(import.meta.env.VITE_HIDE_AUTOSCROLL);

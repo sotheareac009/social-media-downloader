@@ -23,7 +23,7 @@ import { licenseStatus, type LicenseStatus } from "@/lib/license";
 import { isTauri } from "@tauri-apps/api/core";
 import { BrowserNotice } from "@/components/app/BrowserNotice";
 import { SetupOverlay } from "@/components/setup/SetupOverlay";
-import { HIDE_UPLOAD, HIDE_PUBLISHING } from "@/lib/flags";
+import { HIDE_UPLOAD, HIDE_PUBLISHING, HIDE_AUTOSCROLL } from "@/lib/flags";
 import {
   BoltIcon,
   DownloadIcon,
@@ -49,8 +49,8 @@ type Route =
   // OAuth-based "accounts" route, which is a different feature entirely.
   | "pub-home"
   | "pub-accounts"
-  | "pub-scroll"
   | "pub-publish"
+  | "autoscroll"
   | "pub-settings";
 const THEME_KEY = "md.theme";
 
@@ -138,12 +138,12 @@ export default function App() {
             {route === "accounts" && <AccountsPage onNavigate={setRoute} />}
             {route === "telegram" && <TelegramPage onBack={() => setRoute("accounts")} />}
             {route === "facebook" && <FacebookPage onBack={() => setRoute("accounts")} />}
+            {!HIDE_AUTOSCROLL && route === "autoscroll" && <AutoScrollPage />}
             {!HIDE_PUBLISHING && (
               <>
                 {route === "pub-home" && <PublisherDashboardPage onNavigate={setRoute} />}
                 {route === "pub-accounts" && <PublisherAccountsPage />}
                 {route === "pub-publish" && <PublishPage onNavigate={setRoute} />}
-                {route === "pub-scroll" && <AutoScrollPage />}
                 {route === "pub-settings" && <PublisherSettingsPage />}
               </>
             )}
@@ -166,7 +166,9 @@ export default function App() {
  * are the only consumers, and they are not rendered either.
  */
 function PublishScope({ children }: { children: ReactNode }) {
-  if (HIDE_PUBLISHING) return <>{children}</>;
+  // The provider scans emulators (ldconsole/adb); mount it whenever a feature
+  // that needs devices is present — publishing or the standalone auto-scroll.
+  if (HIDE_PUBLISHING && HIDE_AUTOSCROLL) return <>{children}</>;
   return <PublishProvider>{children}</PublishProvider>;
 }
 
@@ -307,16 +309,6 @@ function Sidebar({
             Publish
           </button>
           <button
-            className={`navitem ${route === "pub-scroll" ? "navitem--active" : ""}`}
-            type="button"
-            onClick={() => onNavigate("pub-scroll")}
-          >
-            <span className="navitem__icon">
-              <BoltIcon size={16} />
-            </span>
-            Auto-scroll
-          </button>
-          <button
             className={`navitem ${route === "pub-settings" ? "navitem--active" : ""}`}
             type="button"
             onClick={() => onNavigate("pub-settings")}
@@ -325,6 +317,22 @@ function Sidebar({
               <SlidersIcon size={16} />
             </span>
             Settings
+          </button>
+        </nav>
+      )}
+
+      {!HIDE_AUTOSCROLL && (
+        <nav className="sidebar__section">
+          <div className="sidebar__label">Automation</div>
+          <button
+            className={`navitem ${route === "autoscroll" ? "navitem--active" : ""}`}
+            type="button"
+            onClick={() => onNavigate("autoscroll")}
+          >
+            <span className="navitem__icon">
+              <BoltIcon size={16} />
+            </span>
+            Auto-scroll
           </button>
         </nav>
       )}
