@@ -60,7 +60,7 @@ jobs:
 
       - run: npm ci
 
-      # Ship yt-dlp and ffmpeg inside the installer so a fresh Windows machine
+      # Ship yt-dlp, gallery-dl and ffmpeg inside the installer so a fresh Windows machine
       # works with no first-run download at all. Fetched here rather than
       # committed: they total ~190 MB and go stale quickly, so a copy in git
       # would bloat every clone and still be out of date.
@@ -100,6 +100,12 @@ jobs:
 
           Get-Tool "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" "$bin/yt-dlp.exe"
 
+          # gallery-dl: needed to list whole Instagram/X profiles (yt-dlp has no
+          # timeline extractor for them). Pinned to v1.31.0 — the last release
+          # that ships a Windows .exe; newer versions publish only the wheel, so
+          # to update this the user installs gallery-dl with pipx/pip instead.
+          Get-Tool "https://github.com/mikf/gallery-dl/releases/download/v1.31.0/gallery-dl.exe" "$bin/gallery-dl.exe"
+
           $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
           $out = Join-Path $env:RUNNER_TEMP "ffmpeg-extract"
           Get-Tool "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip" $zip
@@ -112,7 +118,7 @@ jobs:
             Copy-Item $src.FullName "$bin/$tool.exe" -Force
           }
 
-          foreach ($f in "yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe") {
+          foreach ($f in "yt-dlp.exe", "gallery-dl.exe", "ffmpeg.exe", "ffprobe.exe") {
             if (-not (Test-Path "$bin/$f")) { throw "bundled tool missing: $f" }
           }
           Get-ChildItem $bin | Format-Table Name, Length
