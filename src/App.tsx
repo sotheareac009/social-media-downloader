@@ -8,6 +8,7 @@ import { UploadPage } from "@/pages/upload/UploadPage";
 import { PublisherDashboardPage } from "@/pages/publisher/DashboardPage";
 import { PublisherAccountsPage } from "@/pages/publisher/AccountsPage";
 import { PublishPage } from "@/pages/publisher/PublishPage";
+import { AutoScrollPage } from "@/pages/publisher/AutoScrollPage";
 import { PublisherSettingsPage } from "@/pages/publisher/SettingsPage";
 import { PublishProvider } from "@/components/publish/PublishProvider";
 import { authGetAccounts, subscribeToAuthEvents } from "@/lib/auth";
@@ -48,6 +49,7 @@ type Route =
   // OAuth-based "accounts" route, which is a different feature entirely.
   | "pub-home"
   | "pub-accounts"
+  | "pub-scroll"
   | "pub-publish"
   | "pub-settings";
 const THEME_KEY = "md.theme";
@@ -141,6 +143,7 @@ export default function App() {
                 {route === "pub-home" && <PublisherDashboardPage onNavigate={setRoute} />}
                 {route === "pub-accounts" && <PublisherAccountsPage />}
                 {route === "pub-publish" && <PublishPage onNavigate={setRoute} />}
+                {route === "pub-scroll" && <AutoScrollPage />}
                 {route === "pub-settings" && <PublisherSettingsPage />}
               </>
             )}
@@ -302,6 +305,16 @@ function Sidebar({
               <SendIcon size={16} />
             </span>
             Publish
+          </button>
+          <button
+            className={`navitem ${route === "pub-scroll" ? "navitem--active" : ""}`}
+            type="button"
+            onClick={() => onNavigate("pub-scroll")}
+          >
+            <span className="navitem__icon">
+              <BoltIcon size={16} />
+            </span>
+            Auto-scroll
           </button>
           <button
             className={`navitem ${route === "pub-settings" ? "navitem--active" : ""}`}

@@ -82,6 +82,15 @@ export const ldplayerListDevices = () =>
 export const ldplayerStart = (deviceId: string) =>
   invoke<DeviceView>("ldplayer_start", { deviceId });
 
+export const ldplayerAutoscrollStart = (deviceIds: string[], intervalMs: number) =>
+  invoke<void>("ldplayer_autoscroll_start", { deviceIds, intervalMs });
+
+export const ldplayerAutoscrollStop = () =>
+  invoke<void>("ldplayer_autoscroll_stop");
+
+export const ldplayerAutoscrollStatus = () =>
+  invoke<boolean>("ldplayer_autoscroll_status");
+
 export const ldplayerStop = (deviceId: string) =>
   invoke<DeviceView>("ldplayer_stop", { deviceId });
 

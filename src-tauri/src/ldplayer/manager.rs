@@ -22,7 +22,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -174,6 +175,10 @@ pub struct LdPlayerManager {
     /// Instances we asked to launch, so the list can show "Booting" instead of
     /// flapping back to "Stopped" for the minute before Android is up.
     booting: Mutex<Vec<u32>>,
+    /// Auto-scroll: `running` true while the loop is alive, `stop` requests it
+    /// to end. Arc so the spawned loop task and the manager share the flags.
+    autoscroll_running: Arc<AtomicBool>,
+    autoscroll_stop: Arc<AtomicBool>,
 }
 
 impl LdPlayerManager {
@@ -186,6 +191,8 @@ impl LdPlayerManager {
             adb: Mutex::new(None),
             serials: Mutex::new(HashMap::new()),
             booting: Mutex::new(Vec::new()),
+            autoscroll_running: Arc::new(AtomicBool::new(false)),
+            autoscroll_stop: Arc::new(AtomicBool::new(false)),
         };
         m.redetect();
         m
@@ -235,6 +242,62 @@ impl LdPlayerManager {
             .expect("adb lock")
             .clone()
             .ok_or(AppError::AdbMissing)
+    }
+
+    // ---------------------------------------------------------- auto-scroll
+
+    /// Claim the auto-scroll loop. Returns false if one is already running, so
+    /// two Start clicks can't spawn two loops fighting over the same devices.
+    pub fn begin_autoscroll(&self) -> bool {
+        if self.autoscroll_running.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        self.autoscroll_stop.store(false, Ordering::SeqCst);
+        true
+    }
+
+    /// Ask the loop to finish after its current pass.
+    pub fn stop_autoscroll(&self) {
+        self.autoscroll_stop.store(true, Ordering::SeqCst);
+    }
+
+    pub fn autoscroll_should_stop(&self) -> bool {
+        self.autoscroll_stop.load(Ordering::SeqCst)
+    }
+
+    pub fn is_autoscrolling(&self) -> bool {
+        self.autoscroll_running.load(Ordering::SeqCst)
+    }
+
+    /// Mark the loop finished so a later Start can begin again.
+    pub fn end_autoscroll(&self) {
+        self.autoscroll_running.store(false, Ordering::SeqCst);
+    }
+
+    /// One upward swipe on a device — the feed-scroll gesture. Boots the
+    /// instance if needed, and derives the swipe from the real screen size so
+    /// it works across LDPlayer resolutions.
+    pub async fn swipe_up(&self, app: Option<&AppHandle>, device_id: &str) -> Result<()> {
+        let serial = self.ensure_online(app, device_id).await?;
+        let adb = self.adb()?;
+        let (w, h) = self.screen_size(&adb, &serial).await.unwrap_or((540, 960));
+        let x = (w / 2) as i32;
+        // From ~75% down to ~25% up: a deliberate drag, not a fling.
+        adb.swipe(&serial, (x, (h * 3 / 4) as i32), (x, (h / 4) as i32), 450)
+            .await
+    }
+
+    /// Screen resolution via `wm size`, e.g. "Physical size: 540x960".
+    async fn screen_size(&self, adb: &Adb, serial: &str) -> Option<(u32, u32)> {
+        let out = adb.shell(serial, "wm size").await.ok()?;
+        // Prefer an Override line if present; otherwise the Physical one.
+        let line = out
+            .lines()
+            .rev()
+            .find(|l| l.to_ascii_lowercase().contains("size:"))?;
+        let dims = line.split(':').nth(1)?.trim();
+        let (w, h) = dims.split_once('x')?;
+        Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
     }
 
     pub async fn environment(&self) -> DeviceEnvironment {

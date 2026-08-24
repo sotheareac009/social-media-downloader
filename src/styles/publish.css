@@ -1198,3 +1198,83 @@
   flex: 1;
   min-width: 0;
 }
+
+/* --- auto-scroll page ---------------------------------------------------- */
+.section__hint { font-size: 12px; color: var(--text-tertiary); }
+
+.scrolllist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.scrolllist__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-2);
+}
+
+.scrolllist__row--on {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: var(--accent-soft);
+}
+
+.scrolllist__pick {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.scrolllist__name {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scrollctl {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.scrollctl__field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.scrollctl__field input {
+  width: 68px;
+  padding: 7px 9px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-default);
+  background: var(--surface-1);
+  color: var(--text-primary);
+  font: inherit;
+  text-align: center;
+}
+
+.scrollctl__actions { display: flex; gap: 8px; }
+
+.scrollctl__status {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  color: var(--accent-text);
+}

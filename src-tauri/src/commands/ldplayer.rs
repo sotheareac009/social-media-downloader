@@ -7,6 +7,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tauri::{AppHandle, State};
 
@@ -58,6 +59,61 @@ pub async fn ldplayer_start(
     device_id: String,
 ) -> Result<DeviceView> {
     manager.start(Some(&app), &device_id).await
+}
+
+/// Start the feed-scroll loop across the given instances: repeated upward
+/// swipes at `interval_ms`, until stopped. Stopped instances are booted first.
+#[tauri::command]
+pub async fn ldplayer_autoscroll_start(
+    app: AppHandle,
+    manager: Manager<'_>,
+    device_ids: Vec<String>,
+    interval_ms: u64,
+) -> Result<()> {
+    if device_ids.is_empty() {
+        return Err(AppError::Internal("pick at least one instance to scroll".into()));
+    }
+    let mgr = manager.inner().clone();
+    if !mgr.begin_autoscroll() {
+        return Err(AppError::Internal("auto-scroll is already running".into()));
+    }
+    // Floor the interval so a tiny value can't hammer adb.
+    let interval = Duration::from_millis(interval_ms.max(500));
+
+    tauri::async_runtime::spawn(async move {
+        while !mgr.autoscroll_should_stop() {
+            for id in &device_ids {
+                if mgr.autoscroll_should_stop() {
+                    break;
+                }
+                // A device that errors (still booting, stopped) is skipped, not
+                // fatal — the loop keeps the others scrolling.
+                let _ = mgr.swipe_up(Some(&app), id).await;
+            }
+            // Wait in small slices so Stop is responsive mid-interval.
+            let mut waited = Duration::ZERO;
+            let slice = Duration::from_millis(200);
+            while waited < interval && !mgr.autoscroll_should_stop() {
+                tokio::time::sleep(slice).await;
+                waited += slice;
+            }
+        }
+        mgr.end_autoscroll();
+    });
+    Ok(())
+}
+
+/// Ask the auto-scroll loop to stop after its current pass.
+#[tauri::command]
+pub async fn ldplayer_autoscroll_stop(manager: Manager<'_>) -> Result<()> {
+    manager.stop_autoscroll();
+    Ok(())
+}
+
+/// Whether the auto-scroll loop is currently running.
+#[tauri::command]
+pub async fn ldplayer_autoscroll_status(manager: Manager<'_>) -> Result<bool> {
+    Ok(manager.is_autoscrolling())
 }
 
 #[tauri::command]
