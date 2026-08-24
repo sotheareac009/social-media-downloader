@@ -77,7 +77,7 @@ pub async fn ldplayer_autoscroll_start(
         return Err(AppError::Internal("pick at least one instance to scroll".into()));
     }
     let mgr = manager.inner().clone();
-    if !mgr.begin_autoscroll() {
+    if !mgr.begin_autoscroll(device_ids.clone()) {
         return Err(AppError::Internal("auto-scroll is already running".into()));
     }
     // Floor the interval so a tiny value can't hammer adb.
@@ -91,8 +91,9 @@ pub async fn ldplayer_autoscroll_start(
         // full app when present and falls back to Facebook Lite otherwise.
         let candidates = packages.unwrap_or_default();
         for id in &device_ids {
-            if mgr.autoscroll_should_stop() {
-                break;
+            // A device removed before it even booted is simply skipped.
+            if !mgr.autoscroll_is_active(id) {
+                continue;
             }
             // Boot + wait. If it can't come online, skip it; the swipe loop
             // will simply have nothing to do for that device.
@@ -109,16 +110,22 @@ pub async fn ldplayer_autoscroll_start(
         if !candidates.is_empty() {
             let mut waited = Duration::ZERO;
             let load = Duration::from_secs(5);
-            while waited < load && !mgr.autoscroll_should_stop() {
+            while waited < load && !mgr.autoscroll_active_ids().is_empty() {
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 waited += Duration::from_millis(250);
             }
         }
 
-        while !mgr.autoscroll_should_stop() {
-            for id in &device_ids {
-                if mgr.autoscroll_should_stop() {
-                    break;
+        // Scroll every still-active device each pass; the loop ends when the
+        // set empties (Stop, or every device removed one by one).
+        loop {
+            let ids = mgr.autoscroll_active_ids();
+            if ids.is_empty() {
+                break;
+            }
+            for id in &ids {
+                if !mgr.autoscroll_is_active(id) {
+                    continue;
                 }
                 // A device that errors (still booting, stopped) is skipped, not
                 // fatal — the loop keeps the others scrolling.
@@ -127,7 +134,7 @@ pub async fn ldplayer_autoscroll_start(
             // Wait in small slices so Stop is responsive mid-interval.
             let mut waited = Duration::ZERO;
             let slice = Duration::from_millis(200);
-            while waited < interval && !mgr.autoscroll_should_stop() {
+            while waited < interval && !mgr.autoscroll_active_ids().is_empty() {
                 tokio::time::sleep(slice).await;
                 waited += slice;
             }
@@ -144,10 +151,17 @@ pub async fn ldplayer_autoscroll_stop(manager: Manager<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Whether the auto-scroll loop is currently running.
+/// Stop scrolling one device without touching the others.
 #[tauri::command]
-pub async fn ldplayer_autoscroll_status(manager: Manager<'_>) -> Result<bool> {
-    Ok(manager.is_autoscrolling())
+pub async fn ldplayer_autoscroll_remove(manager: Manager<'_>, device_id: String) -> Result<()> {
+    manager.autoscroll_remove(&device_id);
+    Ok(())
+}
+
+/// The device ids currently being scrolled (empty when idle).
+#[tauri::command]
+pub async fn ldplayer_autoscroll_status(manager: Manager<'_>) -> Result<Vec<String>> {
+    Ok(manager.autoscroll_active_ids())
 }
 
 #[tauri::command]

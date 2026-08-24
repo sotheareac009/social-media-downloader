@@ -198,6 +198,7 @@ pub fn run() {
             commands::ldplayer::ldplayer_start,
             commands::ldplayer::ldplayer_autoscroll_start,
             commands::ldplayer::ldplayer_autoscroll_stop,
+            commands::ldplayer::ldplayer_autoscroll_remove,
             commands::ldplayer::ldplayer_autoscroll_status,
             commands::ldplayer::ldplayer_stop,
             commands::ldplayer::ldplayer_connect,

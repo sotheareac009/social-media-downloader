@@ -10,6 +10,7 @@ import {
   ldplayerAutoscrollStart,
   ldplayerAutoscrollStatus,
   ldplayerAutoscrollStop,
+  ldplayerAutoscrollRemove,
   ldplayerStart,
 } from "@/lib/ldplayer";
 
@@ -27,7 +28,9 @@ export function AutoScrollPage() {
   // list. A stopped device can't be queried, so an empty set means "unknown".
   const [installed, setInstalled] = useState<Set<string>>(new Set());
   const [loadingApps, setLoadingApps] = useState(false);
-  const [scrolling, setScrolling] = useState(false);
+  // Devices currently being scrolled (from the backend). scrolling = any active.
+  const [active, setActive] = useState<Set<string>>(new Set());
+  const scrolling = active.size > 0;
   const [starting, setStarting] = useState(false);
 
   // Every device can be scrolled (it's just an adb swipe): LDPlayer instances
@@ -37,11 +40,16 @@ export function AutoScrollPage() {
 
   useEffect(() => {
     let alive = true;
-    ldplayerAutoscrollStatus()
-      .then((s) => alive && setScrolling(s))
-      .catch(() => {});
+    const sync = () =>
+      ldplayerAutoscrollStatus()
+        .then((ids) => alive && setActive(new Set(ids)))
+        .catch(() => {});
+    void sync();
+    // Poll so the UI reflects the backend (e.g. the loop ended on its own).
+    const timer = window.setInterval(sync, 3000);
     return () => {
       alive = false;
+      window.clearInterval(timer);
     };
   }, []);
 
@@ -160,7 +168,7 @@ export function AutoScrollPage() {
         Math.round(seconds * 1000),
         chosenApp?.packages,
       );
-      setScrolling(true);
+      setActive(new Set(selectedIds));
       toast("success", `Auto-scrolling ${selectedIds.length} instance(s).`);
     } catch (e) {
       toast("error", messageOf(e));
@@ -171,7 +179,20 @@ export function AutoScrollPage() {
     try {
       await ldplayerAutoscrollStop();
     } finally {
-      setScrolling(false);
+      setActive(new Set());
+    }
+  };
+
+  // Stop one device without touching the rest.
+  const stopDevice = async (id: string) => {
+    try {
+      await ldplayerAutoscrollRemove(id);
+    } finally {
+      setActive((prev) => {
+        const n = new Set(prev);
+        n.delete(id);
+        return n;
+      });
     }
   };
 
@@ -228,20 +249,34 @@ export function AutoScrollPage() {
                       {d.kind === "ldplayer" ? "LDPlayer" : "adb"}
                     </span>
                   </label>
-                  <StatusBadge
-                    tone={
-                      d.state === "online"
-                        ? "success"
-                        : d.state === "booting"
+                  <span className="scrolllist__end">
+                    {active.has(d.id) && (
+                      <button
+                        type="button"
+                        className="btn btn--danger btn--sm"
+                        onClick={() => void stopDevice(d.id)}
+                        title="Stop scrolling this device"
+                      >
+                        Stop
+                      </button>
+                    )}
+                    <StatusBadge
+                      tone={
+                        active.has(d.id)
                           ? "active"
-                          : d.state === "unreachable"
-                            ? "warning"
-                            : "muted"
-                    }
-                    pulse={d.state === "booting"}
-                  >
-                    {DEVICE_STATE_LABEL[d.state]}
-                  </StatusBadge>
+                          : d.state === "online"
+                            ? "success"
+                            : d.state === "booting"
+                              ? "active"
+                              : d.state === "unreachable"
+                                ? "warning"
+                                : "muted"
+                      }
+                      pulse={active.has(d.id) || d.state === "booting"}
+                    >
+                      {active.has(d.id) ? "Scrolling" : DEVICE_STATE_LABEL[d.state]}
+                    </StatusBadge>
+                  </span>
                 </li>
               );
             })}
@@ -296,7 +331,7 @@ export function AutoScrollPage() {
             </Button>
             {scrolling ? (
               <Button variant="danger" onClick={() => void stopScroll()}>
-                Stop auto-scroll
+                Stop all
               </Button>
             ) : (
               <Button onClick={() => void startScroll()} disabled={selected.size === 0}>
@@ -308,7 +343,7 @@ export function AutoScrollPage() {
         {scrolling && (
           <p className="scrollctl__status">
             {(chosenApp?.label ?? "Feed")} on{" "}
-            {selected.size} device{selected.size === 1 ? "" : "s"} — scrolling every {seconds}s…
+            {active.size} device{active.size === 1 ? "" : "s"} — scrolling every {seconds}s… (use each row's Stop to stop just that one)
           </p>
         )}
       </section>

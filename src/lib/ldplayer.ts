@@ -110,8 +110,13 @@ export const SCROLL_APPS: { id: string; label: string; packages: string[] }[] = 
 export const ldplayerAutoscrollStop = () =>
   invoke<void>("ldplayer_autoscroll_stop");
 
+/** Stop scrolling one device without stopping the rest. */
+export const ldplayerAutoscrollRemove = (deviceId: string) =>
+  invoke<void>("ldplayer_autoscroll_remove", { deviceId });
+
+/** Device ids currently being scrolled (empty when idle). */
 export const ldplayerAutoscrollStatus = () =>
-  invoke<boolean>("ldplayer_autoscroll_status");
+  invoke<string[]>("ldplayer_autoscroll_status");
 
 export const ldplayerStop = (deviceId: string) =>
   invoke<DeviceView>("ldplayer_stop", { deviceId });

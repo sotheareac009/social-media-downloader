@@ -1300,3 +1300,5 @@
 }
 
 .scrollctl__loading { font-size: 11px; color: var(--text-tertiary); }
+
+.scrolllist__end { display: inline-flex; align-items: center; gap: 8px; }

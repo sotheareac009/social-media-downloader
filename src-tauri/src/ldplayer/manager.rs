@@ -20,7 +20,7 @@
 //! a new file and starts being a rewrite. A guard test at the bottom fails the
 //! build if a platform name shows up in this module.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -175,10 +175,11 @@ pub struct LdPlayerManager {
     /// Instances we asked to launch, so the list can show "Booting" instead of
     /// flapping back to "Stopped" for the minute before Android is up.
     booting: Mutex<Vec<u32>>,
-    /// Auto-scroll: `running` true while the loop is alive, `stop` requests it
-    /// to end. Arc so the spawned loop task and the manager share the flags.
+    /// Auto-scroll: `running` true while the loop is alive; `active` holds the
+    /// device ids still being scrolled. Removing an id stops just that device;
+    /// clearing the set stops them all. Arc so the loop task shares them.
     autoscroll_running: Arc<AtomicBool>,
-    autoscroll_stop: Arc<AtomicBool>,
+    autoscroll_active: Arc<Mutex<HashSet<String>>>,
 }
 
 impl LdPlayerManager {
@@ -192,7 +193,7 @@ impl LdPlayerManager {
             serials: Mutex::new(HashMap::new()),
             booting: Mutex::new(Vec::new()),
             autoscroll_running: Arc::new(AtomicBool::new(false)),
-            autoscroll_stop: Arc::new(AtomicBool::new(false)),
+            autoscroll_active: Arc::new(Mutex::new(HashSet::new())),
         };
         m.redetect();
         m
@@ -246,23 +247,39 @@ impl LdPlayerManager {
 
     // ---------------------------------------------------------- auto-scroll
 
-    /// Claim the auto-scroll loop. Returns false if one is already running, so
-    /// two Start clicks can't spawn two loops fighting over the same devices.
-    pub fn begin_autoscroll(&self) -> bool {
+    /// Claim the auto-scroll loop for `ids`. Returns false if one is already
+    /// running, so two Start clicks can't spawn two loops.
+    pub fn begin_autoscroll(&self, ids: Vec<String>) -> bool {
         if self.autoscroll_running.swap(true, Ordering::SeqCst) {
             return false;
         }
-        self.autoscroll_stop.store(false, Ordering::SeqCst);
+        *self.autoscroll_active.lock().expect("autoscroll lock") = ids.into_iter().collect();
         true
     }
 
-    /// Ask the loop to finish after its current pass.
-    pub fn stop_autoscroll(&self) {
-        self.autoscroll_stop.store(true, Ordering::SeqCst);
+    /// The device ids still being scrolled.
+    pub fn autoscroll_active_ids(&self) -> Vec<String> {
+        self.autoscroll_active
+            .lock()
+            .expect("autoscroll lock")
+            .iter()
+            .cloned()
+            .collect()
     }
 
-    pub fn autoscroll_should_stop(&self) -> bool {
-        self.autoscroll_stop.load(Ordering::SeqCst)
+    pub fn autoscroll_is_active(&self, id: &str) -> bool {
+        self.autoscroll_active.lock().expect("autoscroll lock").contains(id)
+    }
+
+    /// Stop scrolling just one device; the loop ends on its own once the set
+    /// is empty.
+    pub fn autoscroll_remove(&self, id: &str) {
+        self.autoscroll_active.lock().expect("autoscroll lock").remove(id);
+    }
+
+    /// Stop every device.
+    pub fn stop_autoscroll(&self) {
+        self.autoscroll_active.lock().expect("autoscroll lock").clear();
     }
 
     pub fn is_autoscrolling(&self) -> bool {
@@ -272,6 +289,7 @@ impl LdPlayerManager {
     /// Mark the loop finished so a later Start can begin again.
     pub fn end_autoscroll(&self) {
         self.autoscroll_running.store(false, Ordering::SeqCst);
+        self.autoscroll_active.lock().expect("autoscroll lock").clear();
     }
 
     /// One upward swipe on a device — the feed-scroll gesture. Boots the
