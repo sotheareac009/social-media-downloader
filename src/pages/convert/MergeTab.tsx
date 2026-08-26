@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Button } from "@/components/ui/Button";
+import { VideoThumb } from "@/components/convert/VideoThumb";
 import { useToast } from "@/components/ui/Toast";
 import {
   ArrowLeftIcon,
   BoltIcon,
+  GripIcon,
   CheckIcon,
   FolderIcon,
   StopIcon,
@@ -161,6 +163,50 @@ export function MergeTab({ active }: { active: boolean }) {
   };
 
   /**
+   * Take the clip at `from` out of the list and put it back at `to`.
+   *
+   * A move, not a swap: dropping a clip between two others must leave those
+   * two next to each other, which swapping does not do.
+   */
+  const reorder = (from: number, to: number) => {
+    setClips((prev) => {
+      if (from === to || from < 0 || from >= prev.length) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(from, 1);
+      next.splice(Math.max(0, Math.min(to, next.length)), 0, moved);
+      return next;
+    });
+  };
+
+  // Which row is being carried, and which one it is hovering over. Held in
+  // state rather than a ref because both drive the highlight.
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [overIndex, setOverIndex] = useState<number | null>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+
+  /**
+   * Which row sits under a pointer position.
+   *
+   * Measured from the live element boxes rather than tracked as an offset:
+   * rows are not a fixed height - a long filename wraps - and the list can
+   * scroll under the pointer mid-drag.
+   */
+  const rowUnder = (clientY: number): number | null => {
+    const rows = listRef.current?.querySelectorAll<HTMLElement>("[data-row]");
+    if (!rows || rows.length === 0) return null;
+    for (const row of rows) {
+      const box = row.getBoundingClientRect();
+      if (clientY >= box.top && clientY <= box.bottom) {
+        return Number(row.dataset.row);
+      }
+    }
+    // Past either end: clamp, so dragging to the top or bottom of the list
+    // lands rather than doing nothing.
+    const first = rows[0].getBoundingClientRect();
+    return clientY < first.top ? 0 : rows.length - 1;
+  };
+
+  /**
    * Mirrors `can_copy` in Rust: every property that would change mid-file has
    * to match, or a player would meet a new resolution at the join.
    */
@@ -249,8 +295,8 @@ export function MergeTab({ active }: { active: boolean }) {
               : "Drop video clips here, or click to choose"}
         </span>
         <span className="conv__drophint">
-          Pick several at once — they play in the order below, and the arrows
-          change it
+          Pick several at once — they play in the order below, which you can
+          change by dragging a row
         </span>
         <span className="conv__dropbtn">
           <span className="btn btn--ghost btn--sm">Choose videos</span>
@@ -289,10 +335,57 @@ export function MergeTab({ active }: { active: boolean }) {
             </div>
           </header>
 
-          <ul className="mergelist">
+          <ul className="mergelist" ref={listRef}>
             {clips.map((clip, i) => (
-              <li key={`${clip.id}-${i}`} className="mergelist__row">
+              <li
+                key={`${clip.id}-${i}`}
+                data-row={i}
+                className={`mergelist__row ${dragIndex === i ? "mergelist__row--dragging" : ""} ${
+                  overIndex === i && dragIndex !== null && dragIndex !== i
+                    ? "mergelist__row--over"
+                    : ""
+                }`.trim()}
+              >
+                <span
+                  className="mergelist__grip"
+                  // Pointer events, not HTML5 drag-and-drop: the webview's own
+                  // file-drop handling - the thing that lets clips be dropped in
+                  // from outside - swallows dragstart/drop inside the window, so
+                  // a DOM drag never completes.
+                  onPointerDown={(e) => {
+                    if (busy) return;
+                    e.preventDefault();
+                    // Capture, so the drag survives the pointer leaving the
+                    // handle - which it does immediately.
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                    setDragIndex(i);
+                    setOverIndex(i);
+                  }}
+                  onPointerMove={(e) => {
+                    if (dragIndex === null) return;
+                    const target = rowUnder(e.clientY);
+                    if (target !== null) setOverIndex(target);
+                  }}
+                  onPointerUp={(e) => {
+                    e.currentTarget.releasePointerCapture(e.pointerId);
+                    if (dragIndex !== null && overIndex !== null) {
+                      reorder(dragIndex, overIndex);
+                    }
+                    setDragIndex(null);
+                    setOverIndex(null);
+                  }}
+                  onPointerCancel={() => {
+                    setDragIndex(null);
+                    setOverIndex(null);
+                  }}
+                  role="button"
+                  aria-label={`Reorder ${clip.file_name}`}
+                  title="Drag to reorder"
+                >
+                  <GripIcon size={14} />
+                </span>
                 <span className="clips__index">{i + 1}</span>
+                <VideoThumb path={clip.path} />
                 <span className="mergelist__name" title={clip.path}>
                   {clip.file_name}
                 </span>

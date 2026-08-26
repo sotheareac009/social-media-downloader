@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Button } from "@/components/ui/Button";
+import { VideoThumb } from "@/components/convert/VideoThumb";
 import { useToast } from "@/components/ui/Toast";
 import {
   CheckIcon,
@@ -276,9 +277,7 @@ export function SplitTab({ active }: { active: boolean }) {
       >
         {probe ? (
           <div className="dropzone__file">
-            <span className="dropzone__icon">
-              <CheckIcon size={16} />
-            </span>
+            <VideoThumb path={probe.path} className="thumb thumb--lg" />
             <div className="dropzone__meta">
               <div className="dropzone__name">{probe.file_name}</div>
               <div className="dropzone__facts">
