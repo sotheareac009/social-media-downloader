@@ -133,6 +133,48 @@ impl PhotoFormat {
     }
 }
 
+impl VideoFormat {
+    /// Whether this container can carry `codec` as-is.
+    ///
+    /// A whitelist, deliberately. Guessing wrong here writes a file FFmpeg
+    /// produces without complaint and no player opens, which is worse than an
+    /// unnecessary re-encode.
+    pub fn accepts_video(self, codec: &str) -> bool {
+        let codec = codec.to_ascii_lowercase();
+        match self {
+            // MP4 and MOV carry the MPEG family; QuickTime also reads ProRes,
+            // but nothing here writes it, so a copy is all that matters.
+            Self::Mp4 | Self::Mov => {
+                matches!(codec.as_str(), "h264" | "hevc" | "av1" | "mpeg4")
+            }
+            // Matroska is the container that takes essentially anything.
+            Self::Mkv => matches!(
+                codec.as_str(),
+                "h264" | "hevc" | "av1" | "vp8" | "vp9" | "mpeg4" | "mpeg2video" | "theora"
+            ),
+            // WebM is a strict subset of Matroska: these three and no others.
+            Self::Webm => matches!(codec.as_str(), "vp8" | "vp9" | "av1"),
+            Self::Avi => matches!(codec.as_str(), "mpeg4" | "h264" | "mjpeg"),
+            Self::Mp3 => false,
+        }
+    }
+
+    /// Whether this container can carry `codec` as its audio track.
+    pub fn accepts_audio(self, codec: &str) -> bool {
+        let codec = codec.to_ascii_lowercase();
+        match self {
+            Self::Mp4 | Self::Mov => matches!(codec.as_str(), "aac" | "mp3" | "alac"),
+            Self::Mkv => matches!(
+                codec.as_str(),
+                "aac" | "mp3" | "opus" | "vorbis" | "flac" | "ac3" | "eac3" | "dts"
+            ),
+            Self::Webm => matches!(codec.as_str(), "opus" | "vorbis"),
+            Self::Avi => matches!(codec.as_str(), "mp3" | "ac3" | "pcm_s16le"),
+            Self::Mp3 => codec == "mp3",
+        }
+    }
+}
+
 /// Every video format, for capability reporting.
 pub const ALL_VIDEO: &[VideoFormat] = &[
     VideoFormat::Mp4,
@@ -247,6 +289,27 @@ mod tests {
         // The two that are actually build-dependent in practice.
         assert!(VideoFormat::Webm.required_encoders().contains(&"libvpx-vp9"));
         assert!(PhotoFormat::Webp.required_encoders().contains(&"libwebp"));
+    }
+
+    #[test]
+    fn a_container_only_admits_the_codecs_it_can_actually_hold() {
+        // The pairing that makes a `.ts` an `.mp4` for free.
+        assert!(VideoFormat::Mp4.accepts_video("h264"));
+        assert!(VideoFormat::Mp4.accepts_audio("aac"));
+        // The pairing that must never be copied.
+        assert!(!VideoFormat::Webm.accepts_video("h264"));
+        assert!(!VideoFormat::Webm.accepts_audio("aac"));
+        assert!(VideoFormat::Webm.accepts_video("vp9"));
+        assert!(VideoFormat::Webm.accepts_audio("opus"));
+        // Matroska takes both sides.
+        assert!(VideoFormat::Mkv.accepts_video("h264"));
+        assert!(VideoFormat::Mkv.accepts_video("vp9"));
+        // Case from ffprobe is not guaranteed.
+        assert!(VideoFormat::Mp4.accepts_video("H264"));
+        // Audio-only output has no video to accept.
+        assert!(!VideoFormat::Mp3.accepts_video("h264"));
+        assert!(VideoFormat::Mp3.accepts_audio("mp3"));
+        assert!(!VideoFormat::Mp3.accepts_audio("aac"));
     }
 
     #[test]

@@ -45,7 +45,12 @@ type Route =
   | "accounts"
   | "downloads"
   | "upload"
+  // The Converter's three tabs each have their own route, so the sidebar can
+  // list them as a section. They all render the same page - it keeps every tab
+  // mounted, so switching between them never discards work in progress.
   | "convert"
+  | "convert-split"
+  | "convert-merge"
   | "telegram"
   | "facebook"
   // Emulator publishing. Prefixed so they can never collide with the
@@ -56,6 +61,12 @@ type Route =
   | "autoscroll"
   | "pub-settings";
 const THEME_KEY = "md.theme";
+
+/** The routes the Converter page owns. */
+export type ConverterRoute = "convert" | "convert-split" | "convert-merge";
+
+const isConverterRoute = (route: Route): route is ConverterRoute =>
+  route === "convert" || route === "convert-split" || route === "convert-merge";
 
 export default function App() {
   const [theme, setTheme] = useState<Theme>(
@@ -138,7 +149,9 @@ export default function App() {
                 <UploadPage />
               </div>
             )}
-            {route === "convert" && <ConverterPage />}
+            {isConverterRoute(route) && (
+              <ConverterPage route={route} onNavigate={setRoute} />
+            )}
             {route === "accounts" && <AccountsPage onNavigate={setRoute} />}
             {route === "telegram" && <TelegramPage onBack={() => setRoute("accounts")} />}
             {route === "facebook" && <FacebookPage onBack={() => setRoute("accounts")} />}
@@ -268,16 +281,6 @@ function Sidebar({
           </button>
         )}
         <button
-          className={`navitem ${route === "convert" ? "navitem--active" : ""}`}
-          type="button"
-          onClick={() => onNavigate("convert")}
-        >
-          <span className="navitem__icon">
-            <ScissorsIcon size={16} />
-          </span>
-          Converter
-        </button>
-        <button
           className={`navitem ${route === "accounts" ? "navitem--active" : ""}`}
           type="button"
           onClick={() => onNavigate("accounts")}
@@ -286,6 +289,40 @@ function Sidebar({
             <UsersIcon size={16} />
           </span>
           Accounts
+        </button>
+      </nav>
+
+      <nav className="sidebar__section">
+        <div className="sidebar__label">Converter</div>
+        <button
+          className={`navitem ${route === "convert" ? "navitem--active" : ""}`}
+          type="button"
+          onClick={() => onNavigate("convert")}
+        >
+          <span className="navitem__icon">
+            <SlidersIcon size={16} />
+          </span>
+          Convert
+        </button>
+        <button
+          className={`navitem ${route === "convert-split" ? "navitem--active" : ""}`}
+          type="button"
+          onClick={() => onNavigate("convert-split")}
+        >
+          <span className="navitem__icon">
+            <ScissorsIcon size={16} />
+          </span>
+          Split
+        </button>
+        <button
+          className={`navitem ${route === "convert-merge" ? "navitem--active" : ""}`}
+          type="button"
+          onClick={() => onNavigate("convert-merge")}
+        >
+          <span className="navitem__icon">
+            <BoltIcon size={16} />
+          </span>
+          Merge
         </button>
       </nav>
 

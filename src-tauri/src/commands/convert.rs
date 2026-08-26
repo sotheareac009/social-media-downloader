@@ -160,6 +160,44 @@ pub async fn convert_pick_folder(app: AppHandle) -> Result<Option<String>> {
     Ok(Some(path.display().to_string()))
 }
 
+/// Choose several video files at once.
+///
+/// The merge list is ordered, so this returns the picker's own order and does
+/// not sort: the arrows in the list are what decides sequence, and quietly
+/// alphabetising a selection would fight them.
+#[tauri::command]
+pub async fn convert_pick_videos(app: AppHandle) -> Result<Vec<String>> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("Choose videos")
+        .add_filter(
+            "Videos",
+            &[
+                "mp4", "mov", "mkv", "webm", "avi", "m4v", "mpg", "mpeg", "ts", "flv", "wmv",
+                "3gp", "mts", "m2ts", "vob", "ogv", "asf", "divx", "f4v", "rm", "rmvb", "mxf",
+            ],
+        )
+        .pick_files(move |f| {
+            let _ = tx.send(f);
+        });
+
+    let picked = rx
+        .await
+        .map_err(|_| AppError::Internal("picker closed".into()))?;
+    let mut out = Vec::new();
+    for file in picked.unwrap_or_default() {
+        out.push(
+            file.into_path()
+                .map_err(|e| AppError::DownloadPath(e.to_string()))?
+                .display()
+                .to_string(),
+        );
+    }
+    Ok(out)
+}
+
 /// Choose where converted or split files should be written.
 ///
 /// Separate from [`convert_pick_folder`] only for its title: picking media to
@@ -193,6 +231,50 @@ pub async fn convert_pick_output_dir(app: AppHandle) -> Result<Option<String>> {
 pub async fn convert_scan(paths: Vec<String>) -> Result<Vec<crate::convert::MediaItem>> {
     let ffmpeg = crate::download::ytdlp::locate_ffmpeg();
     Ok(crate::convert::scan_paths(paths, ffmpeg).await)
+}
+
+/// Join clips into one file, in the order given.
+///
+/// Shares the batch queue: a merge and a batch conversion would compete for
+/// the same cores, and one progress bar cannot describe both.
+#[tauri::command]
+pub async fn convert_merge(
+    app: AppHandle,
+    queue: State<'_, std::sync::Arc<crate::convert::ConvertQueue>>,
+    items: Vec<crate::convert::MediaItem>,
+    output_path: String,
+    format: Option<crate::convert::VideoFormat>,
+    height: Option<u32>,
+    // How to shape a mix of portrait and landscape clips, and what to do with
+    // the space left over. Both default to the least surprising choice: the
+    // first clip's shape, with nothing cropped.
+    shape: Option<crate::convert::merge::Shape>,
+    fit: Option<crate::convert::Fit>,
+) -> Result<crate::convert::merge::MergeResult> {
+    let format = format.unwrap_or_default();
+    let queue = std::sync::Arc::clone(&queue);
+    queue.begin_public()?;
+
+    let ffmpeg = crate::download::ytdlp::locate_ffmpeg();
+    let encoder = match (&ffmpeg, format.takes_h264()) {
+        (Some(path), true) => crate::convert::available_encoder(path).await,
+        _ => crate::convert::HardwareEncoder::None,
+    };
+
+    let result = crate::convert::merge::merge(
+        &app,
+        &queue,
+        &items,
+        std::path::Path::new(&output_path),
+        format,
+        height,
+        shape.unwrap_or_default(),
+        fit.unwrap_or(crate::convert::Fit::Pad),
+        encoder,
+    )
+    .await;
+    queue.finish_public();
+    result
 }
 
 /// Convert every item in `items`, `settings.threads` at a time.

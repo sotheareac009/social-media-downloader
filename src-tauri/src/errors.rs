@@ -115,6 +115,10 @@ pub enum AppError {
     #[error("{0}")]
     ConvertFailed(String),
 
+    /// A merge was asked for with clips it cannot join.
+    #[error("{0}")]
+    MergeInput(String),
+
     /// yt-dlp is not installed or not on PATH.
     #[error("the download engine (yt-dlp) was not found on this system")]
     EngineMissing,
@@ -304,6 +308,7 @@ impl AppError {
             Self::FfmpegMissing => "ffmpeg_missing",
             Self::ConvertBusy => "convert_busy",
             Self::ConvertFailed(_) => "convert_failed",
+            Self::MergeInput(_) => "merge_input",
             Self::NotAVideo => "not_a_video",
             Self::SplitCount(_) => "split_count",
             Self::SplitFailed(_) => "split_failed",

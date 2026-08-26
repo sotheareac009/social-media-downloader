@@ -29,10 +29,13 @@ use crate::errors::{AppError, Result};
 
 pub mod encoders;
 pub mod formats;
+pub mod merge;
+pub mod plan;
 pub mod scan;
 
 pub use encoders::{available_encoder, HardwareEncoder};
 pub use formats::{PhotoFormat, VideoFormat};
+pub use plan::{Aspect, Fit, Work};
 pub use scan::{scan_paths, MediaItem, MediaKind};
 
 /// Emitted for every state change of every file in a batch.
@@ -69,6 +72,13 @@ pub struct ConvertSettings {
     pub threads: usize,
     /// Use the platform's hardware encoder when one is available.
     pub gpu: bool,
+    /// A target shape, from a platform preset. `None` keeps the source's.
+    #[serde(default)]
+    pub aspect: Option<Aspect>,
+    /// Leave a file alone when it already matches the request instead of
+    /// re-encoding it into something very slightly worse.
+    #[serde(default = "yes")]
+    pub skip_conforming: bool,
     /// Delete each source file once its conversion succeeds.
     pub delete_original: bool,
     /// Where converted files land. `None` keeps the default: a folder beside
@@ -77,13 +87,21 @@ pub struct ConvertSettings {
     pub output_dir: Option<String>,
 }
 
+fn yes() -> bool {
+    true
+}
+
 /// One file's progress, as the table shows it.
 #[derive(Debug, Clone, Serialize)]
 pub struct JobUpdate {
     /// Matches `MediaItem::id`, so the row can be found without a path compare.
     pub id: String,
-    /// "converting" | "done" | "failed" | "cancelled"
+    /// "converting" | "done" | "skipped" | "failed" | "cancelled"
     pub status: String,
+    /// "copy" when the streams were moved without re-encoding, "encode" when
+    /// they were not. Shown in the row, because the difference is the whole
+    /// reason a batch finishes in seconds rather than an hour.
+    pub how: Option<String>,
     /// 0-100 while converting, for the row's bar. Absent for photos, which
     /// finish too quickly to be worth reporting.
     pub percent: Option<f64>,
@@ -97,6 +115,8 @@ pub struct JobUpdate {
 pub struct BatchDone {
     pub converted: usize,
     pub failed: usize,
+    /// Files that were already exactly what was asked for.
+    pub skipped: usize,
     pub cancelled: bool,
 }
 
@@ -118,6 +138,16 @@ impl ConvertQueue {
 
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    /// Claim the queue for work that is not a batch conversion - a merge.
+    pub fn begin_public(&self) -> Result<()> {
+        self.begin()
+    }
+
+    /// Release it again. Always called, including on failure.
+    pub fn finish_public(&self) {
+        self.finish();
     }
 
     fn begin(&self) -> Result<()> {
@@ -186,6 +216,7 @@ pub async fn run_batch(
                     JobUpdate {
                         id: item.id.clone(),
                         status: "cancelled".into(),
+                        how: None,
                         percent: None,
                         output_path: None,
                         output_bytes: None,
@@ -195,11 +226,45 @@ pub async fn run_batch(
                 return Outcome::Cancelled;
             }
 
+            // How much work this file needs is decided before a process
+            // starts: most files need far less than a full re-encode, and
+            // some need none at all.
+            let work = plan::plan_work(
+                &item,
+                &plan::Request {
+                    format: settings.video_format,
+                    height_cap: settings.video_height,
+                    fps_cap: settings.fps,
+                    aspect: settings.aspect,
+                    skip_conforming: settings.skip_conforming,
+                },
+            );
+
+            if work == Work::Skip {
+                // Already what was asked for. Re-encoding it would cost
+                // minutes and hand back a slightly worse file.
+                emit(
+                    &app,
+                    JobUpdate {
+                        id: item.id.clone(),
+                        status: "skipped".into(),
+                        how: Some("skip".into()),
+                        percent: None,
+                        output_path: Some(item.path.clone()),
+                        output_bytes: Some(item.size_bytes),
+                        error: None,
+                    },
+                );
+                return Outcome::Skipped;
+            }
+
+            let how = if work == Work::Remux { "copy" } else { "encode" };
             emit(
                 &app,
                 JobUpdate {
                     id: item.id.clone(),
                     status: "converting".into(),
+                    how: Some(how.into()),
                     percent: Some(0.0),
                     output_path: None,
                     output_bytes: None,
@@ -207,7 +272,7 @@ pub async fn run_batch(
                 },
             );
 
-            match convert_one(&app, &ffmpeg, &item, &settings, encoder, &queue).await {
+            match convert_one(&app, &ffmpeg, &item, &settings, encoder, &queue, work).await {
                 Ok(output) => {
                     // Only after a successful write, and only if asked: losing
                     // the source to a conversion that failed is unrecoverable.
@@ -220,6 +285,7 @@ pub async fn run_batch(
                         JobUpdate {
                             id: item.id.clone(),
                             status: "done".into(),
+                            how: Some(how.into()),
                             percent: Some(100.0),
                             output_path: Some(output.display().to_string()),
                             output_bytes: bytes,
@@ -234,6 +300,7 @@ pub async fn run_batch(
                         JobUpdate {
                             id: item.id.clone(),
                             status: "cancelled".into(),
+                            how: None,
                             percent: None,
                             output_path: None,
                             output_bytes: None,
@@ -248,6 +315,7 @@ pub async fn run_batch(
                         JobUpdate {
                             id: item.id.clone(),
                             status: "failed".into(),
+                            how: None,
                             percent: None,
                             output_path: None,
                             output_bytes: None,
@@ -262,10 +330,12 @@ pub async fn run_batch(
 
     let mut converted = 0;
     let mut failed = 0;
+    let mut skipped = 0;
     while let Some(res) = tasks.join_next().await {
         match res {
             Ok(Outcome::Converted) => converted += 1,
             Ok(Outcome::Failed) => failed += 1,
+            Ok(Outcome::Skipped) => skipped += 1,
             Ok(Outcome::Cancelled) => {}
             // A panicking task must not take the batch with it.
             Err(_) => failed += 1,
@@ -275,6 +345,7 @@ pub async fn run_batch(
     let done = BatchDone {
         converted,
         failed,
+        skipped,
         cancelled: queue.is_cancelled(),
     };
     queue.finish();
@@ -286,6 +357,8 @@ enum Outcome {
     Converted,
     Failed,
     Cancelled,
+    /// Already correct, so nothing was written.
+    Skipped,
 }
 
 fn emit(app: &AppHandle, update: JobUpdate) {
@@ -300,6 +373,8 @@ async fn convert_one(
     settings: &ConvertSettings,
     encoder: HardwareEncoder,
     queue: &ConvertQueue,
+    // Decided by the caller, before any process starts: a copy, or an encode.
+    work: Work,
 ) -> Result<PathBuf> {
     let source = PathBuf::from(&item.path);
     let out_dir = match settings.output_dir.as_deref().map(str::trim) {
@@ -322,11 +397,47 @@ async fn convert_one(
     cmd.arg("-i").arg(&source);
 
     match item.kind {
+        MediaKind::Video if work == Work::Remux => {
+            // The streams already suit the target container, so this is a
+            // copy: no decode, no quality change, and an hour of video in
+            // about a second.
+            cmd.args(["-c", "copy"]);
+            if settings.video_format.is_audio_only() {
+                cmd.arg("-vn");
+            }
+            for arg in settings.video_format.container_args() {
+                cmd.arg(arg);
+            }
+            cmd.args(["-progress", "pipe:1", "-nostats"]);
+        }
         MediaKind::Video => {
             let format = settings.video_format;
             if !format.is_audio_only() {
-                if let Some(filter) = scale_filter(settings.video_height) {
-                    cmd.arg("-vf").arg(filter);
+                // An aspect preset composites, so it owns the filter chain; a
+                // plain height cap is a single scale.
+                match settings.aspect {
+                    Some(aspect) => {
+                        let canvas =
+                            plan::canvas_for(&aspect, item.height, settings.video_height);
+                        match plan::aspect_filter(&aspect, canvas) {
+                            Some(filter) => {
+                                cmd.arg("-vf").arg(filter);
+                            }
+                            // A blurred backdrop composites the input with
+                            // itself, which only filter_complex can express.
+                            None => {
+                                cmd.arg("-filter_complex").arg(plan::blur_backdrop(canvas));
+                                cmd.args(["-map", "[v]"]);
+                                // `?` so a clip with no sound is not an error.
+                                cmd.args(["-map", "0:a?"]);
+                            }
+                        }
+                    }
+                    None => {
+                        if let Some(filter) = plan::scale_filter(settings.video_height) {
+                            cmd.arg("-vf").arg(filter);
+                        }
+                    }
                 }
                 if let Some(fps) = target_fps(settings.fps, item.fps) {
                     cmd.arg("-fps_mode").arg("cfr");
@@ -352,7 +463,7 @@ async fn convert_one(
             cmd.args(["-progress", "pipe:1", "-nostats"]);
         }
         MediaKind::Photo => {
-            if let Some(filter) = scale_filter(settings.photo_height) {
+            if let Some(filter) = plan::scale_filter(settings.photo_height) {
                 cmd.arg("-vf").arg(filter);
             }
             for arg in settings.photo_format.quality_args() {
@@ -392,6 +503,7 @@ async fn convert_one(
                     JobUpdate {
                         id: id.clone(),
                         status: "converting".into(),
+                        how: None,
                         percent: Some(percent),
                         output_path: None,
                         output_bytes: None,
@@ -460,15 +572,6 @@ fn target_fps(requested: Option<u32>, source: Option<f64>) -> Option<u32> {
         Some(_) => Some(requested),
         None => None,
     }
-}
-
-/// Scale to a height ceiling, never above the source.
-///
-/// `-2` on the width keeps the aspect ratio and rounds to an even number,
-/// which H.264 requires - an odd width fails the encode outright.
-fn scale_filter(height: Option<u32>) -> Option<String> {
-    let h = height?;
-    Some(format!("scale=-2:'min({h},ih)'"))
 }
 
 /// Where a converted file goes: a folder beside the one it came from.
@@ -540,11 +643,14 @@ mod tests {
 
     #[test]
     fn a_height_is_a_ceiling_and_never_an_upscale() {
-        let f = scale_filter(Some(1080)).unwrap();
+        let f = plan::scale_filter(Some(1080)).unwrap();
         assert!(f.contains("min(1080,ih)"), "{f}");
         // `-2` keeps the width even, which H.264 requires.
         assert!(f.starts_with("scale=-2:"), "{f}");
-        assert!(scale_filter(None).is_none(), "no cap means no filter at all");
+        assert!(
+            plan::scale_filter(None).is_none(),
+            "no cap means no filter at all"
+        );
     }
 
     #[test]

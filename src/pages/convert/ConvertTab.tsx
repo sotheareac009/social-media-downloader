@@ -23,6 +23,7 @@ import {
   subscribeToConvertJobs,
   type ConvertCapabilities,
   type ConvertSettings,
+  type Fit,
   type JobUpdate,
   type MediaItem,
   type PhotoFormat,
@@ -74,6 +75,37 @@ const PHOTO_FORMATS: { value: PhotoFormat; label: string }[] = [
   { value: "webp", label: "WebP" },
 ];
 
+/**
+ * Platform presets: one choice that sets format, size, rate and shape.
+ *
+ * The shape is the part the settings could not express before. A downloaded
+ * YouTube video is 1920x1080 landscape; TikTok and Reels want portrait, and
+ * posting the landscape file gets you a strip in the middle of the screen.
+ *
+ * Heights are ceilings as everywhere else - a 720p source stays 720p, it just
+ * changes shape.
+ */
+const PRESETS: {
+  id: string;
+  label: string;
+  format: VideoFormat;
+  height: number;
+  fps: number;
+  aspect: { w: number; h: number } | null;
+}[] = [
+  { id: "custom", label: "Custom", format: "mp4", height: 1080, fps: 30, aspect: null },
+  { id: "tiktok", label: "TikTok / Reels — 9:16", format: "mp4", height: 1920, fps: 30, aspect: { w: 9, h: 16 } },
+  { id: "shorts", label: "YouTube Shorts — 9:16", format: "mp4", height: 1920, fps: 30, aspect: { w: 9, h: 16 } },
+  { id: "square", label: "Instagram feed — 1:1", format: "mp4", height: 1080, fps: 30, aspect: { w: 1, h: 1 } },
+  { id: "youtube", label: "YouTube — 16:9 1080p", format: "mp4", height: 1080, fps: 30, aspect: { w: 16, h: 9 } },
+];
+
+const FITS: { value: Fit; label: string; note: string }[] = [
+  { value: "crop", label: "Crop to fill", note: "Fills the frame; the sides are lost" },
+  { value: "blur", label: "Blurred backdrop", note: "Whole picture, blurred copy behind it" },
+  { value: "pad", label: "Black bars", note: "Whole picture, nothing cropped" },
+];
+
 const FRAME_RATES = [
   { value: 60, label: "60 fps" },
   { value: 30, label: "30 fps" },
@@ -89,7 +121,7 @@ const FRAME_RATES = [
  * people actually arrive with: what is in this folder, and which of it needs
  * converting at all.
  */
-export function ConvertTab() {
+export function ConvertTab({ active }: { active: boolean }) {
   const toast = useToast();
   const [items, setItems] = useState<MediaItem[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -100,6 +132,11 @@ export function ConvertTab() {
   const [dragging, setDragging] = useState(false);
   const [page, setPage] = useState(0);
 
+  const [preset, setPreset] = useState("custom");
+  const [fit, setFit] = useState<Fit>("crop");
+  // Left on by default: re-encoding a file that already matches the request
+  // costs minutes and hands back something very slightly worse.
+  const [skipConforming, setSkipConforming] = useState(true);
   const [videoFormat, setVideoFormat] = useState<VideoFormat>("mp4");
   const [photoFormat, setPhotoFormat] = useState<PhotoFormat>("jpg");
   const [videoHeight, setVideoHeight] = useState(1080);
@@ -194,6 +231,13 @@ export function ConvertTab() {
   // Native drops. The DOM's own drag events never carry a real path in a
   // webview, so this is the only way to learn what was dropped.
   useEffect(() => {
+    // Every tab stays mounted so its work survives a tab switch, so only the
+    // visible one may claim a drop - two live listeners would both act on the
+    // same files.
+    if (!active) {
+      setDragging(false);
+      return;
+    }
     const pending = getCurrentWebview().onDragDropEvent((event) => {
       if (!mounted.current) return;
       // Tauri fires four of these, and `enter` carries `paths` exactly like
@@ -219,7 +263,7 @@ export function ConvertTab() {
     return () => {
       void pending.then((un) => un());
     };
-  }, [ingest]);
+  }, [active, ingest]);
 
   // Per-file progress while a batch runs.
   useEffect(() => {
@@ -262,6 +306,18 @@ export function ConvertTab() {
     const failed = Object.values(jobs).filter((j) => j.status === "failed").length;
     return { videos, photos, unsupported, done, failed };
   }, [items, jobs]);
+
+  const activePreset = PRESETS.find((p) => p.id === preset) ?? PRESETS[0];
+
+  /** Applying a preset sets every output field it covers, in one go. */
+  const applyPreset = (id: string) => {
+    setPreset(id);
+    const p = PRESETS.find((x) => x.id === id);
+    if (!p || id === "custom") return;
+    setVideoFormat(p.format);
+    setVideoHeight(p.height);
+    setFps(p.fps);
+  };
 
   // Only offer what this FFmpeg build can actually write: a Homebrew build
   // without libwebp, for instance, fails every WebP file at conversion time.
@@ -317,6 +373,10 @@ export function ConvertTab() {
       photo_height: photoHeight || null,
       threads,
       gpu,
+      aspect: activePreset?.aspect
+        ? { ...activePreset.aspect, fit }
+        : null,
+      skip_conforming: skipConforming,
       delete_original: deleteOriginal,
       output_dir: outDir,
     };
@@ -331,7 +391,13 @@ export function ConvertTab() {
       } else if (result.failed > 0) {
         toast("error", `${result.converted} converted, ${result.failed} failed.`);
       } else {
-        toast("success", `Converted ${result.converted} file${result.converted === 1 ? "" : "s"}.`);
+        const skipped = result.skipped
+          ? ` ${result.skipped} already correct.`
+          : "";
+        toast(
+          "success",
+          `Converted ${result.converted} file${result.converted === 1 ? "" : "s"}.${skipped}`,
+        );
       }
     } catch (e) {
       if (!mounted.current) return;
@@ -342,6 +408,9 @@ export function ConvertTab() {
     }
   }, [
     chosen,
+    activePreset,
+    fit,
+    skipConforming,
     videoFormat,
     photoFormat,
     videoHeight,
@@ -534,6 +603,38 @@ export function ConvertTab() {
         <section className="conv__card">
           <h3 className="conv__cardtitle">Video output</h3>
           <label className="conv__field">
+            <span>Preset</span>
+            <select
+              className="input"
+              value={preset}
+              disabled={running}
+              onChange={(e) => applyPreset(e.target.value)}
+            >
+              {PRESETS.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {activePreset.aspect && (
+            <label className="conv__field">
+              <span>Fit</span>
+              <select
+                className="input"
+                value={fit}
+                disabled={running}
+                onChange={(e) => setFit(e.target.value as Fit)}
+              >
+                {FITS.map((f) => (
+                  <option key={f.value} value={f.value}>
+                    {f.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          <label className="conv__field">
             <span>Format</span>
             <select
               className="input"
@@ -579,6 +680,9 @@ export function ConvertTab() {
             </select>
           </label>
           <p className="conv__note">
+            {activePreset.aspect
+              ? `${FITS.find((f) => f.value === fit)?.note}. `
+              : ""}
             {formatNote}
             {audioOnly
               ? ""
@@ -723,6 +827,21 @@ export function ConvertTab() {
               </em>
             </span>
           </label>
+          <label className="conv__toggle" style={{ marginTop: 12 }}>
+            <input
+              type="checkbox"
+              checked={skipConforming}
+              disabled={running}
+              onChange={(e) => setSkipConforming(e.target.checked)}
+            />
+            <span>
+              <strong>Skip files already correct</strong>
+              <em>
+                A file that already matches every setting is left untouched
+                rather than re-encoded into something slightly worse.
+              </em>
+            </span>
+          </label>
           <p className="conv__note">
             FFmpeg already spreads one file across cores, so more files at once
             is not automatically faster — past a handful they compete.
@@ -789,16 +908,35 @@ function StatusCell({ item, job }: { item: MediaItem; job?: JobUpdate }) {
   if (job.status === "converting") {
     const pct = Math.round(job.percent ?? 0);
     return (
-      <div className="conv__bar" title={`${pct}%`}>
+      <div className="conv__bar" title={job.how === "copy" ? "Copying streams" : `${pct}%`}>
         <div className="conv__barfill" style={{ width: `${pct}%` }} />
-        <span className="conv__barlabel">{pct}%</span>
+        <span className="conv__barlabel">
+          {job.how === "copy" ? "copying" : `${pct}%`}
+        </span>
       </div>
+    );
+  }
+  // Already correct: nothing was written, and saying so is the point of the
+  // setting that produced it.
+  if (job.status === "skipped") {
+    return (
+      <span className="pill pill--off" title="Already matches every setting">
+        Already OK
+      </span>
     );
   }
   if (job.status === "done") {
     return (
-      <span className="pill pill--ok">
+      <span
+        className="pill pill--ok"
+        title={
+          job.how === "copy"
+            ? "Streams copied — no re-encode, no quality loss"
+            : "Re-encoded"
+        }
+      >
         <CheckIcon size={11} />
+        {job.how === "copy" ? "Copied" : ""}
         {job.output_bytes ? formatBytes(job.output_bytes) : "Done"}
       </span>
     );

@@ -112,6 +112,13 @@ export interface MediaItem {
   width: number | null;
   height: number | null;
   fps: number | null;
+  /**
+   * The codecs already inside the file. These decide whether a conversion has
+   * to re-encode at all — a `.ts` holding H.264 and AAC becomes an MP4 by
+   * rewriting the container, with the streams copied untouched.
+   */
+  vcodec: string | null;
+  acodec: string | null;
   /** False when FFmpeg could read nothing from the file. */
   supported: boolean;
 }
@@ -119,6 +126,15 @@ export interface MediaItem {
 /** Containers the converter can write. Any source format reaches any of these. */
 export type VideoFormat = "mp4" | "mkv" | "mov" | "webm" | "avi" | "mp3";
 export type PhotoFormat = "jpg" | "png" | "webp";
+
+/** How to fit a picture into a shape it does not already have. */
+export type Fit = "crop" | "blur" | "pad";
+
+export interface Aspect {
+  w: number;
+  h: number;
+  fit: Fit;
+}
 
 export interface ConvertSettings {
   video_format: VideoFormat;
@@ -129,6 +145,10 @@ export interface ConvertSettings {
   photo_height: number | null;
   threads: number;
   gpu: boolean;
+  /** A target shape from a preset, or null to keep the source's. */
+  aspect: Aspect | null;
+  /** Leave a file untouched when it already matches the request. */
+  skip_conforming: boolean;
   delete_original: boolean;
   /** Where results land. null keeps the default folder beside each source. */
   output_dir: string | null;
@@ -136,8 +156,10 @@ export interface ConvertSettings {
 
 export interface JobUpdate {
   id: string;
-  /** "converting" | "done" | "failed" | "cancelled" */
+  /** "converting" | "done" | "skipped" | "failed" | "cancelled" */
   status: string;
+  /** "copy" (streams moved untouched), "encode", or "skip". */
+  how: string | null;
   percent: number | null;
   output_path: string | null;
   output_bytes: number | null;
@@ -147,8 +169,50 @@ export interface JobUpdate {
 export interface BatchDone {
   converted: number;
   failed: number;
+  /** Files that already matched the request, so nothing was written. */
+  skipped: number;
   cancelled: boolean;
 }
+
+export interface MergeProgress {
+  percent: number;
+  /** "copy" when the clips are appended untouched, "encode" otherwise. */
+  how: string;
+}
+
+export interface MergeResult {
+  path: string;
+  size_bytes: number;
+  duration_seconds: number;
+  how: string;
+}
+
+/** The shape a merged file takes when its clips disagree. */
+export type MergeShape = "first" | "landscape" | "portrait" | "square";
+
+/**
+ * Join clips into one file, in the order given.
+ *
+ * Order is the feature: the array is used exactly as passed, so the same clip
+ * twice in a row is a legitimate request rather than a mistake to dedupe.
+ */
+export const convertMerge = (
+  items: MediaItem[],
+  outputPath: string,
+  opts: { shape?: MergeShape; fit?: Fit; format?: VideoFormat; height?: number } = {},
+) =>
+  invoke<MergeResult>("convert_merge", {
+    items,
+    outputPath,
+    format: opts.format ?? "mp4",
+    height: opts.height ?? null,
+    shape: opts.shape ?? "first",
+    fit: opts.fit ?? "pad",
+  });
+
+export const subscribeToMergeProgress = (
+  onProgress: (p: MergeProgress) => void,
+) => listen<MergeProgress>("convert://merge", (e) => onProgress(e.payload));
 
 export interface ConvertCapabilities {
   ffmpeg: boolean;
@@ -168,6 +232,9 @@ export const convertCapabilities = () =>
 
 export const convertPickFolder = () =>
   invoke<string | null>("convert_pick_folder");
+
+/** Choose several videos. Resolves to an empty array when dismissed. */
+export const convertPickVideos = () => invoke<string[]>("convert_pick_videos");
 
 /** Choose where results are written. Resolves to null when dismissed. */
 export const convertPickOutputDir = () =>

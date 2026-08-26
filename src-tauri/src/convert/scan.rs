@@ -17,11 +17,30 @@ use serde::{Deserialize, Serialize};
 
 /// Video containers worth offering. Anything else is listed as unsupported
 /// rather than silently dropped, so a folder's contents still add up.
+/// Video containers recognised by name.
+///
+/// Broad on purpose: FFmpeg reads far more than the handful people usually
+/// think of, and a camera or capture card writing `.mts` or `.m2ts` is a
+/// perfectly ordinary source. An extension missing from this list is not a
+/// refusal - a file dropped directly is probed anyway, see `scan_paths`.
 const VIDEO_EXTENSIONS: &[&str] = &[
+    // The common ones.
     "mp4", "mov", "mkv", "webm", "avi", "m4v", "mpg", "mpeg", "ts", "flv", "wmv", "3gp",
+    // Camcorder and broadcast captures.
+    "mts", "m2ts", "m2t", "trp", "tod", "mod", "dv", "dvr-ms", "mxf", "vob", "m2v", "mpe",
+    "mpv", "m1v", "tp",
+    // Streaming and web.
+    "f4v", "f4p", "ogv", "ogm", "asf", "divx", "xvid", "3g2", "amv", "rm", "rmvb", "swf",
+    "webm~", "qt", "mp4v", "h264", "hevc", "av1",
+    // Phone and screen recorders.
+    "mkv3d", "m4s", "mqv", "nsv", "roq", "yuv", "y4m",
 ];
 
-const PHOTO_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff", "heic"];
+/// Photo formats recognised by name.
+const PHOTO_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "jpe", "jfif", "png", "webp", "bmp", "tif", "tiff", "heic", "heif",
+    "avif", "gif", "tga", "ppm", "pgm", "pbm", "pnm", "dpx", "exr", "jxl",
+];
 
 /// How many files are probed at once.
 ///
@@ -66,6 +85,11 @@ pub struct MediaItem {
     pub height: Option<u32>,
     /// Rounded to one decimal - 29.97 matters, 29.970030 does not.
     pub fps: Option<f64>,
+    /// The codecs already inside the file. These decide whether a conversion
+    /// has to re-encode at all: a `.ts` holding H.264 and AAC becomes an MP4
+    /// by rewriting the container, with the streams copied untouched.
+    pub vcodec: Option<String>,
+    pub acodec: Option<String>,
     /// False when nothing could be read from the file. Kept in the table with
     /// a reason rather than hidden, so the totals still account for it.
     pub supported: bool,
@@ -73,13 +97,21 @@ pub struct MediaItem {
 
 /// Walk everything that was dropped and probe what it finds.
 pub async fn scan_paths(paths: Vec<String>, ffmpeg: Option<PathBuf>) -> Vec<MediaItem> {
-    let mut files = Vec::new();
+    // `true` means the path was handed over directly rather than found by
+    // walking a folder. That distinction decides what happens to an extension
+    // nobody recognises: dropping a file IS the user saying "this one", so it
+    // gets probed and kept if FFmpeg can read a picture out of it. Doing the
+    // same inside a folder walk would run ffprobe over every .txt and .zip on
+    // the way past.
+    let mut files: Vec<(PathBuf, bool)> = Vec::new();
     for raw in paths {
         let path = PathBuf::from(raw);
         if path.is_dir() {
-            collect_dir(&path, 0, &mut files);
-        } else if path.is_file() && kind_of(&path).is_some() {
-            files.push(path);
+            let mut found = Vec::new();
+            collect_dir(&path, 0, &mut found);
+            files.extend(found.into_iter().map(|p| (p, false)));
+        } else if path.is_file() {
+            files.push((path, true));
         }
         if files.len() >= MAX_ITEMS {
             break;
@@ -87,7 +119,7 @@ pub async fn scan_paths(paths: Vec<String>, ffmpeg: Option<PathBuf>) -> Vec<Medi
     }
 
     files.sort();
-    files.dedup();
+    files.dedup_by(|a, b| a.0 == b.0);
     files.truncate(MAX_ITEMS);
 
     let ffprobe = ffmpeg
@@ -97,13 +129,14 @@ pub async fn scan_paths(paths: Vec<String>, ffmpeg: Option<PathBuf>) -> Vec<Medi
     let mut items = Vec::with_capacity(files.len());
     for chunk in files.chunks(PROBE_CONCURRENCY) {
         let mut set = tokio::task::JoinSet::new();
-        for path in chunk {
+        for (path, explicit) in chunk {
             let path = path.clone();
+            let explicit = *explicit;
             let ffprobe = ffprobe.clone();
-            set.spawn(async move { probe_one(&path, ffprobe.as_deref()).await });
+            set.spawn(async move { probe_one(&path, ffprobe.as_deref(), explicit).await });
         }
         while let Some(res) = set.join_next().await {
-            if let Ok(item) = res {
+            if let Ok(Some(item)) = res {
                 items.push(item);
             }
         }
@@ -153,8 +186,14 @@ pub fn kind_of(path: &Path) -> Option<MediaKind> {
     }
 }
 
-async fn probe_one(path: &Path, ffprobe: Option<&Path>) -> MediaItem {
-    let kind = kind_of(path).unwrap_or(MediaKind::Video);
+async fn probe_one(path: &Path, ffprobe: Option<&Path>, explicit: bool) -> Option<MediaItem> {
+    let known = kind_of(path);
+    // An unrecognised extension is only worth a look when the file was handed
+    // over directly, and only FFmpeg can settle it.
+    if known.is_none() && !explicit {
+        return None;
+    }
+    let kind = known.unwrap_or(MediaKind::Video);
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
     let mut item = MediaItem {
@@ -174,23 +213,25 @@ async fn probe_one(path: &Path, ffprobe: Option<&Path>) -> MediaItem {
         width: None,
         height: None,
         fps: None,
+        vcodec: None,
+        acodec: None,
         // Without ffprobe the file is still listed and still convertible; only
         // its details are unknown, so it is not marked unsupported.
         supported: true,
     };
 
     let Some(ffprobe) = ffprobe else {
-        return item;
+        // No prober: a recognised extension is taken on trust, an unknown one
+        // cannot be.
+        return known.map(|_| item);
     };
 
     let Ok(out) = crate::process::command(ffprobe)
         .args([
             "-v",
             "error",
-            "-select_streams",
-            "v:0",
             "-show_entries",
-            "stream=width,height,r_frame_rate:format=duration",
+            "stream=width,height,r_frame_rate,codec_name,codec_type:format=duration",
             "-of",
             "json",
         ])
@@ -199,25 +240,45 @@ async fn probe_one(path: &Path, ffprobe: Option<&Path>) -> MediaItem {
         .output()
         .await
     else {
-        return item;
+        return known.map(|_| item);
     };
 
     if !out.status.success() {
         item.supported = false;
-        return item;
+        return known.map(|_| item);
     }
 
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
         item.supported = false;
-        return item;
+        return known.map(|_| item);
     };
 
-    let stream = v.get("streams").and_then(|s| s.get(0));
+    // Both streams now, not just video: the audio codec decides whether the
+    // sound can be copied as well, and a stream-copy is only possible when
+    // both sides fit the target container.
+    let streams = v.get("streams").and_then(|s| s.as_array());
+    let by_kind = |kind: &str| {
+        streams.and_then(|arr| {
+            arr.iter().find(|s| {
+                s.get("codec_type")
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| t == kind)
+            })
+        })
+    };
+    let audio = by_kind("audio");
+    item.acodec = audio
+        .and_then(|s| s.get("codec_name"))
+        .and_then(|c| c.as_str())
+        .map(str::to_string);
+
+    let stream = by_kind("video").or_else(|| streams.and_then(|a| a.first()));
     if stream.is_none() {
         // No video stream at all: an audio file with a video extension, or a
-        // corrupt download.
+        // corrupt download. A file only guessed at by its being dropped is
+        // left out entirely rather than listed as broken.
         item.supported = false;
-        return item;
+        return known.map(|_| item);
     }
 
     item.width = stream
@@ -228,6 +289,11 @@ async fn probe_one(path: &Path, ffprobe: Option<&Path>) -> MediaItem {
         .and_then(|s| s.get("height"))
         .and_then(|n| n.as_u64())
         .map(|n| n as u32);
+
+    item.vcodec = stream
+        .and_then(|s| s.get("codec_name"))
+        .and_then(|c| c.as_str())
+        .map(str::to_string);
 
     if kind == MediaKind::Video {
         item.duration_seconds = v
@@ -242,7 +308,7 @@ async fn probe_one(path: &Path, ffprobe: Option<&Path>) -> MediaItem {
             .and_then(parse_frame_rate);
     }
 
-    item
+    Some(item)
 }
 
 /// ffprobe reports frame rate as a fraction: "30000/1001", not "29.97".

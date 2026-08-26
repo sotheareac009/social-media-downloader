@@ -59,7 +59,7 @@ function derivedTail(duration: number, each: number) {
  * not what anyone actually cares about. Six is only the right answer once you
  * can see it means ten minutes each.
  */
-export function SplitTab() {
+export function SplitTab({ active }: { active: boolean }) {
   const toast = useToast();
   const [probe, setProbe] = useState<VideoProbe | null>(null);
   const [loading, setLoading] = useState(false);
@@ -167,7 +167,7 @@ export function SplitTab() {
     } catch (e) {
       toast("error", toAuthError(e).message);
     }
-  }, [load, toast]);
+  }, [active, load, toast]);
 
   const chooseOutDir = useCallback(async () => {
     try {
@@ -181,6 +181,13 @@ export function SplitTab() {
   // Files dropped onto the window. Tauri reports the drop natively — the DOM's
   // own drag events never carry a real path in a webview.
   useEffect(() => {
+    // Every tab stays mounted so its work survives a tab switch, so only the
+    // visible one may claim a drop - two live listeners would both act on the
+    // same files.
+    if (!active) {
+      setDragging(false);
+      return;
+    }
     const pending = getCurrentWebview().onDragDropEvent((event) => {
       if (!mounted.current) return;
       // `enter` carries `paths` just as `drop` does, so anything other than an
@@ -258,7 +265,7 @@ export function SplitTab() {
   }, [probe, parts, byCount, eachSeconds, canSplit, total, exact, outDir, toast]);
 
   return (
-    <div>
+    <div className="conv">
       <p className="page__lede" style={{ marginTop: 0 }}>
         Drop in one long recording, say how many pieces you want, and each part
         is cut to an equal length.
@@ -315,7 +322,7 @@ export function SplitTab() {
       </div>
 
       {probe && (
-        <section className="fbpost rise" style={{ marginTop: 16 }}>
+        <section className="conv__card rise">
           {/* Radios, not tabs: the two are alternatives, and a tab strip reads
               as two panels that both apply. Only the chosen one is rendered
               below, and the engine refuses a request naming both. */}
@@ -494,7 +501,7 @@ export function SplitTab() {
       )}
 
       {clips && outputDir && (
-        <section className="fbpost rise" style={{ marginTop: 16 }}>
+        <section className="conv__card rise">
           <div className="split-done">
             <div>
               <div className="split-done__title">
