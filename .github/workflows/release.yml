@@ -158,11 +158,20 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs every updater artefact. The app refuses an update that this
+          # key did not sign, so without these the release still builds but
+          # nobody can update to it.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "SocialSync ${{ github.ref_name }}"
           releaseDraft: true
           prerelease: false
+          # Publishes latest.json alongside the installers - the manifest the
+          # app polls. A draft release is not visible to it, so the release has
+          # to be published before an update reaches anyone.
+          includeUpdaterJson: true
           args: ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
 
       # Also keep the artefacts on the run itself, so a manual dispatch (which

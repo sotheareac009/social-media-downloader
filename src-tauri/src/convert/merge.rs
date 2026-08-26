@@ -15,7 +15,7 @@
 //! and that order is preserved exactly - no sorting, no dedupe. Two copies of
 //! the same clip back to back is a legitimate thing to ask for.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 
 use serde::{Deserialize, Serialize};

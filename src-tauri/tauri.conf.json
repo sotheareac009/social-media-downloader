@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "SocialSync",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "identifier": "com.reach.mediadownloader",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -46,6 +46,18 @@
     ],
     "macOS": {
       "signingIdentity": "-"
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/sotheareac009/social-media-downloader/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlFOTMxRDFDMEMxMUZEQjUKUldTMS9SRU1IQjJUbm82U1RmUHBjRU96dzBHM1VmbU9Cb0ZHYjdwcmxlQzdWUS91TFlLSzdEbUsK",
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

@@ -23,6 +23,7 @@ import { ActivationScreen } from "@/components/license/ActivationScreen";
 import { licenseStatus, type LicenseStatus } from "@/lib/license";
 import { isTauri } from "@tauri-apps/api/core";
 import { BrowserNotice } from "@/components/app/BrowserNotice";
+import { UpdateBadge } from "@/components/app/UpdateBadge";
 import { SetupOverlay } from "@/components/setup/SetupOverlay";
 import { HIDE_UPLOAD, HIDE_PUBLISHING, HIDE_AUTOSCROLL } from "@/lib/flags";
 import {
@@ -391,7 +392,7 @@ function Sidebar({
       <NetIndicator />
 
       <div className="sidebar__footer">
-        <span className="sidebar__phase">v0.0.2</span>
+        <UpdateBadge version="v0.0.2" />
         <button
           className="iconbutton"
           type="button"

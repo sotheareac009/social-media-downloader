@@ -5256,3 +5256,45 @@
 .mergelist__row--over {
   box-shadow: inset 0 2px 0 0 var(--accent);
 }
+
+/* ------------------------------------------------------- updates: the badge */
+
+/* The version label is a button, so it must not look like one until it has
+   something to offer. */
+.sidebar__phase--button {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.sidebar__phase--button:hover:not(:disabled) {
+  color: var(--text-secondary);
+}
+
+.sidebar__phase--busy {
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+.updatebtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.updatebtn:hover {
+  background: var(--accent);
+  color: #fff;
+}
