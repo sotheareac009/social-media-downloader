@@ -1,4 +1,4 @@
-# Media Downloader
+# SocialSync
 
 A Tauri 2 + Rust + React + TypeScript desktop app.
 
@@ -212,7 +212,7 @@ last step after a full download; picking a single stream avoids that.
 
 ### Where files are saved
 
-`~/Downloads/Media Downloader` by default. Two downloads run at a time.
+`~/Downloads/SocialSync` by default. Two downloads run at a time.
 
 Users change this themselves in the app — **Change…** next to "Saving to" opens
 the OS folder picker. The choice is remembered across restarts in
@@ -484,7 +484,7 @@ secret.
 
 ## Running in Docker
 
-**Read this first: Media Downloader draws a native desktop window.** A container
+**Read this first: SocialSync draws a native desktop window.** A container
 has no display, so "one command and it runs" is only literally true on a Linux
 host, where the X11 socket can be shared in. On macOS and Windows you would need
 an X server (XQuartz / VcXsrv), and the result is worse than just running

@@ -1,11 +1,11 @@
 import { Button } from "@/components/ui/Button";
-import { DownloadIcon, UsersIcon, XIcon } from "@/components/ui/icons";
+import { DownloadIcon, ListIcon, UsersIcon, XIcon } from "@/components/ui/icons";
 import { formatDuration, type ProfileListing } from "@/lib/download";
 
 /**
- * A profile awaiting confirmation.
+ * A profile or playlist awaiting confirmation.
  *
- * Pasting one profile link can mean a hundred downloads, so the count is shown
+ * Pasting one such link can mean a hundred downloads, so the count is shown
  * and the user decides. Queueing them silently would be the kind of surprise
  * that fills a disk.
  */
@@ -22,18 +22,24 @@ export function ProfileCard({
 }) {
   const preview = listing.entries.slice(0, 3);
   const rest = listing.count - preview.length;
+  // A playlist has a title, not a handle: "@Best of 2024" reads as a broken
+  // username rather than the name of the list that was found.
+  const isPlaylist = listing.kind === "playlist";
 
   return (
     <article className="profile">
       <div className="profile__head">
         <span className="profile__avatar">
-          <UsersIcon size={16} />
+          {isPlaylist ? <ListIcon size={16} /> : <UsersIcon size={16} />}
         </span>
         <div className="profile__ident">
-          <div className="profile__name">@{listing.uploader}</div>
+          <div className="profile__name">
+            {isPlaylist ? listing.uploader : `@${listing.uploader}`}
+          </div>
           <div className="profile__count">
             <strong>{listing.count}</strong>{" "}
-            {listing.count === 1 ? "video" : "videos"} found
+            {listing.count === 1 ? "video" : "videos"}{" "}
+            {isPlaylist ? "in this playlist" : "found"}
           </div>
         </div>
         <div className="profile__actions">

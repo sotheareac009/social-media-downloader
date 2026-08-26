@@ -79,11 +79,14 @@ export interface ProfileEntry {
 }
 
 export interface ProfileListing {
+  /** A handle for a profile, the title for a playlist. */
   uploader: string;
   profile_url: string;
   /** How many videos were found — the number shown before confirming. */
   count: number;
   entries: ProfileEntry[];
+  /** What was listed. Only affects how the confirmation card names it. */
+  kind: "profile" | "playlist";
 }
 
 export interface RejectedLink {
@@ -327,6 +330,8 @@ export function downloadMessage(
       return "No video was found at that link.";
     case "facebook_stories_unsupported":
       return "Facebook Stories can't be downloaded — no downloader (yt-dlp or gallery-dl) supports them. Regular Facebook videos, reels and posts do work, including private ones once you're signed in.";
+    case "facebook_profile_unsupported":
+      return "Facebook profiles and their tabs can't be listed — no downloader can enumerate a Facebook page. Paste an individual reel or video link (facebook.com/reel/…, /watch/?v=… or a share link) and it'll download.";
     case "instagram_profile_unsupported":
       return "That Instagram page can't be listed — stories and explore pages have no listing path. Profile and /reels/ links do work.";
     case "lister_missing":

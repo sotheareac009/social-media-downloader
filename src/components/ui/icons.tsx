@@ -91,6 +91,23 @@ export const BoltIcon = ({ size = 16, className }: P) => (
   </svg>
 );
 
+/** A playlist: three lines with a play triangle, as YouTube draws it. */
+export const ListIcon = ({ size = 16, className }: P) => (
+  <svg {...base(size)} className={className}>
+    <path d="M4 6h11M4 11h11M4 16h6" />
+    <path d="m15 14 5 3-5 3Z" />
+  </svg>
+);
+
+/** Scissors: the converter's cut. */
+export const ScissorsIcon = ({ size = 16, className }: P) => (
+  <svg {...base(size)} className={className}>
+    <circle cx="6" cy="6" r="2.5" />
+    <circle cx="6" cy="18" r="2.5" />
+    <path d="M8 7.5 20 18M20 6 8 16.5" />
+  </svg>
+);
+
 export const FolderIcon = ({ size = 16, className }: P) => (
   <svg {...base(size)} className={className}>
     <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />

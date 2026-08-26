@@ -5,6 +5,7 @@ import { HomePage } from "@/pages/home/HomePage";
 import { TelegramPage } from "@/pages/telegram/TelegramPage";
 import { FacebookPage } from "@/pages/facebook/FacebookPage";
 import { UploadPage } from "@/pages/upload/UploadPage";
+import { ConverterPage } from "@/pages/convert/ConverterPage";
 import { PublisherDashboardPage } from "@/pages/publisher/DashboardPage";
 import { PublisherAccountsPage } from "@/pages/publisher/AccountsPage";
 import { PublishPage } from "@/pages/publisher/PublishPage";
@@ -31,6 +32,7 @@ import {
   HomeIcon,
   MoonIcon,
   SendIcon,
+  ScissorsIcon,
   SlidersIcon,
   SunIcon,
   UploadIcon,
@@ -43,6 +45,7 @@ type Route =
   | "accounts"
   | "downloads"
   | "upload"
+  | "convert"
   | "telegram"
   | "facebook"
   // Emulator publishing. Prefixed so they can never collide with the
@@ -135,6 +138,7 @@ export default function App() {
                 <UploadPage />
               </div>
             )}
+            {route === "convert" && <ConverterPage />}
             {route === "accounts" && <AccountsPage onNavigate={setRoute} />}
             {route === "telegram" && <TelegramPage onBack={() => setRoute("accounts")} />}
             {route === "facebook" && <FacebookPage onBack={() => setRoute("accounts")} />}
@@ -221,10 +225,10 @@ function Sidebar({
       <div className="sidebar__brand" data-tauri-drag-region>
         <div className="sidebar__mark">
           {/* Decorative: the product name sits next to it, so alt is empty. */}
-          <img src="/logo.png" alt="" width={30} height={30} />
+          <img src="/social-manegement.png" alt="" width={30} height={30} />
         </div>
         <div>
-          <div className="sidebar__title">Social Media Management</div>
+          <div className="sidebar__title">SocialSync</div>
           <div className="sidebar__subtitle">Public media · Accounts</div>
         </div>
       </div>
@@ -263,6 +267,16 @@ function Sidebar({
             Upload
           </button>
         )}
+        <button
+          className={`navitem ${route === "convert" ? "navitem--active" : ""}`}
+          type="button"
+          onClick={() => onNavigate("convert")}
+        >
+          <span className="navitem__icon">
+            <ScissorsIcon size={16} />
+          </span>
+          Converter
+        </button>
         <button
           className={`navitem ${route === "accounts" ? "navitem--active" : ""}`}
           type="button"

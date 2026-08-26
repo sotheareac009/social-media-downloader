@@ -194,6 +194,7 @@ pub async fn list_instagram_profile(
         profile_url: url.to_string(),
         count: entries.len(),
         entries,
+        kind: crate::download::ytdlp::ListingKind::Profile,
     })
 }
 
@@ -307,6 +308,7 @@ pub async fn list_x_profile(url: &url::Url, cookies: Option<&Path>) -> Result<Pr
         profile_url: url.to_string(),
         count: entries.len(),
         entries,
+        kind: crate::download::ytdlp::ListingKind::Profile,
     })
 }
 

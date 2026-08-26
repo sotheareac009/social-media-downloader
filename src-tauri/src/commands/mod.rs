@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod convert;
 pub mod download;
 pub mod telegram;
 pub mod facebook;

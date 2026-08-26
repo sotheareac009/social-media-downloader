@@ -31,6 +31,7 @@ import { DestinationBar } from "@/components/downloads/DestinationBar";
 import { EngineNotice } from "@/components/downloads/EngineNotice";
 import { JobCard } from "@/components/downloads/JobCard";
 import { ProfileCard } from "@/components/downloads/ProfileCard";
+import { QueuePager } from "@/components/downloads/QueuePager";
 import { QualityPicker } from "@/components/downloads/QualityPicker";
 import {
   countJobs,
@@ -49,6 +50,14 @@ import { DownloadIcon, GlobeIcon, ShieldIcon } from "@/components/ui/icons";
  * reports the batch instead.
  */
 const BATCH_TOAST_LIMIT = 5;
+
+/**
+ * Rows per page in the queue.
+ *
+ * Twenty fills a tall window without leaving a live progress bar for every
+ * video in a 133-item playlist mounted at once.
+ */
+const QUEUE_PAGE_SIZE = 15;
 
 export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") => void }) {
   const toast = useToast();
@@ -93,6 +102,9 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
   // keystroke, not by a React cleanup — the caller ignores our return value.
   const inspectTimer = useRef<number | null>(null);
   const [filter, setFilter] = useState<QueueFilter>("all");
+  // Which page of the queue is shown. Confirming a playlist can add a hundred
+  // rows at once, and a hundred live progress bars is both unreadable and slow.
+  const [page, setPage] = useState(0);
   const [retrying, setRetrying] = useState(false);
   // Armed by "Retry when finished": fires once nothing is in progress.
   const [retryWhenIdle, setRetryWhenIdle] = useState(false);
@@ -568,6 +580,17 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
     return j.status === "failed";
   });
 
+  const pageCount = Math.max(1, Math.ceil(visibleJobs.length / QUEUE_PAGE_SIZE));
+  // Rows leave under you — "Clear finished", a removal, a job changing status
+  // out of the current filter — so the stored page can end up past the end.
+  // Clamping at render keeps the list from going blank until state catches up.
+  const currentPage = Math.min(page, pageCount - 1);
+  const pageStart = currentPage * QUEUE_PAGE_SIZE;
+  const pagedJobs = visibleJobs.slice(pageStart, pageStart + QUEUE_PAGE_SIZE);
+  useEffect(() => {
+    if (page !== currentPage) setPage(currentPage);
+  }, [page, currentPage]);
+
   return (
     <div className="page">
       <header className="page__header rise">
@@ -681,7 +704,12 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
           <QueueSummary
             counts={counts}
             filter={filter}
-            onFilter={setFilter}
+            onFilter={(f) => {
+              // A new filter is a new list; staying on page 4 of the old one
+              // would show nothing.
+              setFilter(f);
+              setPage(0);
+            }}
             onRetryFailed={requestRetry}
             retrying={retrying}
             armed={retryWhenIdle}
@@ -694,22 +722,34 @@ export function DownloadsPage({ onNavigate }: { onNavigate: (route: "accounts") 
         ) : visibleJobs.length === 0 ? (
           <p className="queue__none">Nothing matches that filter.</p>
         ) : (
-          <div className="stack">
-            {visibleJobs.map((job, i) => (
-              <div
-                key={job.id}
-                className="rise"
-                style={{ animationDelay: `${Math.min(i, 6) * 40}ms` }}
-              >
-                <JobCard
-                  job={job}
-                  onCancel={() => void cancel(job.id)}
-                  onRemove={() => void remove(job.id)}
-                  onReveal={() => job.output_path && void reveal(job.output_path)}
-                />
-              </div>
-            ))}
-          </div>
+          <>
+            <div className="stack">
+              {pagedJobs.map((job, i) => (
+                <div
+                  key={job.id}
+                  className="rise"
+                  style={{ animationDelay: `${Math.min(i, 6) * 40}ms` }}
+                >
+                  <JobCard
+                    job={job}
+                    onCancel={() => void cancel(job.id)}
+                    onRemove={() => void remove(job.id)}
+                    onReveal={() => job.output_path && void reveal(job.output_path)}
+                  />
+                </div>
+              ))}
+            </div>
+            {pageCount > 1 && (
+              <QueuePager
+                page={currentPage}
+                pageCount={pageCount}
+                from={pageStart + 1}
+                to={pageStart + pagedJobs.length}
+                total={visibleJobs.length}
+                onPage={setPage}
+              />
+            )}
+          </>
         )}
       </div>
 

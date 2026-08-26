@@ -528,6 +528,13 @@ impl DownloadManager {
             .await;
         }
 
+        // A channel home page is not one feed but three - Videos, Shorts and
+        // past streams - so it is listed as all of them at once. An explicit
+        // tab link expands to nothing here and is listed as itself.
+        if let Some(feeds) = crate::download::url::youtube_channel_feeds(&url) {
+            return ytdlp::list_channel(&feeds, &url, None).await;
+        }
+
         ytdlp::list_profile(&url, None).await
     }
 

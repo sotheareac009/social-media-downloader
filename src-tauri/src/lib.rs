@@ -1,4 +1,4 @@
-//! Social Media Management.
+//! SocialSync.
 //!
 //! Two independent capabilities, deliberately not wired to each other:
 //!
@@ -16,6 +16,7 @@
 pub mod auth;
 pub mod commands;
 pub mod config;
+pub mod convert;
 pub mod db;
 pub mod download;
 pub mod errors;
@@ -124,6 +125,8 @@ pub fn run() {
                 devices.clone(),
             )));
             app.manage(devices);
+            // One batch conversion at a time; the queue holds that state.
+            app.manage(Arc::new(crate::convert::ConvertQueue::default()));
 
             Ok(())
         })
@@ -164,6 +167,15 @@ pub fn run() {
             commands::download::download_reset_destination,
             commands::download::download_browse_destination,
             commands::download::download_reveal,
+            commands::convert::convert_capabilities,
+            commands::convert::convert_pick_folder,
+            commands::convert::convert_pick_output_dir,
+            commands::convert::convert_scan,
+            commands::convert::convert_start,
+            commands::convert::convert_cancel,
+            commands::convert::convert_pick_file,
+            commands::convert::convert_probe,
+            commands::convert::convert_split,
             commands::facebook::facebook_list_pages,
             commands::facebook::facebook_pick_photo,
             commands::facebook::facebook_upload_photo,

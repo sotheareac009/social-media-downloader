@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Social Media Management",
+  "productName": "SocialSync",
   "version": "0.0.2",
   "identifier": "com.reach.mediadownloader",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Social Media Management",
+        "title": "SocialSync",
         "width": 1160,
         "height": 780,
         "minWidth": 940,

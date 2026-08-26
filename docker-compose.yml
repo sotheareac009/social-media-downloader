@@ -1,4 +1,4 @@
-# Media Downloader — container entry points.
+# SocialSync — container entry points.
 #
 #   docker compose run --rm build     Build Linux binaries into ./dist-docker
 #   docker compose up app             Run the app (Linux host with X11 only)

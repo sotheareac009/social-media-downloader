@@ -1,7 +1,7 @@
 [package]
 name = "media-downloader"
 version = "0.0.2"
-description = "Media Downloader"
+description = "SocialSync"
 authors = ["you"]
 edition = "2021"
 rust-version = "1.77.2"

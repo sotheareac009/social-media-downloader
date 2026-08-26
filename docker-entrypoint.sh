@@ -1,7 +1,7 @@
 #!/bin/sh
 # Fail helpfully instead of panicking.
 #
-# Media Downloader draws a GTK window. With no reachable X server, GTK aborts
+# SocialSync draws a GTK window. With no reachable X server, GTK aborts
 # with "Failed to initialize gtk backend!", which says nothing about the actual
 # cause — a container with no display. This checks first and explains.
 
@@ -38,7 +38,7 @@ is_tcp_display() {
 if [ -z "$DISPLAY" ] || { ! is_tcp_display && ! has_x_socket; }; then
     cat >&2 <<'MSG'
 ------------------------------------------------------------------------
-Media Downloader cannot start: no X display is reachable.
+SocialSync cannot start: no X display is reachable.
 
 This is a desktop app with a native window. A container has no display of
 its own, so one has to be shared in from the host.

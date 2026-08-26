@@ -49,7 +49,7 @@ export function ActivationScreen({
           <ShieldIcon size={20} />
         </div>
 
-        <h1 className="gate__title">Activate Social Media Management</h1>
+        <h1 className="gate__title">Activate SocialSync</h1>
         <p className="gate__lede">
           Enter the licence key from your purchase confirmation to unlock the
           app. It only needs to be entered once on this computer.

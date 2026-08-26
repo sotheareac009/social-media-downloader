@@ -74,11 +74,46 @@ pub enum AppError {
     #[error("Facebook Stories can't be downloaded — no downloader supports them. Regular videos, reels and posts work.")]
     FacebookStoriesUnsupported,
 
+    /// A Facebook profile, page or one of its tabs. Refused with its own
+    /// reason because "no video found at that link" reads as "those reels do
+    /// not exist" rather than "whole profiles are not listable here".
+    #[error("Facebook profiles can't be listed — paste an individual reel or video link instead")]
+    FacebookProfileUnsupported,
+
     /// An Instagram profile or tab, which yt-dlp cannot currently list.
     /// Separated from `UnsupportedUrl` because the answer is "not yet, and
     /// here is the workaround" rather than "wrong kind of link".
     #[error("Instagram profiles can't be listed yet — paste individual reel links instead")]
     InstagramProfileUnsupported,
+
+    // ------------------------------------------------------------- convert
+
+    /// FFmpeg is missing, so nothing can be cut.
+    #[error("FFmpeg isn't installed yet — it's what does the cutting. Install it from the Home page.")]
+    FfmpegMissing,
+
+    /// The file has no video stream ffprobe can read.
+    #[error("that file isn't a video we can read — try an mp4, mov, mkv or webm")]
+    NotAVideo,
+
+    /// The requested number of parts cannot produce usable clips. The payload
+    /// explains which way it was wrong, since "6" and "600" fail differently.
+    #[error("{0}")]
+    SplitCount(String),
+
+    /// FFmpeg ran and refused. Carries its own last line, which never contains
+    /// anything but a file path and a codec name.
+    #[error("the split failed: {0}")]
+    SplitFailed(String),
+
+    /// A batch conversion is already running.
+    #[error("a conversion is already running — wait for it to finish or cancel it")]
+    ConvertBusy,
+
+    /// FFmpeg ran and refused one file. Carries its own last line, which names
+    /// a codec or a path and nothing else.
+    #[error("{0}")]
+    ConvertFailed(String),
 
     /// yt-dlp is not installed or not on PATH.
     #[error("the download engine (yt-dlp) was not found on this system")]
@@ -264,7 +299,14 @@ impl AppError {
             Self::BrowserLaunch => "browser_launch",
             Self::UnsupportedUrl => "unsupported_url",
             Self::FacebookStoriesUnsupported => "facebook_stories_unsupported",
+            Self::FacebookProfileUnsupported => "facebook_profile_unsupported",
             Self::InstagramProfileUnsupported => "instagram_profile_unsupported",
+            Self::FfmpegMissing => "ffmpeg_missing",
+            Self::ConvertBusy => "convert_busy",
+            Self::ConvertFailed(_) => "convert_failed",
+            Self::NotAVideo => "not_a_video",
+            Self::SplitCount(_) => "split_count",
+            Self::SplitFailed(_) => "split_failed",
             Self::EngineMissing => "engine_missing",
             Self::ListerMissing => "lister_missing",
             Self::EngineFailed(_) => "engine_failed",

@@ -364,11 +364,24 @@ pub struct ProfileEntry {
 /// A creator's feed: who they are, and every post found.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProfileListing {
-    /// The handle as the platform spells it.
+    /// The handle as the platform spells it, or the playlist's title.
     pub uploader: String,
     pub profile_url: String,
     pub count: usize,
     pub entries: Vec<ProfileEntry>,
+    /// What was listed. The queueing is identical either way; this only lets
+    /// the confirmation card name it correctly, since "@Best of 2024" reads as
+    /// a broken handle rather than a playlist.
+    pub kind: ListingKind,
+}
+
+/// Whether a listing came from a creator's feed or a playlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ListingKind {
+    #[default]
+    Profile,
+    Playlist,
 }
 
 /// List every video on a profile, without downloading or even opening any.
@@ -400,6 +413,80 @@ pub async fn list_profile(url: &Url, cookies: Option<&std::path::Path>) -> Resul
     }
 
     Err(last)
+}
+
+/// List every upload feed of a channel as one listing.
+///
+/// A channel splits its uploads across Videos, Shorts and past streams, and a
+/// person pasting a channel link means all of them. Each feed is listed
+/// separately because YouTube offers no single "everything" endpoint.
+///
+/// A missing tab is not a failure: most channels have no Shorts tab at all,
+/// and yt-dlp says so with an error rather than an empty list. Only when
+/// *every* feed fails is the first error reported - otherwise one absent tab
+/// would sink a perfectly good channel.
+pub async fn list_channel(
+    feeds: &[Url],
+    channel_url: &Url,
+    cookies: Option<&std::path::Path>,
+) -> Result<ProfileListing> {
+    let mut entries: Vec<ProfileEntry> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut uploader: Option<String> = None;
+    let mut first_error: Option<AppError> = None;
+
+    for feed in feeds {
+        match list_profile(feed, cookies).await {
+            Ok(listing) => {
+                if uploader.is_none() {
+                    uploader = Some(channel_name(&listing.uploader));
+                }
+                for entry in listing.entries {
+                    // The same video can appear in two feeds - a Short that is
+                    // also a past stream - and queueing it twice would
+                    // download the same file twice.
+                    let key = if entry.id.is_empty() {
+                        entry.url.clone()
+                    } else {
+                        entry.id.clone()
+                    };
+                    if seen.insert(key) {
+                        entries.push(entry);
+                    }
+                }
+            }
+            Err(e) => {
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+        }
+    }
+
+    if entries.is_empty() {
+        return Err(first_error.unwrap_or(AppError::NoMediaFound));
+    }
+
+    Ok(ProfileListing {
+        uploader: uploader.unwrap_or_else(|| "this channel".to_string()),
+        profile_url: channel_url.to_string(),
+        count: entries.len(),
+        entries,
+        kind: ListingKind::Profile,
+    })
+}
+
+/// Strip the tab name yt-dlp appends to a feed's title.
+///
+/// Listing `/@NASA/videos` reports the title as "NASA - Videos", which is the
+/// name of a tab, not of the channel the card is about.
+fn channel_name(title: &str) -> String {
+    for suffix in [" - Videos", " - Shorts", " - Live", " - Streams"] {
+        if let Some(base) = title.strip_suffix(suffix) {
+            return base.to_string();
+        }
+    }
+    title.to_string()
 }
 
 async fn list_profile_once(url: &Url, cookies: Option<&std::path::Path>) -> Result<ProfileListing> {
@@ -453,6 +540,13 @@ async fn list_profile_once(url: &Url, cookies: Option<&std::path::Path>) -> Resu
         profile_url: url.to_string(),
         count: entries.len(),
         entries,
+        // `/playlist?list=…` is the only YouTube shape that reaches here as a
+        // playlist; a channel tab is a feed.
+        kind: if url.path().trim_end_matches('/') == "/playlist" {
+            ListingKind::Playlist
+        } else {
+            ListingKind::Profile
+        },
     })
 }
 
@@ -825,6 +919,18 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_feeds_tab_name_is_not_the_channel_name() {
+        // Listing `/@NASA/videos` titles the result "NASA - Videos"; the card
+        // is about the channel, not about one of its tabs.
+        assert_eq!(channel_name("NASA - Videos"), "NASA");
+        assert_eq!(channel_name("NASA - Shorts"), "NASA");
+        assert_eq!(channel_name("NASA - Live"), "NASA");
+        // A channel that genuinely ends that way keeps its name.
+        assert_eq!(channel_name("Cooking with Videos"), "Cooking with Videos");
+        assert_eq!(channel_name("NASA"), "NASA");
+    }
 
     #[test]
     fn parses_a_complete_progress_line() {

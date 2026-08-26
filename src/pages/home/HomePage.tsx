@@ -212,7 +212,7 @@ export function HomePage({ onNavigate }: { onNavigate: (r: Route) => void }) {
       <header className="hero rise">
         <span className="hero__eyebrow">
           <BoltIcon size={12} />
-          Social Media Management
+          SocialSync
         </span>
         <h1 className="hero__title">
           Download and <span className="hero__accent">publish</span>

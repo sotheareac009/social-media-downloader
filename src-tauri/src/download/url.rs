@@ -84,6 +84,73 @@ fn normalise_host(host: &str) -> &str {
     host
 }
 
+/// Facebook paths that are a permalink to one post rather than a page name.
+///
+/// A bare first segment is otherwise read as a username, so every one of these
+/// has to be listed or `facebook.com/watch/?v=1` would be refused as a profile.
+const FACEBOOK_RESERVED: &[&str] = &[
+    "watch", "reel", "reels", "video", "photo", "share", "groups", "media",
+    "plugins", "marketplace", "events", "gaming", "pages", "p", "login",
+    "help", "story", "stories", "permalink", "l", "privacy", "policies",
+];
+
+/// Facebook tabs that list a page's posts rather than naming one.
+const FACEBOOK_TABS: &[&str] = &[
+    "videos", "reels", "photos", "posts", "live", "about", "reviews", "shop",
+    "events", "albums", "photos_albums", "community", "followers", "friends",
+];
+
+/// Whether a Facebook link points at a person or page instead of one post.
+///
+/// Neither yt-dlp nor gallery-dl can enumerate a Facebook page - yt-dlp has no
+/// listing extractor for it, and gallery-dl's Facebook support covers photos
+/// and albums, with no reels tab at all. So this is refused at the door with a
+/// reason, rather than queued to fail later as "no video found", which reads
+/// as "those reels do not exist".
+///
+/// `host` is checked by the caller: this must never run for `fb.watch`, whose
+/// single path segment is a share code, not a username.
+fn is_facebook_profile(url: &Url) -> bool {
+    // `profile.php?id=…` and `/people/<name>/<id>` are the id-based spellings
+    // of a profile, whatever tab they carry.
+    let path = url.path().trim_end_matches('/');
+    if path.eq_ignore_ascii_case("/profile.php") {
+        return true;
+    }
+
+    let segments: Vec<&str> = url
+        .path_segments()
+        .map(|s| s.filter(|p| !p.is_empty()).collect())
+        .unwrap_or_default();
+
+    let first = segments.first().copied().unwrap_or("");
+    if first.eq_ignore_ascii_case("people") {
+        return true;
+    }
+
+    // `?sk=reels_tab`, `?sk=videos` - the tab is named in the query, so the
+    // path alone would look like a plain profile.
+    if url.query_pairs().any(|(k, _)| k == "sk") {
+        return true;
+    }
+
+    let reserved = |s: &str| {
+        let s = s.to_ascii_lowercase();
+        FACEBOOK_RESERVED.contains(&s.as_str()) || s.ends_with(".php")
+    };
+
+    match segments.as_slice() {
+        // A bare page or username.
+        [handle] => !handle.is_empty() && !reserved(handle),
+        // `<page>/videos` is the tab; `<page>/videos/<id>` is one video, and
+        // `<page>/posts/<id>` one post, so only the two-segment form matches.
+        [handle, tab] => {
+            !reserved(handle) && FACEBOOK_TABS.contains(&tab.to_ascii_lowercase().as_str())
+        }
+        _ => false,
+    }
+}
+
 /// Instagram Stories, which yt-dlp's `InstagramStoryIE` handles with a session:
 /// `/stories/<user>`, `/stories/<user>/<id>`, `/stories/highlights/<id>`.
 fn is_instagram_story(url: &Url) -> bool {
@@ -201,11 +268,10 @@ fn classify_youtube(mut url: Url) -> (Source, Url, TargetKind) {
         || ((first == "channel" || first == "c" || first == "user") && segments.len() == 2);
 
     if is_channel_root {
-        // `@handle/videos` and `@handle/shorts` are already feeds; a bare
-        // handle is the channel home and needs the uploads tab.
-        if segments.len() == 1 || (first.starts_with('@') && segments.len() == 1) {
-            url.set_path(&format!("/{first}/videos"));
-        }
+        // Left as the channel home on purpose. The caller expands it into the
+        // feeds below, because "everything they posted" is Videos *plus*
+        // Shorts plus past streams - rewriting to `/videos` here would quietly
+        // drop every Short a channel has.
         return (Source::YouTube, url, TargetKind::Profile);
     }
 
@@ -217,6 +283,48 @@ fn classify_youtube(mut url: Url) -> (Source, Url, TargetKind) {
     // Everything else - /watch?v=, /shorts/ID, youtu.be/ID, /live/ID - is one
     // video.
     (Source::YouTube, url, TargetKind::Single)
+}
+
+/// The tabs that together hold everything a channel has posted.
+///
+/// YouTube splits uploads across three feeds and a channel's home page lists
+/// none of them directly: asking yt-dlp for `youtube.com/@NASA` returns the
+/// channel's *tabs* as entries with no URL, which cannot be queued. Naming the
+/// feeds explicitly is what turns a channel link into a list of videos.
+const YOUTUBE_CHANNEL_FEEDS: &[&str] = &["videos", "shorts", "streams"];
+
+/// Expand a channel home page into its upload feeds.
+///
+/// `None` for anything else, including a link that already names one feed:
+/// pasting `/@handle/shorts` is a choice, and answering it with the long-form
+/// uploads as well would ignore what was asked for.
+pub fn youtube_channel_feeds(url: &Url) -> Option<Vec<Url>> {
+    let segments: Vec<&str> = url
+        .path_segments()
+        .map(|s| s.filter(|p| !p.is_empty()).collect())
+        .unwrap_or_default();
+
+    let base = match segments.as_slice() {
+        [handle] if handle.starts_with('@') && handle.len() > 1 => format!("/{handle}"),
+        [kind, name] if matches!(*kind, "channel" | "c" | "user") && !name.is_empty() => {
+            format!("/{kind}/{name}")
+        }
+        _ => return None,
+    };
+
+    Some(
+        YOUTUBE_CHANNEL_FEEDS
+            .iter()
+            .map(|feed| {
+                let mut u = url.clone();
+                u.set_path(&format!("{base}/{feed}"));
+                // A channel link often carries `?si=` or a `pp=` tracking blob;
+                // neither means anything on a feed URL.
+                u.set_query(None);
+                u
+            })
+            .collect(),
+    )
 }
 
 /// A TikTok profile is `/@handle` and nothing more.
@@ -240,8 +348,30 @@ fn is_tiktok_profile(url: &Url) -> bool {
 }
 
 /// Classify a pasted link, or explain why it was refused.
+/// Parse a link the way it arrives from a paste.
+///
+/// Browsers and mobile share sheets hand out `youtube.com/watch?v=...` with no
+/// scheme, and copying from the address bar drops it too. A strict parse turns
+/// that into "unsupported link", which reads as the app not supporting YouTube
+/// rather than as a missing `https://`, so a scheme-less string is retried as
+/// https.
+///
+/// Only `RelativeUrlWithoutBase` — the error meaning "no scheme at all" — takes
+/// that path. Anything that did name a scheme keeps it and faces the https-only
+/// check below, so `file:///etc/passwd` is still refused.
+fn parse_pasted(raw: &str) -> Result<Url> {
+    let raw = raw.trim();
+    match Url::parse(raw) {
+        Ok(u) => Ok(u),
+        Err(url::ParseError::RelativeUrlWithoutBase) => {
+            Url::parse(&format!("https://{raw}")).map_err(|_| AppError::UnsupportedUrl)
+        }
+        Err(_) => Err(AppError::UnsupportedUrl),
+    }
+}
+
 pub fn classify(raw: &str) -> Result<(Source, Url)> {
-    let parsed = Url::parse(raw.trim()).map_err(|_| AppError::UnsupportedUrl)?;
+    let parsed = parse_pasted(raw)?;
 
     // `https` only. `http` is upgraded rather than rejected, because people
     // paste it constantly and the redirect would happen anyway.
@@ -273,6 +403,11 @@ pub fn classify(raw: &str) -> Result<(Source, Url)> {
             .unwrap_or(false)
         {
             return Err(AppError::FacebookStoriesUnsupported);
+        }
+        // `fb.watch/<code>` is a share link, not a username, so the profile
+        // shapes are only meaningful on facebook.com itself.
+        if host != "fb.watch" && is_facebook_profile(&parsed) {
+            return Err(AppError::FacebookProfileUnsupported);
         }
         Ok((Source::Facebook, parsed))
     } else if TIKTOK_HOSTS.contains(&host) {
@@ -323,6 +458,72 @@ mod tests {
         for (raw, want) in cases {
             let (got, _) = classify(raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
             assert_eq!(got, want, "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_paste_with_no_scheme_is_treated_as_https() {
+        // What the address bar and the mobile share sheet actually hand over.
+        for raw in [
+            "youtube.com/watch?v=uY6N9nWim4g&list=RDuY6N9nWim4g&start_radio=1",
+            "www.tiktok.com/@user/video/7300000000000000000",
+            "youtu.be/ApXoWvfEYVU?si=WJ6fGva7BBFeqTbD",
+        ] {
+            let (_, url) = classify(raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
+            assert_eq!(url.scheme(), "https", "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_scheme_that_is_not_http_stays_refused() {
+        // The https-only rule is what keeps the paste box from reading local
+        // files; filling in a missing scheme must not weaken it.
+        for raw in [
+            "file:///etc/passwd",
+            "file://youtube.com/watch?v=1",
+            "javascript:alert(1)",
+            "data:text/html,<script>",
+        ] {
+            assert!(classify(raw).is_err(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn facebook_profiles_and_tabs_are_refused_with_their_own_reason() {
+        // Nothing can list a Facebook page, so the refusal has to say that
+        // rather than surfacing later as "no video found at that link".
+        for raw in [
+            "https://www.facebook.com/profile.php?id=61558591106716&sk=reels_tab",
+            "https://www.facebook.com/people/Boss-KLOD/61558591106716/?sk=reels_tab",
+            "https://www.facebook.com/BossKLOD",
+            "https://www.facebook.com/BossKLOD/reels",
+            "https://www.facebook.com/BossKLOD/videos",
+            "https://www.facebook.com/BossKLOD/photos",
+            "https://m.facebook.com/BossKLOD/posts",
+        ] {
+            match classify(raw) {
+                Err(AppError::FacebookProfileUnsupported) => {}
+                other => panic!("{raw}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_facebook_links_that_do_work_are_untouched() {
+        // The refusal above must not swallow a single post: a share code is
+        // not a username, and `<page>/videos/<id>` is one video, not the tab.
+        for raw in [
+            "https://www.facebook.com/watch/?v=123456",
+            "https://www.facebook.com/reel/1234567890",
+            "https://fb.watch/aBcDeFg/",
+            "https://www.facebook.com/share/r/199xesnx3h/",
+            "https://www.facebook.com/share/v/1CkYu6tToZ/",
+            "https://m.facebook.com/story.php?story_fbid=1&id=2",
+            "https://www.facebook.com/BossKLOD/videos/1234567890",
+            "https://www.facebook.com/BossKLOD/posts/1234567890",
+        ] {
+            let (source, _) = classify(raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
+            assert_eq!(source, Source::Facebook, "{raw}");
         }
     }
 
@@ -380,14 +581,20 @@ mod tests {
             "https://www.tiktok.com/@raimqqq/video/7674870647071296789",
             "https://www.tiktok.com/@raimqqq/live",
             "https://vm.tiktok.com/ZMabcdef/",
-            // Facebook has no profile form at all - yt-dlp cannot list a page.
-            "https://www.facebook.com/nasa/videos",
             "https://www.facebook.com/share/r/199xesnx3h/",
         ];
         for raw in single {
             let (_, _, kind) = classify_target(raw).unwrap();
             assert_eq!(kind, TargetKind::Single, "{raw}");
         }
+
+        // Facebook has no profile form at all - nothing can list a page - so
+        // its tabs are refused rather than queued as a single post that then
+        // fails with a misleading "no video found".
+        assert!(matches!(
+            classify_target("https://www.facebook.com/nasa/videos"),
+            Err(AppError::FacebookProfileUnsupported)
+        ));
     }
 
     #[test]
@@ -479,12 +686,47 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_youtube_channel_is_normalised_to_its_uploads_feed() {
+    fn a_bare_youtube_channel_expands_into_all_three_upload_feeds() {
         // Without this, yt-dlp lists the channel's *tabs* - entries with no
-        // URL - and the profile card would show nothing to download.
+        // URL - and the profile card would show nothing to download. Listing
+        // only `/videos`, which is what this used to do, silently skipped
+        // every Short on channels that post them.
         let (_, url, kind) = classify_target("https://www.youtube.com/@NASA").unwrap();
         assert_eq!(kind, TargetKind::Profile);
-        assert_eq!(url.path(), "/@NASA/videos");
+        assert_eq!(url.path(), "/@NASA");
+
+        let feeds = youtube_channel_feeds(&url).expect("channel home expands");
+        let paths: Vec<&str> = feeds.iter().map(|u| u.path()).collect();
+        assert_eq!(paths, ["/@NASA/videos", "/@NASA/shorts", "/@NASA/streams"]);
+    }
+
+    #[test]
+    fn the_older_channel_url_shapes_expand_too() {
+        for raw in [
+            "https://www.youtube.com/channel/UCLA_DiR1FfKNvjuUpBHmylQ",
+            "https://www.youtube.com/c/NASA",
+            "https://www.youtube.com/user/NASAtelevision",
+        ] {
+            let (_, url, _) = classify_target(raw).unwrap();
+            let feeds = youtube_channel_feeds(&url).unwrap_or_else(|| panic!("{raw}"));
+            assert_eq!(feeds.len(), 3, "{raw}");
+            assert!(feeds[0].path().ends_with("/videos"), "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_link_that_already_names_one_feed_is_not_expanded() {
+        // Pasting `/shorts` is a choice; answering it with the long-form
+        // uploads as well would ignore what was asked for.
+        for raw in [
+            "https://www.youtube.com/@NASA/videos",
+            "https://www.youtube.com/@NASA/shorts",
+            "https://www.youtube.com/playlist?list=PL123",
+            "https://www.youtube.com/watch?v=abc",
+        ] {
+            let (_, url, _) = classify_target(raw).unwrap();
+            assert!(youtube_channel_feeds(&url).is_none(), "{raw}");
+        }
     }
 
     #[test]

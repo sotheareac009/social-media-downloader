@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# Media Downloader — containerised build and run.
+# SocialSync — containerised build and run.
 #
 # WHAT THIS IS FOR. This is a Tauri desktop application: it draws a native
 # window. A container has no display of its own, so this image is useful for
@@ -122,7 +122,7 @@ COPY --from=build /app/src-tauri/target/release/media-downloader /usr/local/bin/
 COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 # Where downloads land inside the container; docker-compose maps this to the
-# host. The app defaults to ~/Downloads/Media Downloader.
+# host. The app defaults to ~/Downloads/SocialSync.
 RUN mkdir -p /home/app/Downloads
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
