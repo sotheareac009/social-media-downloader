@@ -10,6 +10,7 @@
     "core:event:default",
     "opener:default",
     "updater:default",
-    "process:allow-restart"
+    "process:allow-restart",
+    "core:app:allow-version"
   ]
 }

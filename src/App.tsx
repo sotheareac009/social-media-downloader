@@ -392,7 +392,7 @@ function Sidebar({
       <NetIndicator />
 
       <div className="sidebar__footer">
-        <UpdateBadge version="v0.0.2" />
+        <UpdateBadge />
         <button
           className="iconbutton"
           type="button"

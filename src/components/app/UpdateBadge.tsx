@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useToast } from "@/components/ui/Toast";
 import { DownloadIcon } from "@/components/ui/icons";
+import { getVersion } from "@tauri-apps/api/app";
 import { checkForUpdate, installUpdate, type UpdateInfo } from "@/lib/updates";
 
 type State = "idle" | "checking" | "available" | "installing";
@@ -17,8 +18,12 @@ type State = "idle" | "checking" | "available" | "installing";
  * build with no release, or a network blip must not produce a toast at every
  * launch. Only a check the user asked for reports that it found nothing.
  */
-export function UpdateBadge({ version }: { version: string }) {
+export function UpdateBadge() {
   const toast = useToast();
+  // Read from the built app rather than passed in: a hardcoded string drifts
+  // from the real version the moment someone bumps one and not the other, and
+  // it is the number people quote in bug reports.
+  const [version, setVersion] = useState("");
   const [state, setState] = useState<State>("idle");
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [percent, setPercent] = useState<number | null>(null);
@@ -44,6 +49,12 @@ export function UpdateBadge({ version }: { version: string }) {
     },
     [toast, version],
   );
+
+  useEffect(() => {
+    void getVersion()
+      .then((v) => mounted.current && setVersion(`v${v}`))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     void runCheck(false);
@@ -102,7 +113,7 @@ export function UpdateBadge({ version }: { version: string }) {
       disabled={state === "checking"}
       title="Check for updates"
     >
-      {state === "checking" ? "Checking…" : version}
+      {state === "checking" ? "Checking…" : version || "…"}
     </button>
   );
 }

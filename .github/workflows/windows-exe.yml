@@ -138,6 +138,11 @@ jobs:
         # cargo test. Vite exposes VITE_*-prefixed process env to the client;
         # LICENSE_DISABLED is read by Rust's option_env! at compile time.
         env:
+          # Required now that the bundle produces updater artefacts: without a
+          # key `tauri build` refuses to run at all, and an installer built
+          # without one could never be updated to.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           VITE_HIDE_UPLOAD: ${{ inputs.hide_upload }}
           VITE_HIDE_PUBLISHING: ${{ inputs.hide_publishing }}
           VITE_UPLOAD_HIDDEN_TARGETS: ${{ inputs.upload_hidden_targets }}
