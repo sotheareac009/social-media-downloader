@@ -50,6 +50,7 @@ const LEGACY_KEYRING_ACCOUNT: &str = "instagram-session";
 pub enum SessionKind {
     Instagram,
     Facebook,
+    TikTok,
     X,
 }
 
@@ -58,6 +59,7 @@ impl SessionKind {
         match self {
             SessionKind::Instagram => "instagram-session.json",
             SessionKind::Facebook => "facebook-session.json",
+            SessionKind::TikTok => "tiktok-session.json",
             SessionKind::X => "x-session.json",
         }
     }
@@ -75,6 +77,9 @@ impl SessionKind {
             // CSRF token yt-dlp must send as `x-csrf-token`. Requiring both
             // makes the capture wait until `ct0` is set (it appears a moment
             // after login) instead of grabbing a session yt-dlp can't use.
+            // TikTok's login cookie. `sessionid_ss` is the same value under a
+            // second name, so requiring one of them is requiring the login.
+            SessionKind::TikTok => &["sessionid"],
             SessionKind::X => &["auth_token", "ct0"],
         }
     }
@@ -85,6 +90,7 @@ impl SessionKind {
         match self {
             SessionKind::Instagram => d == "instagram.com" || d.ends_with(".instagram.com"),
             SessionKind::Facebook => d == "facebook.com" || d.ends_with(".facebook.com"),
+            SessionKind::TikTok => d == "tiktok.com" || d.ends_with(".tiktok.com"),
             SessionKind::X => {
                 d == "x.com"
                     || d.ends_with(".x.com")
@@ -133,6 +139,142 @@ impl WebSession {
     }
 }
 
+/// Read a Netscape cookie file - the format every cookie-exporting extension
+/// and `curl`/`wget`/`yt-dlp` share.
+///
+/// Seven tab-separated fields per line:
+///
+/// ```text
+/// .facebook.com	TRUE	/	TRUE	1819287955	c_user	100000000000000
+/// domain      	sub 	path	secure	expires  	name  	value
+/// ```
+///
+/// SPLIT ON TABS, NOT WHITESPACE. A cookie value may legitimately contain
+/// spaces, and splitting loosely would truncate it - producing a session that
+/// looks complete and fails at the first request.
+///
+/// Cookies for other domains are dropped rather than stored: a paste from a
+/// browser export can carry an entire profile, and this app has no business
+/// keeping a Google or bank cookie because it appeared in the clipboard.
+pub fn parse_netscape(text: &str, kind: SessionKind) -> Result<WebSession> {
+    let mut cookies = Vec::new();
+    let mut saw_other_domain = false;
+
+    for line in text.lines() {
+        let line = line.trim_end_matches(['\r', '\n']);
+        // `#HttpOnly_` is a real prefix on a real cookie line; every other
+        // `#` line is a comment.
+        let line = match line.strip_prefix("#HttpOnly_") {
+            Some(rest) => rest,
+            None if line.trim_start().starts_with('#') => continue,
+            None => line,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let fields: Vec<&str> = line.split('\t').collect();
+        // Some exports use spaces; fall back only when the line has no tabs at
+        // all, and only for the first six fields, so a value keeps its spaces.
+        let fields: Vec<&str> = if fields.len() >= 7 {
+            fields
+        } else {
+            let mut parts = line.splitn(7, char::is_whitespace).collect::<Vec<_>>();
+            parts.retain(|p| !p.is_empty());
+            parts
+        };
+        if fields.len() < 7 {
+            continue;
+        }
+
+        let domain = fields[0].trim();
+        if !kind.domain_matches(domain) {
+            saw_other_domain = true;
+            continue;
+        }
+
+        let name = fields[5].trim();
+        if name.is_empty() {
+            continue;
+        }
+
+        cookies.push(StoredCookie {
+            name: name.to_string(),
+            value: fields[6].trim().to_string(),
+            domain: domain.to_string(),
+            path: {
+                let p = fields[2].trim();
+                if p.is_empty() { "/".to_string() } else { p.to_string() }
+            },
+            secure: fields[3].trim().eq_ignore_ascii_case("TRUE"),
+            expires: fields[4].trim().parse::<i64>().unwrap_or(0),
+        });
+    }
+
+    if cookies.is_empty() {
+        return Err(AppError::CookieImport(if saw_other_domain {
+            format!(
+                "Those cookies are for another site — none of them are {}.",
+                kind.display_name()
+            )
+        } else {
+            "That doesn't look like a cookie file. Paste the whole export, including the lines starting with a dot.".into()
+        }));
+    }
+
+    let session = WebSession {
+        cookies,
+        captured_at: crate::auth::now_unix(),
+    };
+
+    if !session.is_usable_for(kind) {
+        let missing: Vec<&str> = kind
+            .required_cookies()
+            .iter()
+            .copied()
+            .filter(|need| {
+                !session
+                    .cookies
+                    .iter()
+                    .any(|c| c.name == *need && !c.value.is_empty())
+            })
+            .collect();
+        return Err(AppError::CookieImport(format!(
+            "These {} cookies are missing the ones that prove a login ({}). Export again while signed in.",
+            kind.display_name(),
+            missing.join(", ")
+        )));
+    }
+
+    Ok(session)
+}
+
+impl SessionKind {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            SessionKind::Instagram => "Instagram",
+            SessionKind::Facebook => "Facebook",
+            SessionKind::TikTok => "TikTok",
+            SessionKind::X => "X",
+        }
+    }
+
+    /// The soonest expiry among the cookies that prove the login, or `None`
+    /// when they are session cookies with no stated expiry.
+    ///
+    /// Checked before any network call: an expired jar can be reported
+    /// instantly and honestly, without asking the platform.
+    pub fn soonest_required_expiry(self, session: &WebSession) -> Option<i64> {
+        session
+            .cookies
+            .iter()
+            .filter(|c| self.required_cookies().contains(&c.name.as_str()))
+            .filter(|c| c.expires > 0)
+            .map(|c| c.expires)
+            .min()
+    }
+}
+
 /// Non-secret view for the UI. Deliberately carries no cookie value - the
 /// frontend never needs one and must never be able to read one.
 #[derive(Debug, Clone, Serialize)]
@@ -166,6 +308,7 @@ fn profile_key(kind: SessionKind) -> &'static str {
     match kind {
         SessionKind::Instagram => "instagram",
         SessionKind::Facebook => "facebook",
+        SessionKind::TikTok => "tiktok",
         SessionKind::X => "x",
     }
 }
@@ -329,6 +472,78 @@ pub fn clear(dir: &Path, kind: SessionKind) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A realistic export, tabs and all. Values here are fabricated.
+    const SAMPLE: &str = "# Netscape HTTP Cookie File\n# https://curl.haxx.se/rfc/cookie_spec.html\n# This is a generated file! Do not edit.\n\n.facebook.com\tTRUE\t/\tTRUE\t1822186051\tdatr\tAAAAAAAAAAAAAAAA\n.facebook.com\tTRUE\t/\tTRUE\t1819287955\tc_user\t100000000000000\n.facebook.com\tTRUE\t/\tTRUE\t1819287955\txs\t99%3Aabcdef%3A2%3A1787626233\n.google.com\tTRUE\t/\tTRUE\t1822186051\tSID\tsomething-else\n";
+
+    #[test]
+    fn a_pasted_export_becomes_a_usable_session() {
+        let session = parse_netscape(SAMPLE, SessionKind::Facebook).unwrap();
+        assert!(session.is_usable_for(SessionKind::Facebook));
+        // The login cookies survived, with their values intact.
+        let xs = session.cookies.iter().find(|c| c.name == "xs").unwrap();
+        assert_eq!(xs.value, "99%3Aabcdef%3A2%3A1787626233");
+        assert_eq!(xs.expires, 1819287955);
+        assert!(xs.secure);
+        assert_eq!(xs.path, "/");
+    }
+
+    #[test]
+    fn cookies_for_other_sites_are_dropped_not_stored() {
+        // A browser export can carry a whole profile; this app has no business
+        // keeping a Google cookie because it was on the clipboard.
+        let session = parse_netscape(SAMPLE, SessionKind::Facebook).unwrap();
+        assert!(session.cookies.iter().all(|c| c.domain.contains("facebook")));
+        assert!(!session.cookies.iter().any(|c| c.name == "SID"));
+    }
+
+    #[test]
+    fn comments_and_blank_lines_are_ignored_but_httponly_lines_are_not() {
+        let with_httponly = "#HttpOnly_.instagram.com\tTRUE\t/\tTRUE\t1819287955\tsessionid\tabc123\n";
+        let session = parse_netscape(with_httponly, SessionKind::Instagram).unwrap();
+        assert!(session.is_usable_for(SessionKind::Instagram));
+    }
+
+    #[test]
+    fn a_paste_missing_the_login_cookies_says_which_ones() {
+        // datr alone is what an anonymous visitor has.
+        let anon = ".facebook.com\tTRUE\t/\tTRUE\t1822186051\tdatr\tAAAA\n";
+        let err = parse_netscape(anon, SessionKind::Facebook).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("c_user"), "{msg}");
+        assert!(msg.contains("xs"), "{msg}");
+    }
+
+    #[test]
+    fn a_paste_for_the_wrong_platform_says_so() {
+        let err = parse_netscape(SAMPLE, SessionKind::Instagram).unwrap_err();
+        assert!(err.to_string().contains("another site"), "{err}");
+    }
+
+    #[test]
+    fn nonsense_is_an_error_rather_than_an_empty_session() {
+        for text in ["", "hello", "not\ta\tcookie"] {
+            assert!(parse_netscape(text, SessionKind::Facebook).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_expiry_in_the_past_is_visible_without_asking_the_platform() {
+        let session = parse_netscape(SAMPLE, SessionKind::Facebook).unwrap();
+        let soonest = SessionKind::Facebook
+            .soonest_required_expiry(&session)
+            .unwrap();
+        assert_eq!(soonest, 1819287955);
+    }
+
+    #[test]
+    fn a_value_containing_a_space_is_not_truncated() {
+        // Splitting on whitespace instead of tabs would silently cut this in
+        // half, producing a session that fails at the first request.
+        let line = ".instagram.com\tTRUE\t/\tTRUE\t1819287955\tsessionid\tabc def\n";
+        let session = parse_netscape(line, SessionKind::Instagram).unwrap();
+        assert_eq!(session.cookies[0].value, "abc def");
+    }
 
     fn cookie(name: &str, value: &str) -> StoredCookie {
         StoredCookie {

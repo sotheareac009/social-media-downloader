@@ -31,6 +31,9 @@ pub async fn fetch(kind: SessionKind, cookies: &[StoredCookie]) -> Option<Sessio
         SessionKind::Facebook => fetch_facebook(cookies).await,
         // X has no cheap cookie-only "who am I" endpoint; the session still
         // works for downloads, just without a name/avatar to show.
+        // Neither platform exposes a name to a plain cookie request; the card
+        // stays nameless rather than guessing one.
+        SessionKind::TikTok => None,
         SessionKind::X => None,
     }
 }

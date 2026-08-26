@@ -369,6 +369,134 @@ async fn capture_session(
     }
 }
 
+/// What a liveness check concluded.
+#[derive(serde::Serialize)]
+pub struct CookieCheck {
+    /// True only when the platform answered as a signed-in user.
+    pub alive: bool,
+    /// Plain-language outcome, safe to show. Never quotes a cookie.
+    pub message: String,
+    /// The account the cookies belong to, when the platform said.
+    pub display_name: Option<String>,
+    /// When the login cookies stop working, if they state it.
+    pub expires_at: Option<i64>,
+}
+
+fn session_kind(name: &str) -> Result<SessionKind> {
+    match name {
+        "instagram" => Ok(SessionKind::Instagram),
+        "facebook" => Ok(SessionKind::Facebook),
+        "tiktok" => Ok(SessionKind::TikTok),
+        "x" => Ok(SessionKind::X),
+        other => Err(AppError::UnknownProvider(other.to_string())),
+    }
+}
+
+/// Store cookies pasted from a browser export.
+///
+/// The alternative to the login window: some accounts cannot complete a login
+/// inside an embedded webview at all - a checkpoint, two-factor, or a
+/// "suspicious device" wall - and for those, cookies already obtained in a
+/// real browser are the only way through.
+#[tauri::command]
+pub async fn download_session_import_cookies(
+    manager: State<'_, Arc<DownloadManager>>,
+    platform: String,
+    text: String,
+) -> Result<SessionStatus> {
+    let kind = session_kind(&platform)?;
+    // Parsing rejects a paste that is for another site, or that carries only
+    // the cookies an anonymous visitor has.
+    let session = crate::download::session::parse_netscape(&text, kind)?;
+    manager.session_remember(kind, &session)?;
+
+    // Best-effort, exactly as the login window does it: a name makes the card
+    // readable, and a failure here never invalidates working cookies.
+    if let Some(profile) = crate::download::profile::fetch(kind, &session.cookies).await {
+        let _ = manager.session_set_profile(kind, &profile);
+    }
+    Ok(manager.session_status(kind))
+}
+
+/// Ask the platform whether the stored cookies still work.
+///
+/// Two steps, cheapest first: a stated expiry in the past is a definite answer
+/// with no request at all. Otherwise the platform is asked, and only a reply
+/// that names the account counts as alive - a page that loads for logged-out
+/// visitors proves nothing.
+#[tauri::command]
+pub async fn download_session_check(
+    manager: State<'_, Arc<DownloadManager>>,
+    platform: String,
+) -> Result<CookieCheck> {
+    let kind = session_kind(&platform)?;
+    let Some(session) = manager.session_for(kind) else {
+        return Ok(CookieCheck {
+            alive: false,
+            message: format!("No {} cookies saved yet.", kind.display_name()),
+            display_name: None,
+            expires_at: None,
+        });
+    };
+
+    let expires_at = kind.soonest_required_expiry(&session);
+    let now = crate::auth::now_unix();
+    if let Some(expiry) = expires_at {
+        if expiry <= now {
+            return Ok(CookieCheck {
+                alive: false,
+                message: "These cookies have expired — export them again.".into(),
+                display_name: None,
+                expires_at,
+            });
+        }
+    }
+
+    match crate::download::profile::fetch(kind, &session.cookies).await {
+        Some(profile) => Ok(CookieCheck {
+            alive: true,
+            message: match &profile.display_name {
+                Some(name) => format!("Signed in as {name}."),
+                None => "Cookies still work.".into(),
+            },
+            display_name: profile.display_name,
+            expires_at,
+        }),
+        // A failed profile read is genuinely ambiguous - it can be a dead
+        // session or a blocked request - and saying which would be a guess.
+        None => Ok(CookieCheck {
+            alive: false,
+            message: format!(
+                "{} didn't answer as a signed-in user. The cookies may have expired, or the request was blocked.",
+                kind.display_name()
+            ),
+            display_name: None,
+            expires_at,
+        }),
+    }
+}
+
+/// The stored session for a platform, for a card that renders itself.
+#[tauri::command]
+pub async fn download_session_status(
+    manager: State<'_, Arc<DownloadManager>>,
+    platform: String,
+) -> Result<SessionStatus> {
+    Ok(manager.session_status(session_kind(&platform)?))
+}
+
+/// Forget the stored cookies for a platform.
+///
+/// Deletes the session file rather than blanking it: a jar that is "cleared"
+/// but still on disk is the kind of thing that turns up in a backup later.
+#[tauri::command]
+pub async fn download_session_clear(
+    manager: State<'_, Arc<DownloadManager>>,
+    platform: String,
+) -> Result<SessionStatus> {
+    manager.session_forget(session_kind(&platform)?)
+}
+
 #[tauri::command]
 pub async fn download_instagram_connect(
     app: AppHandle,

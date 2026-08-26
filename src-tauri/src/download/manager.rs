@@ -30,6 +30,7 @@ fn session_kind_for(source: Source) -> Option<SessionKind> {
     match source {
         Source::Instagram => Some(SessionKind::Instagram),
         Source::Facebook => Some(SessionKind::Facebook),
+        Source::TikTok => Some(SessionKind::TikTok),
         Source::X => Some(SessionKind::X),
         _ => None,
     }
@@ -229,6 +230,9 @@ impl DownloadManager {
                 if let Some(at) = saved.x_connected_at {
                     m.insert(SessionKind::X, at);
                 }
+                if let Some(at) = saved.tiktok_connected_at {
+                    m.insert(SessionKind::TikTok, at);
+                }
                 m
             }),
             session_cache: Mutex::new(HashMap::new()),
@@ -362,6 +366,15 @@ impl DownloadManager {
         self.session_forget(SessionKind::X)
     }
 
+    /// The stored session for a platform, if one is saved and usable.
+    ///
+    /// Returns the cookies themselves, so callers can ask the platform whether
+    /// they still work. Nothing derived from this may reach the frontend -
+    /// `SessionStatus` is the type that crosses that boundary.
+    pub fn session_for(&self, kind: SessionKind) -> Option<WebSession> {
+        self.cached_session(kind).map(|s| (*s).clone())
+    }
+
     pub fn prefer_compatible(&self) -> bool {
         *self.prefer_compatible.lock().expect("compat lock")
     }
@@ -402,6 +415,7 @@ impl DownloadManager {
             instagram_connected_at: self.marker(SessionKind::Instagram),
             facebook_connected_at: self.marker(SessionKind::Facebook),
             x_connected_at: self.marker(SessionKind::X),
+            tiktok_connected_at: self.marker(SessionKind::TikTok),
             prefer_compatible: self.prefer_compatible(),
         }
         .save(&self.config_dir)

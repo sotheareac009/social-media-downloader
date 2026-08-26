@@ -12,6 +12,17 @@ import {
   type ProviderId,
 } from "@/lib/auth";
 import { AccountCard } from "@/components/accounts/AccountCard";
+import { CookiePanel } from "@/components/accounts/CookiePanel";
+import type { CookiePlatform } from "@/lib/download";
+
+/**
+ * Providers whose downloads can use a pasted cookie jar.
+ *
+ * Google is absent because YouTube downloads need no session at all, and
+ * Telegram because it is not a cookie login — it has its own card and its own
+ * MTProto sign-in.
+ */
+const COOKIE_PLATFORMS = ["instagram", "facebook", "tiktok", "x"];
 import {
   facebookConnect,
   xConnect,
@@ -386,6 +397,10 @@ export function AccountsPage({
                               </button>
                             </div>
                           )}
+                          <CookiePanel
+                            platform="x"
+                            label={descriptor.display_name}
+                          />
                         </div>
                       ) : descriptor.id === "google" && ytAccounts.length > 0 ? (
                         <div className="yt-uploaders">
@@ -426,6 +441,28 @@ export function AccountsPage({
                             Add more from the Upload page.
                           </div>
                         </div>
+                      ) : COOKIE_PLATFORMS.includes(descriptor.id) ? (
+                        <CookiePanel
+                          platform={descriptor.id as CookiePlatform}
+                          label={descriptor.display_name}
+                          // Instagram and Facebook are tracked by this page
+                          // already, so their cards stay in step; the rest let
+                          // the panel read its own status.
+                          connected={
+                            descriptor.id === "instagram"
+                              ? igDownload?.connected === true
+                              : descriptor.id === "facebook"
+                                ? fbDownload?.connected === true
+                                : undefined
+                          }
+                          onSaved={
+                            descriptor.id === "instagram"
+                              ? setIgDownload
+                              : descriptor.id === "facebook"
+                                ? setFbDownload
+                                : undefined
+                          }
+                        />
                       ) : undefined
                     }
                   />

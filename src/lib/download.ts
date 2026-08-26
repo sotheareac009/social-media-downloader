@@ -89,6 +89,40 @@ export interface ProfileListing {
   kind: "profile" | "playlist";
 }
 
+/** Platforms whose downloads can use a pasted cookie jar. */
+export type CookiePlatform = "instagram" | "facebook" | "tiktok" | "x";
+
+/** What a liveness check concluded. Never carries a cookie value. */
+export interface CookieCheck {
+  alive: boolean;
+  message: string;
+  display_name: string | null;
+  /** Unix seconds, when the login cookies state an expiry. */
+  expires_at: number | null;
+}
+
+/**
+ * Store cookies pasted from a browser export (Netscape format).
+ *
+ * The text never touches the frontend again once sent: Rust parses it, keeps
+ * only this platform's cookies, and returns the same non-secret status the
+ * login window produces.
+ */
+export const sessionImportCookies = (platform: CookiePlatform, text: string) =>
+  invoke<SessionStatus>("download_session_import_cookies", { platform, text });
+
+/** The stored session for one platform, so a card can render itself. */
+export const sessionStatusFor = (platform: CookiePlatform) =>
+  invoke<SessionStatus>("download_session_status", { platform });
+
+/** Forget the stored cookies. The session file is deleted, not blanked. */
+export const sessionClear = (platform: CookiePlatform) =>
+  invoke<SessionStatus>("download_session_clear", { platform });
+
+/** Ask the platform whether the stored cookies still work. */
+export const sessionCheck = (platform: CookiePlatform) =>
+  invoke<CookieCheck>("download_session_check", { platform });
+
 export interface RejectedLink {
   url: string;
   code: string;

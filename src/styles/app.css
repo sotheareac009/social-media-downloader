@@ -5117,3 +5117,55 @@
 .mergeshape__row .conv__field {
   margin-bottom: 0;
 }
+
+/* ------------------------------------------------- accounts: cookie import */
+
+.cookiepanel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cookiepanel__head {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cookiepanel__body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Monospace so the tab-separated columns line up, which is how someone spots
+   a paste that lost its tabs on the way in. */
+.cookiepanel__input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.cookiepanel__hint {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-tertiary);
+}
+
+.cookiepanel__actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.cookiepanel__warn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--warning, var(--danger));
+}

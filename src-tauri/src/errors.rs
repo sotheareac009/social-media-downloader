@@ -119,6 +119,11 @@ pub enum AppError {
     #[error("{0}")]
     MergeInput(String),
 
+    /// A pasted cookie file could not be used. The payload explains what was
+    /// wrong with it and never quotes a cookie value.
+    #[error("{0}")]
+    CookieImport(String),
+
     /// yt-dlp is not installed or not on PATH.
     #[error("the download engine (yt-dlp) was not found on this system")]
     EngineMissing,
@@ -309,6 +314,7 @@ impl AppError {
             Self::ConvertBusy => "convert_busy",
             Self::ConvertFailed(_) => "convert_failed",
             Self::MergeInput(_) => "merge_input",
+            Self::CookieImport(_) => "cookie_import",
             Self::NotAVideo => "not_a_video",
             Self::SplitCount(_) => "split_count",
             Self::SplitFailed(_) => "split_failed",
