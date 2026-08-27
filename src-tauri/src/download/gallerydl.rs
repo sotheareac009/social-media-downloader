@@ -23,6 +23,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use crate::download::ytdlp::{ProfileEntry, ProfileListing};
 use crate::errors::{AppError, Result};
@@ -39,8 +40,118 @@ const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mov"];
 /// minutes to be told a number.
 const MAX_POSTS: usize = 300;
 
-/// Find gallery-dl using the same strategy as [`crate::download::ytdlp::locate`]:
-/// a GUI app does not inherit the shell PATH that `brew install` relies on.
+/// How long a profile listing may run before it is given up on.
+///
+/// Generous, because listing 300 posts is genuinely slow: gallery-dl paginates
+/// and paces itself. But bounded, because the alternative — what shipped
+/// before this — is a Download button that spins forever with nothing to click
+/// and no way to tell a slow listing from a dead one.
+const LISTING_TIMEOUT: Duration = Duration::from_secs(240);
+
+/// A version probe answers instantly or not at all.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// What a bounded run produced.
+#[derive(Debug)]
+struct Ran {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Run a gallery-dl command with a ceiling on how long it may take, keeping
+/// whatever it printed even when it has to be killed.
+///
+/// Spawned and drained rather than `output()`-ed, for one reason: `output()`
+/// hands back nothing at all if the future is dropped on a timeout, so a stall
+/// reports silence. gallery-dl says *why* it is stuck on stderr — a login wall,
+/// a rate limit, a DNS failure — and that line is the whole difference between
+/// a diagnosable problem and "it spins forever".
+///
+/// `tokio::time::timeout` wraps the wait itself, never its result: a child that
+/// never exits is precisely the case this exists for.
+async fn run_bounded(mut cmd: tokio::process::Command, budget: Duration) -> Result<Ran> {
+    use std::sync::{Arc, Mutex};
+    use tokio::io::AsyncReadExt;
+
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|_| AppError::ListerMissing)?;
+
+    // Both pipes are drained concurrently. Reading one to completion while the
+    // other fills its buffer is a deadlock, and Windows' pipe buffers are small
+    // enough to reach it on a chatty run.
+    let out_buf = Arc::new(Mutex::new(Vec::new()));
+    let err_buf = Arc::new(Mutex::new(Vec::new()));
+
+    let drain = |mut pipe: Option<_>, buf: Arc<Mutex<Vec<u8>>>| {
+        tokio::spawn(async move {
+            let Some(pipe) = pipe.take() else { return };
+            let mut pipe: tokio::process::ChildStdout = pipe;
+            let mut chunk = [0u8; 8192];
+            loop {
+                match pipe.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.lock().expect("buf").extend_from_slice(&chunk[..n]),
+                }
+            }
+        })
+    };
+    let out_task = drain(child.stdout.take(), out_buf.clone());
+    // stderr has a different type, so it gets its own loop rather than a
+    // generic that would need a trait object for one call.
+    let err_task = {
+        let buf = err_buf.clone();
+        let mut pipe = child.stderr.take();
+        tokio::spawn(async move {
+            let Some(mut pipe) = pipe.take() else { return };
+            let mut chunk = [0u8; 8192];
+            loop {
+                match pipe.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.lock().expect("buf").extend_from_slice(&chunk[..n]),
+                }
+            }
+        })
+    };
+
+    let waited = tokio::time::timeout(budget, child.wait()).await;
+
+    match waited {
+        Ok(Ok(status)) => {
+            let _ = out_task.await;
+            let _ = err_task.await;
+            Ok(Ran {
+                success: status.success(),
+                stdout: std::mem::take(&mut *out_buf.lock().expect("buf")),
+                stderr: std::mem::take(&mut *err_buf.lock().expect("buf")),
+            })
+        }
+        Ok(Err(_)) => Err(AppError::ListerMissing),
+        Err(_) => {
+            let _ = child.kill().await;
+            out_task.abort();
+            err_task.abort();
+            // The last thing it said before it stopped saying anything.
+            let stderr = String::from_utf8_lossy(&err_buf.lock().expect("buf")).to_string();
+            Err(AppError::ListerTimedOut(last_meaningful_line(&stderr)))
+        }
+    }
+}
+
+/// The last line worth showing a user out of a chatty stderr.
+fn last_meaningful_line(stderr: &str) -> String {
+    stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .next_back()
+        .map(|l| l.chars().take(160).collect())
+        .unwrap_or_else(|| "it printed nothing before it stalled".to_string())
+}
+
 pub fn locate() -> Option<PathBuf> {
     if let Some(explicit) = crate::config::read("MEDIA_DOWNLOADER_GALLERYDL") {
         let p = PathBuf::from(explicit);
@@ -83,12 +194,9 @@ pub fn locate() -> Option<PathBuf> {
 }
 
 pub async fn version() -> Option<String> {
-    let out = crate::process::command(locate()?)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .ok()?;
+    let mut cmd = crate::process::command(locate()?);
+    cmd.arg("--version");
+    let out = run_bounded(cmd, VERSION_TIMEOUT).await.ok()?;
     let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!v.is_empty()).then_some(v)
 }
@@ -114,16 +222,10 @@ pub async fn list_instagram_profile(
         cmd.arg("--cookies").arg(path);
     }
 
-    let out = cmd
-        .arg(url.as_str())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|_| AppError::ListerMissing)?;
+    cmd.arg(url.as_str());
+    let out = run_bounded(cmd, LISTING_TIMEOUT).await?;
 
-    if !out.status.success() {
+    if !out.success {
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(classify_failure(&stderr));
     }
@@ -234,16 +336,10 @@ pub async fn list_x_profile(url: &url::Url, cookies: Option<&Path>) -> Result<Pr
         cmd.arg("--cookies").arg(path);
     }
 
-    let out = cmd
-        .arg(url.as_str())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|_| AppError::ListerMissing)?;
+    cmd.arg(url.as_str());
+    let out = run_bounded(cmd, LISTING_TIMEOUT).await?;
 
-    if !out.status.success() {
+    if !out.success {
         return Err(classify_failure(&String::from_utf8_lossy(&out.stderr)));
     }
 
@@ -430,6 +526,42 @@ fn classify_failure(stderr: &str) -> AppError {
 
 #[cfg(test)]
 mod tests {
+
+    /// The bug this exists for: with no ceiling, a lister that never returns
+    /// leaves the Download button spinning forever, and a slow listing is
+    /// indistinguishable from a dead one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_that_never_finishes_is_given_up_on() {
+        let mut cmd = tokio::process::Command::new("/bin/sleep");
+        cmd.arg("30");
+        let started = std::time::Instant::now();
+        let err = run_bounded(cmd, Duration::from_millis(250)).await.unwrap_err();
+
+        assert!(matches!(err, AppError::ListerTimedOut(_)), "got {err:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "it waited for the child instead of the budget"
+        );
+    }
+
+    #[test]
+    fn a_stalled_lister_reports_its_last_line() {
+        let noisy = "[instagram][info] Starting\n[instagram][warning] HTTP 401\n  \n";
+        assert_eq!(last_meaningful_line(noisy), "[instagram][warning] HTTP 401");
+        // Silence is itself worth saying, rather than an empty message.
+        assert!(last_meaningful_line("").contains("nothing"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_that_finishes_in_time_is_returned() {
+        let mut cmd = tokio::process::Command::new("/bin/echo");
+        cmd.arg("hello");
+        let out = run_bounded(cmd, Duration::from_secs(10)).await.unwrap();
+        assert!(out.success);
+        assert!(String::from_utf8_lossy(&out.stdout).contains("hello"));
+    }
     use super::*;
 
     #[test]

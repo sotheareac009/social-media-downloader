@@ -124,6 +124,24 @@ pub struct WebSession {
 pub type InstagramSession = WebSession;
 
 impl WebSession {
+    /// Which required cookies this session is missing, by name.
+    ///
+    /// Named rather than counted: "the session has no `sessionid`" tells
+    /// someone their paste was incomplete, where "unusable" sends them to
+    /// re-paste the same thing again.
+    pub fn missing_cookies(&self, kind: SessionKind) -> Vec<&'static str> {
+        kind.required_cookies()
+            .iter()
+            .copied()
+            .filter(|needed| {
+                !self
+                    .cookies
+                    .iter()
+                    .any(|c| c.name == *needed && !c.value.is_empty())
+            })
+            .collect()
+    }
+
     /// Whether this looks like a real logged-in session for `kind`.
     pub fn is_usable_for(&self, kind: SessionKind) -> bool {
         kind.required_cookies().iter().all(|needed| {
@@ -471,6 +489,61 @@ pub fn clear(dir: &Path, kind: SessionKind) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The silent failure this exists for: a paste missing the login cookie
+    /// left the session "unusable" with no indication, and the lister then ran
+    /// signed out.
+    #[test]
+    fn a_session_names_the_cookie_it_is_missing() {
+        let no_login = WebSession {
+            cookies: vec![StoredCookie {
+                name: "csrftoken".into(),
+                value: "abc".into(),
+                domain: ".instagram.com".into(),
+                path: "/".into(),
+                secure: true,
+                expires: 1_800_000_000,
+            }],
+            captured_at: 1_700_000_000,
+        };
+        assert_eq!(no_login.missing_cookies(SessionKind::Instagram), vec!["sessionid"]);
+        assert!(!no_login.is_usable_for(SessionKind::Instagram));
+    }
+
+    #[test]
+    fn a_complete_session_is_missing_nothing() {
+        let ok = WebSession {
+            cookies: vec![StoredCookie {
+                name: "sessionid".into(),
+                value: "real".into(),
+                domain: ".instagram.com".into(),
+                path: "/".into(),
+                secure: true,
+                expires: 1_800_000_000,
+            }],
+            captured_at: 1_700_000_000,
+        };
+        assert!(ok.missing_cookies(SessionKind::Instagram).is_empty());
+        assert!(ok.is_usable_for(SessionKind::Instagram));
+    }
+
+    /// An empty value is not a cookie. A paste that kept the name but lost the
+    /// value would otherwise look complete.
+    #[test]
+    fn an_empty_value_counts_as_missing() {
+        let blank = WebSession {
+            cookies: vec![StoredCookie {
+                name: "sessionid".into(),
+                value: String::new(),
+                domain: ".instagram.com".into(),
+                path: "/".into(),
+                secure: true,
+                expires: 1_800_000_000,
+            }],
+            captured_at: 1_700_000_000,
+        };
+        assert_eq!(blank.missing_cookies(SessionKind::Instagram), vec!["sessionid"]);
+    }
     use super::*;
 
     /// A realistic export, tabs and all. Values here are fabricated.

@@ -475,12 +475,59 @@ impl DownloadManager {
     /// signed in through the app's own login window. Every other source
     /// downloads with no session at all.
     fn cookie_jar(&self, source: Source) -> Option<CookieFile> {
-        let kind = session_kind_for(source)?;
-        let stored = self.cached_session(kind)?;
-        if !stored.is_usable_for(kind) {
-            return None;
+        self.cookie_jar_required(source).ok()
+    }
+
+    /// The same jar, but saying why when there isn't one.
+    ///
+    /// WHY THIS EXISTS. `cookie_jar` collapses four different failures into
+    /// `None`, and every caller then ran the tool ANONYMOUSLY: no session
+    /// configured, a session that never loaded, one missing the cookie that
+    /// proves the login, and a temp file that could not be written. For a
+    /// download that degradation is right — plenty of media is public. For a
+    /// profile listing it is not: Instagram refuses those without a login, so
+    /// the anonymous attempt stalls against a wall and reports nothing useful.
+    ///
+    /// The fourth case is the one that hides on a different machine: a temp
+    /// directory the app cannot write to fails here and nowhere else, and
+    /// `.ok()` threw the reason away.
+    fn cookie_jar_required(&self, source: Source) -> Result<CookieFile> {
+        let platform = source.display_name();
+
+        let Some(kind) = session_kind_for(source) else {
+            return Err(AppError::SessionRequired(format!(
+                "{platform} doesn't use a saved session in this build."
+            )));
+        };
+
+        let Some(stored) = self.cached_session(kind) else {
+            return Err(AppError::SessionRequired(format!(
+                "{platform} isn't connected on this computer. Sessions are stored per \
+                 machine, so connecting on another one doesn't carry over — open \
+                 Accounts and connect {platform} here."
+            )));
+        };
+
+        let missing = stored.missing_cookies(kind);
+        if !missing.is_empty() {
+            return Err(AppError::SessionRequired(format!(
+                "The saved {platform} session is missing {}, which is what proves the \
+                 login. Re-connect {platform} under Accounts, or paste a cookie set that \
+                 includes it.",
+                missing
+                    .iter()
+                    .map(|c| format!("`{c}`"))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            )));
         }
-        CookieFile::write(&stored.cookies).ok()
+
+        CookieFile::write(&stored.cookies).map_err(|e| {
+            AppError::SessionRequired(format!(
+                "The {platform} session is fine, but its cookie file could not be written \
+                 ({e}). Without it the lister runs signed out, so this stopped instead."
+            ))
+        })
     }
 
     /// A platform's session, from memory when possible. The first call per run
@@ -522,24 +569,20 @@ impl DownloadManager {
         // marked CURRENTLY BROKEN upstream. Every *download* still goes
         // through yt-dlp, so only the enumeration differs.
         if source == Source::Instagram {
-            let jar = self.cookie_jar(source);
-            return crate::download::gallerydl::list_instagram_profile(
-                &url,
-                jar.as_ref().map(|j| j.path()),
-            )
-            .await;
+            // Required, not optional: Instagram will not list a profile for a
+            // signed-out client, so proceeding without cookies only buys a
+            // four-minute stall and a worse error.
+            let jar = self.cookie_jar_required(source)?;
+            return crate::download::gallerydl::list_instagram_profile(&url, Some(jar.path()))
+                .await;
         }
 
         // X has no yt-dlp timeline extractor, so — like Instagram — gallery-dl
         // enumerates the profile (using the captured session cookies) and
         // yt-dlp downloads each resulting tweet.
         if source == Source::X {
-            let jar = self.cookie_jar(source);
-            return crate::download::gallerydl::list_x_profile(
-                &url,
-                jar.as_ref().map(|j| j.path()),
-            )
-            .await;
+            let jar = self.cookie_jar_required(source)?;
+            return crate::download::gallerydl::list_x_profile(&url, Some(jar.path())).await;
         }
 
         // A channel home page is not one feed but three - Videos, Shorts and

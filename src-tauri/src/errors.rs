@@ -134,6 +134,20 @@ pub enum AppError {
     #[error("listing Instagram profiles needs gallery-dl, which isn't installed")]
     ListerMissing,
 
+    /// The lister started but never finished. Almost always Instagram refusing
+    /// an unauthenticated request and gallery-dl retrying behind the scenes,
+    /// which looks identical to a slow listing until it is bounded.
+    #[error("listing this profile took too long and was stopped. The lister's last words were: {0}")]
+    ListerTimedOut(String),
+
+    /// A profile listing was attempted without a usable session.
+    ///
+    /// Its own variant because the alternative — what shipped before — is
+    /// running the lister anonymously and letting it stall against a login
+    /// wall, which reads as "the app is broken" rather than "connect first".
+    #[error("{0}")]
+    SessionRequired(String),
+
     /// yt-dlp ran but failed. Carries only its final, already-sanitized line.
     #[error("the download engine failed: {0}")]
     EngineFailed(String),
@@ -326,6 +340,8 @@ impl AppError {
             Self::SplitFailed(_) => "split_failed",
             Self::EngineMissing => "engine_missing",
             Self::ListerMissing => "lister_missing",
+            Self::ListerTimedOut(_) => "lister_timed_out",
+            Self::SessionRequired(_) => "session_required",
             Self::EngineFailed(_) => "engine_failed",
             Self::MediaNotPublic => "media_not_public",
             Self::NoMediaFound => "no_media_found",
