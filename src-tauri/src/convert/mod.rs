@@ -127,11 +127,26 @@ pub struct BatchDone {
 /// into the same output folders is not something a progress table can explain.
 #[derive(Default)]
 pub struct ConvertQueue {
+    /// One entry per independent line of work, created on first use.
+    lanes: std::sync::Mutex<std::collections::HashMap<String, Arc<Lane>>>,
+}
+
+/// A single line of work that can run, be cancelled, and refuse to be started
+/// twice.
+///
+/// Lanes exist because the screens are separate: converting a folder of photos
+/// while a folder of videos encodes is a perfectly ordinary thing to want, and
+/// one global flag turned that into "a conversion is already running". They
+/// stay separate rather than becoming one pool because each has its own
+/// progress, its own cancel button, and its own idea of how many files to run
+/// at once.
+#[derive(Default)]
+pub struct Lane {
     running: AtomicBool,
     cancelled: AtomicBool,
 }
 
-impl ConvertQueue {
+impl Lane {
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
     }
@@ -140,17 +155,8 @@ impl ConvertQueue {
         self.cancelled.store(true, Ordering::SeqCst);
     }
 
-    /// Claim the queue for work that is not a batch conversion - a merge.
-    pub fn begin_public(&self) -> Result<()> {
-        self.begin()
-    }
-
-    /// Release it again. Always called, including on failure.
-    pub fn finish_public(&self) {
-        self.finish();
-    }
-
-    fn begin(&self) -> Result<()> {
+    /// Claim this lane. Fails if it is already busy.
+    pub fn begin(&self) -> Result<()> {
         if self.running.swap(true, Ordering::SeqCst) {
             return Err(AppError::ConvertBusy);
         }
@@ -158,12 +164,28 @@ impl ConvertQueue {
         Ok(())
     }
 
-    fn finish(&self) {
+    /// Release it. Always called, including on failure.
+    pub fn finish(&self) {
         self.running.store(false, Ordering::SeqCst);
     }
 
-    fn is_cancelled(&self) -> bool {
+    pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+impl ConvertQueue {
+    /// The lane by that name, created on first use.
+    ///
+    /// Names come from the caller - "video", "photo", "merge" - so a screen
+    /// added later gets its own lane without touching this type.
+    pub fn lane(&self, name: &str) -> Arc<Lane> {
+        let mut lanes = self.lanes.lock().expect("convert lanes");
+        Arc::clone(
+            lanes
+                .entry(name.to_string())
+                .or_insert_with(|| Arc::new(Lane::default())),
+        )
     }
 }
 
@@ -174,14 +196,14 @@ impl ConvertQueue {
 /// finishes instead of when the slowest one does.
 pub async fn run_batch(
     app: AppHandle,
-    queue: Arc<ConvertQueue>,
+    lane: Arc<Lane>,
     items: Vec<MediaItem>,
     settings: ConvertSettings,
 ) -> Result<BatchDone> {
-    queue.begin()?;
+    lane.begin()?;
 
     let ffmpeg = crate::download::ytdlp::locate_ffmpeg().ok_or_else(|| {
-        queue.finish();
+        lane.finish();
         AppError::FfmpegMissing
     })?;
 
@@ -201,7 +223,7 @@ pub async fn run_batch(
     let mut tasks = tokio::task::JoinSet::new();
     for item in items {
         let permits = Arc::clone(&permits);
-        let queue = Arc::clone(&queue);
+        let lane = Arc::clone(&lane);
         let settings = Arc::clone(&settings);
         let ffmpeg = Arc::clone(&ffmpeg);
         let app = app.clone();
@@ -210,7 +232,7 @@ pub async fn run_batch(
             // Acquiring inside the task is what bounds concurrency; spawning
             // every job up front is fine because a waiting task costs nothing.
             let _permit = permits.acquire().await;
-            if queue.is_cancelled() {
+            if lane.is_cancelled() {
                 emit(
                     &app,
                     JobUpdate {
@@ -240,25 +262,11 @@ pub async fn run_batch(
                 },
             );
 
-            if work == Work::Skip {
-                // Already what was asked for. Re-encoding it would cost
-                // minutes and hand back a slightly worse file.
-                emit(
-                    &app,
-                    JobUpdate {
-                        id: item.id.clone(),
-                        status: "skipped".into(),
-                        how: Some("skip".into()),
-                        percent: None,
-                        output_path: Some(item.path.clone()),
-                        output_bytes: Some(item.size_bytes),
-                        error: None,
-                    },
-                );
-                return Outcome::Skipped;
-            }
-
-            let how = if work == Work::Remux { "copy" } else { "encode" };
+            let how = match work {
+                Work::CopyFile => "clone",
+                Work::Remux => "copy",
+                Work::Encode => "encode",
+            };
             emit(
                 &app,
                 JobUpdate {
@@ -272,7 +280,16 @@ pub async fn run_batch(
                 },
             );
 
-            match convert_one(&app, &ffmpeg, &item, &settings, encoder, &queue, work).await {
+            let outcome = if work == Work::CopyFile {
+                // Already exactly what was asked for, so the bytes are the
+                // answer: copied across rather than decoded and rebuilt, which
+                // would cost minutes and hand back a slightly worse file.
+                copy_across(&item, &settings)
+            } else {
+                convert_one(&app, &ffmpeg, &item, &settings, encoder, &lane, work).await
+            };
+
+            match outcome {
                 Ok(output) => {
                     // Only after a successful write, and only if asked: losing
                     // the source to a conversion that failed is unrecoverable.
@@ -330,12 +347,13 @@ pub async fn run_batch(
 
     let mut converted = 0;
     let mut failed = 0;
-    let mut skipped = 0;
+    // Kept in the summary for the UI's sake; nothing is skipped outright any
+    // more, so it stays zero.
+    let skipped = 0;
     while let Some(res) = tasks.join_next().await {
         match res {
             Ok(Outcome::Converted) => converted += 1,
             Ok(Outcome::Failed) => failed += 1,
-            Ok(Outcome::Skipped) => skipped += 1,
             Ok(Outcome::Cancelled) => {}
             // A panicking task must not take the batch with it.
             Err(_) => failed += 1,
@@ -346,9 +364,9 @@ pub async fn run_batch(
         converted,
         failed,
         skipped,
-        cancelled: queue.is_cancelled(),
+        cancelled: lane.is_cancelled(),
     };
-    queue.finish();
+    lane.finish();
     let _ = app.emit(DONE_EVENT, done.clone());
     Ok(done)
 }
@@ -357,12 +375,44 @@ enum Outcome {
     Converted,
     Failed,
     Cancelled,
-    /// Already correct, so nothing was written.
-    Skipped,
 }
 
 fn emit(app: &AppHandle, update: JobUpdate) {
     let _ = app.emit(JOB_EVENT, update);
+}
+
+/// Copy a file that already matches the request into the output folder.
+///
+/// The alternative was to skip it, which is what this used to do - and it left
+/// the chosen folder missing the very files that needed no work, with
+/// "Already OK" as the only clue. An output folder is a deliverable: everything
+/// asked for belongs in it.
+fn copy_across(item: &MediaItem, settings: &ConvertSettings) -> Result<PathBuf> {
+    let source = PathBuf::from(&item.path);
+    let out_dir = match settings.output_dir.as_deref().map(str::trim) {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => output_dir_for(&source),
+    };
+    std::fs::create_dir_all(&out_dir).map_err(|e| {
+        AppError::DownloadPath(format!("could not create {}: {e}", out_dir.display()))
+    })?;
+
+    let out = unique_path(&out_dir.join(output_name(
+        &source,
+        item.kind,
+        settings.video_format,
+        settings.photo_format,
+    )));
+
+    // Guards the one case where copying would destroy the file: a source that
+    // already sits at the destination path.
+    if out == source {
+        return Ok(source);
+    }
+
+    std::fs::copy(&source, &out)
+        .map_err(|e| AppError::ConvertFailed(format!("could not copy: {e}")))?;
+    Ok(out)
 }
 
 /// Convert one file and return where it landed.
@@ -372,7 +422,7 @@ async fn convert_one(
     item: &MediaItem,
     settings: &ConvertSettings,
     encoder: HardwareEncoder,
-    queue: &ConvertQueue,
+    lane: &Lane,
     // Decided by the caller, before any process starts: a copy, or an encode.
     work: Work,
 ) -> Result<PathBuf> {
@@ -517,7 +567,7 @@ async fn convert_one(
     // Poll rather than await the child directly, so a cancel takes effect
     // during a long encode instead of after it.
     loop {
-        if queue.is_cancelled() {
+        if lane.is_cancelled() {
             let _ = child.kill().await;
             // A half-written file is not a conversion; leaving it behind would
             // look like a successful one to anyone browsing the folder.
@@ -699,15 +749,40 @@ mod tests {
     }
 
     #[test]
-    fn a_second_batch_is_refused_while_one_is_running() {
+    fn a_second_batch_is_refused_while_that_lane_is_running() {
         let q = ConvertQueue::default();
-        q.begin().unwrap();
-        assert!(q.is_running());
-        assert!(matches!(q.begin(), Err(AppError::ConvertBusy)));
-        q.finish();
+        let video = q.lane("video");
+        video.begin().unwrap();
+        assert!(video.is_running());
+        assert!(matches!(video.begin(), Err(AppError::ConvertBusy)));
+        video.finish();
         // And starting again afterwards clears the previous cancel.
-        q.cancel();
-        q.begin().unwrap();
-        assert!(!q.is_cancelled());
+        video.cancel();
+        video.begin().unwrap();
+        assert!(!video.is_cancelled());
+    }
+
+    #[test]
+    fn photos_and_videos_convert_at_the_same_time() {
+        // The whole point of lanes: a busy video batch must not refuse a photo
+        // one, and cancelling either must leave the other running.
+        let q = ConvertQueue::default();
+        let video = q.lane("video");
+        let photo = q.lane("photo");
+        video.begin().unwrap();
+        photo.begin().unwrap();
+        assert!(video.is_running() && photo.is_running());
+
+        video.cancel();
+        assert!(video.is_cancelled());
+        assert!(!photo.is_cancelled(), "cancelling one lane stopped the other");
+    }
+
+    #[test]
+    fn the_same_name_always_means_the_same_lane() {
+        // Otherwise "cancel" would create a fresh lane and cancel nothing.
+        let q = ConvertQueue::default();
+        q.lane("video").begin().unwrap();
+        assert!(matches!(q.lane("video").begin(), Err(AppError::ConvertBusy)));
     }
 }

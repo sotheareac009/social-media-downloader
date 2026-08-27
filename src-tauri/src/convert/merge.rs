@@ -25,7 +25,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use super::formats::VideoFormat;
 use super::plan::Fit;
 use super::scan::MediaItem;
-use super::{ConvertQueue, HardwareEncoder};
+use super::{HardwareEncoder, Lane};
 use crate::errors::{AppError, Result};
 
 /// Emitted as a merge runs.
@@ -170,7 +170,7 @@ fn even(n: u32) -> u32 {
 /// Join `items`, in the order given, into `output`.
 pub async fn merge(
     app: &AppHandle,
-    queue: &ConvertQueue,
+    lane: &Lane,
     items: &[MediaItem],
     output: &Path,
     format: VideoFormat,
@@ -275,7 +275,7 @@ pub async fn merge(
     }
 
     let outcome = loop {
-        if queue.is_cancelled() {
+        if lane.is_cancelled() {
             let _ = child.kill().await;
             let _ = std::fs::remove_file(output);
             break Err(AppError::Cancelled);

@@ -4497,7 +4497,9 @@
 
 .conv__intake {
   display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  /* The drop zone is the thing people aim at; the delete toggle is a switch
+     they set once, so it takes the smaller share. */
+  grid-template-columns: minmax(0, 2.6fr) minmax(0, 1fr);
   gap: 12px;
 }
 
@@ -4561,13 +4563,30 @@
 
 .conv__danger {
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 16px 18px;
+  /* Centred rather than top-aligned, because the box now matches the drop
+     zone's height and text pinned to the top of a tall box looks unfinished. */
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-xl);
   background: var(--surface-1);
   cursor: pointer;
+}
+
+/* The default grid row already stretches both cells to the tallest, so the
+   two boxes line up top and bottom with no fixed height to keep in sync. */
+.conv__danger input {
+  margin-top: 0;
+}
+
+.conv__danger strong {
+  font-size: 11.5px;
+}
+
+.conv__danger em {
+  font-size: 10.5px;
+  line-height: 1.45;
 }
 
 .conv__danger--on {
@@ -4800,30 +4819,71 @@
   color: var(--text-tertiary);
 }
 
-.conv__bar {
+/* Progress in a table row: a number the eye can read at a glance, and a hair-
+   thin track under it. The old version printed the percentage on top of the
+   fill, so the text changed colour as the bar passed under it. */
+.conv__prog {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.conv__prog__label {
+  font-size: 11px;
+  font-weight: 620;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  color: var(--accent);
+}
+
+.conv__prog__track {
   position: relative;
-  height: 18px;
+  display: block;
+  height: 3px;
   border-radius: 999px;
-  background: var(--surface-2);
+  background: var(--border-subtle);
   overflow: hidden;
 }
 
-.conv__barfill {
+.conv__prog__fill {
   position: absolute;
   inset: 0 auto 0 0;
-  background: var(--accent);
-  opacity: 0.85;
-  transition: width 0.2s ease;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-hover, var(--accent)));
+  transition: width 0.25s ease;
 }
 
-.conv__barlabel {
-  position: relative;
-  display: block;
-  text-align: center;
-  line-height: 18px;
-  font-size: 10.5px;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-primary);
+/* A stream copy has no meaningful percentage, so the bar travels instead of
+   filling — it says "working" without inventing a number. */
+.conv__prog__track--indeterminate .conv__prog__fill {
+  width: 40%;
+  animation: convslide 1.1s ease-in-out infinite;
+}
+
+@keyframes convslide {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(260%);
+  }
+}
+
+/* The row being worked on, marked by a hairline rather than a wash of colour:
+   a whole tinted row competes with the selection highlight. */
+.conv__row--busy td:first-child {
+  box-shadow: inset 2px 0 0 0 var(--accent);
+}
+
+.pill__how {
+  opacity: 0.75;
+}
+
+.pill__how::after {
+  content: "·";
+  margin: 0 1px 0 4px;
+  opacity: 0.6;
 }
 
 .conv__settings {
@@ -5763,4 +5823,99 @@
 .tgmenu__item:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* ------------------------------------------- converter: video/photo panes */
+
+.tabs--sub {
+  margin-bottom: 12px;
+}
+
+.tabs--sub .tab {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+/* A lane working in the pane you are not looking at. */
+.tab__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: tabpulse 1.2s ease-in-out infinite;
+}
+
+@keyframes tabpulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* ------------------------------- converter: destination beside the button */
+
+.conv__dest {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  /* Pushed to the far end, so the Convert button stays where the eye is. */
+  margin-left: auto;
+}
+
+/* The path is the label: a separate "Save to" caption cost more width than it
+   explained, and the tooltip says the rest. */
+.conv__destbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  max-width: 260px;
+  padding: 6px 11px;
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.conv__destbtn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.conv__destbtn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.conv__destbtn__path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conv__destreset {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+
+.conv__destreset:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text-primary);
 }

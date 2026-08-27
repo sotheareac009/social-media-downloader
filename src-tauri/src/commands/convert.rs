@@ -252,8 +252,10 @@ pub async fn convert_merge(
     fit: Option<crate::convert::Fit>,
 ) -> Result<crate::convert::merge::MergeResult> {
     let format = format.unwrap_or_default();
-    let queue = std::sync::Arc::clone(&queue);
-    queue.begin_public()?;
+    // Its own lane: merging is heavy, but it should not refuse a photo batch
+    // running beside it, nor be refused by one.
+    let lane = queue.lane("merge");
+    lane.begin()?;
 
     let ffmpeg = crate::download::ytdlp::locate_ffmpeg();
     let encoder = match (&ffmpeg, format.takes_h264()) {
@@ -263,7 +265,7 @@ pub async fn convert_merge(
 
     let result = crate::convert::merge::merge(
         &app,
-        &queue,
+        &lane,
         &items,
         std::path::Path::new(&output_path),
         format,
@@ -273,7 +275,7 @@ pub async fn convert_merge(
         encoder,
     )
     .await;
-    queue.finish_public();
+    lane.finish();
     result
 }
 
@@ -287,16 +289,21 @@ pub async fn convert_start(
     queue: State<'_, std::sync::Arc<crate::convert::ConvertQueue>>,
     items: Vec<crate::convert::MediaItem>,
     settings: crate::convert::ConvertSettings,
+    // "video" or "photo" — the screen that started it. Each runs independently,
+    // so a photo batch neither waits for nor cancels a video one.
+    lane: Option<String>,
 ) -> Result<crate::convert::BatchDone> {
-    crate::convert::run_batch(app, std::sync::Arc::clone(&queue), items, settings).await
+    let lane = queue.lane(lane.as_deref().unwrap_or("video"));
+    crate::convert::run_batch(app, lane, items, settings).await
 }
 
 /// Stop after the files already running finish being killed.
 #[tauri::command]
 pub async fn convert_cancel(
     queue: State<'_, std::sync::Arc<crate::convert::ConvertQueue>>,
+    lane: Option<String>,
 ) -> Result<()> {
-    queue.cancel();
+    queue.lane(lane.as_deref().unwrap_or("video")).cancel();
     Ok(())
 }
 

@@ -99,6 +99,7 @@ pub async fn list_instagram_profile(
     cookies: Option<&Path>,
 ) -> Result<ProfileListing> {
     let binary = locate().ok_or(AppError::ListerMissing)?;
+    let url = instagram_listing_url(url);
 
     let mut cmd = crate::process::command(binary);
     cmd.arg("--dump-json")
@@ -129,6 +130,14 @@ pub async fn list_instagram_profile(
 
     let records: serde_json::Value =
         serde_json::from_slice(&out.stdout).map_err(|_| AppError::MalformedProviderResponse)?;
+
+    // gallery-dl exits 0 and reports the failure *inside* the JSON, as a
+    // record whose first field is -1. Without reading it, a refused listing
+    // looks exactly like an empty one - which is how "Instagram bounced us"
+    // came out as "no video was found at that link".
+    if let Some(message) = dumped_error(&records) {
+        return Err(classify_failure(&message));
+    }
 
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut entries: Vec<ProfileEntry> = Vec::new();
@@ -186,7 +195,14 @@ pub async fn list_instagram_profile(
     }
 
     if entries.is_empty() {
-        return Err(AppError::NoMediaFound);
+        // Instagram serves anonymous callers an empty list rather than an
+        // error, so "nothing here" and "you are not signed in" look identical
+        // from the outside. The session is the thing that tells them apart.
+        return Err(if cookies.is_none() {
+            AppError::MediaNotPublic
+        } else {
+            AppError::NoMediaFound
+        });
     }
 
     Ok(ProfileListing {
@@ -312,13 +328,93 @@ pub async fn list_x_profile(url: &url::Url, cookies: Option<&Path>) -> Result<Pr
     })
 }
 
+/// The URL to hand gallery-dl for an Instagram profile: always `/posts/`.
+///
+/// Neither shape people paste works directly, for different reasons:
+///
+///   * `/<handle>/reels` - Instagram answers gallery-dl with a redirect to its
+///     home page, which aborts the extraction outright.
+///   * `/<handle>` - gallery-dl answers with a *queue* record pointing at
+///     `/<handle>/posts/` rather than any files, and `--dump-json` does not
+///     follow queued URLs. The listing looks empty while being perfectly
+///     healthy.
+///
+/// `/posts/` is the one that yields file records, and it carries the reels too
+/// - a reel is a video post, and the caller keeps only video posts anyway.
+///
+/// The query goes as well: `?hl=en` and friends are display preferences that
+/// mean nothing to an extractor.
+fn instagram_listing_url(url: &url::Url) -> url::Url {
+    let mut out = url.clone();
+    out.set_query(None);
+
+    let segments: Vec<String> = url
+        .path_segments()
+        .map(|s| s.filter(|p| !p.is_empty()).map(str::to_string).collect())
+        .unwrap_or_default();
+
+    let handle = match segments.as_slice() {
+        [handle] => Some(handle),
+        [handle, tab] if tab.eq_ignore_ascii_case("reels") => Some(handle),
+        _ => None,
+    };
+    if let Some(handle) = handle {
+        out.set_path(&format!("/{handle}/posts/"));
+    }
+    out
+}
+
+/// The message from a gallery-dl error record, if the dump carries one.
+///
+/// Errors arrive as `[-1, {"error": ..., "message": ...}]` alongside the real
+/// records, rather than on stderr with a non-zero exit.
+fn dumped_error(records: &serde_json::Value) -> Option<String> {
+    for record in records.as_array()? {
+        let Some(parts) = record.as_array() else { continue };
+        if parts.first().and_then(|k| k.as_i64()) != Some(-1) {
+            continue;
+        }
+        let Some(meta) = parts.last().and_then(|m| m.as_object()) else {
+            continue;
+        };
+        if let Some(message) = meta
+            .get("message")
+            .and_then(|m| m.as_str())
+            .or_else(|| meta.get("error").and_then(|e| e.as_str()))
+        {
+            return Some(message.to_string());
+        }
+    }
+    None
+}
+
 fn classify_failure(stderr: &str) -> AppError {
     let lower = stderr.to_lowercase();
-    if lower.contains("login") || lower.contains("authentication") || lower.contains("challenge") {
+    // Instagram answers an anonymous listing with a bare `401 Unauthorized`
+    // from its own API, naming neither login nor authentication - so matching
+    // only those words left the real cause invisible and the user reading
+    // "no video found" about a profile full of reels.
+    const AUTH_MARKERS: &[&str] = &[
+        "login",
+        "authentication",
+        "authenticated cookies",
+        "challenge",
+        "401",
+        "unauthorized",
+        "403",
+        "forbidden",
+        "not logged in",
+    ];
+    if AUTH_MARKERS.iter().any(|m| lower.contains(m)) {
         return AppError::MediaNotPublic;
     }
     if lower.contains("not found") || lower.contains("does not exist") || lower.contains("404") {
         return AppError::NoMediaFound;
+    }
+    // Instagram bounces an unauthenticated or stale session to its home page
+    // rather than refusing outright.
+    if lower.contains("redirect to home page") || lower.contains("abortextraction") {
+        return AppError::MediaNotPublic;
     }
     if lower.contains("rate") || lower.contains("429") || lower.contains("please wait") {
         return AppError::TemporarilyUnavailable;
@@ -335,6 +431,76 @@ fn classify_failure(stderr: &str) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bare_401_reads_as_needing_a_login_not_as_an_empty_profile() {
+        // What Instagram actually answers an anonymous reels listing with. It
+        // names neither login nor authentication, which is how this used to
+        // surface as "no video was found at that link".
+        let stderr = "[instagram][error] HttpError: '401 Unauthorized' for \
+                      'https://www.instagram.com/api/v1/clips/user/'";
+        assert!(matches!(classify_failure(stderr), AppError::MediaNotPublic));
+
+        for line in [
+            "[instagram][error] AuthRequired: authenticated cookies needed",
+            "HttpError: '403 Forbidden'",
+            "login required",
+        ] {
+            assert!(
+                matches!(classify_failure(line), AppError::MediaNotPublic),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_profile_shape_is_asked_for_as_its_posts_tab() {
+        // Instagram answers `/handle/reels` with a redirect to its home page,
+        // which aborts the extraction; the profile root lists the same reels.
+        let url = url::Url::parse("https://www.instagram.com/someone/reels/?hl=en").unwrap();
+        let asked = instagram_listing_url(&url);
+        assert_eq!(asked.path(), "/someone/posts/");
+        assert_eq!(asked.query(), None, "display preferences mean nothing here");
+
+        // A bare profile needs the same rewrite: gallery-dl answers it with a
+        // queue record pointing at /posts/, and --dump-json does not follow one.
+        let plain = url::Url::parse("https://www.instagram.com/someone/?hl=en").unwrap();
+        assert_eq!(instagram_listing_url(&plain).path(), "/someone/posts/");
+
+        // A post link is not a profile listing and must be left alone.
+        let post = url::Url::parse("https://www.instagram.com/reel/DW4aUnSk8Wr/").unwrap();
+        assert_eq!(instagram_listing_url(&post).path(), "/reel/DW4aUnSk8Wr/");
+    }
+
+    #[test]
+    fn an_error_hidden_in_a_successful_dump_is_found() {
+        // gallery-dl exits 0 and puts the failure in the JSON, so an aborted
+        // listing is otherwise indistinguishable from an empty one.
+        let raw = serde_json::json!([[
+            -1,
+            {
+                "error": "AbortExtraction",
+                "message": "HTTP redirect to home page (https://www.instagram.com/)"
+            }
+        ]]);
+        let message = dumped_error(&raw).expect("error record");
+        assert!(message.contains("redirect to home page"), "{message}");
+        assert!(matches!(classify_failure(&message), AppError::MediaNotPublic));
+
+        // A dump of real records carries no error.
+        let ok = serde_json::json!([[3, {}, { "extension": "mp4" }]]);
+        assert!(dumped_error(&ok).is_none());
+    }
+
+    #[test]
+    fn a_missing_profile_is_still_a_missing_profile() {
+        for line in ["404 Not Found", "NotFoundError: user does not exist"] {
+            assert!(
+                matches!(classify_failure(line), AppError::NoMediaFound),
+                "{line}"
+            );
+        }
+    }
 
     /// Real `--dump-json` output shape, trimmed: one reel and one video post,
     /// each with its post-level record and its file record.

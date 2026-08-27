@@ -9,7 +9,10 @@
 //!
 //! So every file is classified before any process starts:
 //!
-//!   * [`Work::Skip`] - already exactly what was asked for.
+//!   * [`Work::CopyFile`] - already exactly what was asked for, so the file is
+//!     copied to the destination byte for byte. Not skipped: the output folder
+//!     is a deliverable, and a file missing from it because it happened to
+//!     already be correct is a hole nobody asked for.
 //!   * [`Work::Remux`] - streams are fine, only the container changes.
 //!   * [`Work::Encode`] - something about the picture must genuinely change.
 //!
@@ -25,8 +28,8 @@ use super::scan::{MediaItem, MediaKind};
 /// How a file should be processed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Work {
-    /// Nothing to do: the file already matches the request.
-    Skip,
+    /// Already matches the request: copy it across untouched, no FFmpeg.
+    CopyFile,
     /// Copy the streams into the target container.
     Remux,
     /// Decode and re-encode.
@@ -73,8 +76,8 @@ pub struct Request {
 /// Classify one file.
 pub fn plan_work(item: &MediaItem, req: &Request) -> Work {
     if item.kind == MediaKind::Photo {
-        // Photos are small and fast; the only saving worth having is skipping
-        // one that is already the right format and size.
+        // Photos are small and fast, and a resize is the usual reason for
+        // converting one at all.
         return Work::Encode;
     }
 
@@ -114,7 +117,7 @@ pub fn plan_work(item: &MediaItem, req: &Request) -> Work {
         .unwrap_or(false);
 
     if same_container && req.skip_conforming {
-        Work::Skip
+        Work::CopyFile
     } else {
         Work::Remux
     }
@@ -261,11 +264,14 @@ mod tests {
     }
 
     #[test]
-    fn a_file_that_is_already_right_is_left_alone() {
+    fn a_file_that_is_already_right_is_copied_not_skipped() {
+        // Skipping would leave a hole in the output folder: the file the user
+        // asked for simply would not be there, with "Already OK" as the only
+        // explanation.
         let mp4 = item("mp4", 1920, 1080, 30.0, "h264", "aac");
         assert_eq!(
             plan_work(&mp4, &req(VideoFormat::Mp4, Some(1080), Some(30))),
-            Work::Skip
+            Work::CopyFile
         );
         // Unless the user turned that off, in which case it is rewritten.
         let mut r = req(VideoFormat::Mp4, Some(1080), Some(30));
@@ -327,7 +333,7 @@ mod tests {
         // With no cap asked for, there is nothing to be unsure about.
         assert_eq!(
             plan_work(&unknown, &req(VideoFormat::Mp4, None, None)),
-            Work::Skip
+            Work::CopyFile
         );
     }
 

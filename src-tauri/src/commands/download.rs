@@ -452,22 +452,38 @@ pub async fn download_session_check(
         }
     }
 
-    match crate::download::profile::fetch(kind, &session.cookies).await {
-        Some(profile) => Ok(CookieCheck {
-            alive: true,
-            message: match &profile.display_name {
-                Some(name) => format!("Signed in as {name}."),
-                None => "Cookies still work.".into(),
-            },
-            display_name: profile.display_name,
-            expires_at,
-        }),
-        // A failed profile read is genuinely ambiguous - it can be a dead
-        // session or a blocked request - and saying which would be a guess.
-        None => Ok(CookieCheck {
+    use crate::download::profile::SessionCheck;
+    match crate::download::profile::check(kind, &session.cookies).await {
+        SessionCheck::SignedIn(profile) => {
+            // Worth keeping: a check is also the cheapest chance to put a name
+            // on a card that was saved without one.
+            let _ = manager.session_set_profile(kind, &profile);
+            Ok(CookieCheck {
+                alive: true,
+                message: match &profile.display_name {
+                    Some(name) => format!("Signed in as {name}."),
+                    None => "Cookies still work.".into(),
+                },
+                display_name: profile.display_name,
+                expires_at,
+            })
+        }
+        SessionCheck::Rejected => Ok(CookieCheck {
             alive: false,
             message: format!(
-                "{} didn't answer as a signed-in user. The cookies may have expired, or the request was blocked.",
+                "{} rejected these cookies — export them again while signed in.",
+                kind.display_name()
+            ),
+            display_name: None,
+            expires_at,
+        }),
+        // Reported as its own outcome rather than as a failure. Saying
+        // "invalid" here sends people off to re-export cookies that were fine,
+        // which is worse than admitting the check could not tell.
+        SessionCheck::Unknown => Ok(CookieCheck {
+            alive: true,
+            message: format!(
+                "Couldn't confirm with {} — the cookies are stored and will be used for downloads. If a download says it needs a login, export them again.",
                 kind.display_name()
             ),
             display_name: None,

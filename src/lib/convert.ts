@@ -244,11 +244,21 @@ export const convertPickOutputDir = () =>
 export const convertScan = (paths: string[]) =>
   invoke<MediaItem[]>("convert_scan", { paths });
 
-/** Run the batch. Resolves when every file has finished or been cancelled. */
-export const convertStart = (items: MediaItem[], settings: ConvertSettings) =>
-  invoke<BatchDone>("convert_start", { items, settings });
+/**
+ * Run a batch. Resolves when every file has finished or been cancelled.
+ *
+ * `lane` names an independent line of work — "video" and "photo" have one
+ * each, so a photo batch neither waits for a video one nor cancels it.
+ */
+export const convertStart = (
+  items: MediaItem[],
+  settings: ConvertSettings,
+  lane: MediaKind = "video",
+) => invoke<BatchDone>("convert_start", { items, settings, lane });
 
-export const convertCancel = () => invoke<void>("convert_cancel");
+/** Stop one lane. The other keeps running. */
+export const convertCancel = (lane: MediaKind = "video") =>
+  invoke<void>("convert_cancel", { lane });
 
 /** Per-file state changes while a batch runs. */
 export const subscribeToConvertJobs = (onJob: (j: JobUpdate) => void) =>

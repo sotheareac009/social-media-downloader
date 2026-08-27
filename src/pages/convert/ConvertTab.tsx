@@ -10,6 +10,7 @@ import {
   FolderIcon,
   StopIcon,
   TrashIcon,
+  XIcon,
 } from "@/components/ui/icons";
 import {
   convertCancel,
@@ -26,11 +27,31 @@ import {
   type Fit,
   type JobUpdate,
   type MediaItem,
+  type MediaKind,
   type PhotoFormat,
   type VideoFormat,
 } from "@/lib/convert";
 import { downloadReveal, formatBytes, downloadMessage } from "@/lib/download";
 import { toAuthError } from "@/lib/auth";
+
+/**
+ * Shorten a path for display, keeping the end.
+ *
+ * Done here rather than with CSS: `direction: rtl` truncates from the left but
+ * also reorders the string, so `/Users/me/clips` renders as `Users/me/clips/`
+ * with the leading slash moved to the end. Dropping whole segments keeps the
+ * text honest, and the tail is the part that identifies the folder anyway.
+ */
+function shortPath(path: string, max = 34): string {
+  if (path.length <= max) return path;
+  const parts = path.split("/").filter(Boolean);
+  for (let keep = 2; keep >= 1; keep--) {
+    const tail = parts.slice(-keep).join("/");
+    if (tail.length <= max - 2) return `…/${tail}`;
+  }
+  // A single segment longer than the budget: cut it rather than overflow.
+  return `…${path.slice(-(max - 1))}`;
+}
 
 /** Rows per page. A folder of downloads runs to hundreds; the DOM should not. */
 const PAGE_SIZE = 100;
@@ -128,8 +149,17 @@ export function ConvertTab({ active }: { active: boolean }) {
   const [jobs, setJobs] = useState<Record<string, JobUpdate>>({});
   const [caps, setCaps] = useState<ConvertCapabilities | null>(null);
   const [scanning, setScanning] = useState(false);
-  const [running, setRunning] = useState(false);
+  // Videos and photos are separate screens and separate jobs: each has its own
+  // lane in Rust, so one can encode while the other runs. `running` below is
+  // just the visible pane's flag, which is what every control on it cares
+  // about.
+  const [pane, setPane] = useState<MediaKind>("video");
+  const [lanes, setLanes] = useState<Record<MediaKind, boolean>>({
+    video: false,
+    photo: false,
+  });
   const [dragging, setDragging] = useState(false);
+  const running = lanes[pane];
   const [page, setPage] = useState(0);
 
   const [preset, setPreset] = useState("custom");
@@ -142,7 +172,14 @@ export function ConvertTab({ active }: { active: boolean }) {
   const [videoHeight, setVideoHeight] = useState(1080);
   const [fps, setFps] = useState(30);
   const [photoHeight, setPhotoHeight] = useState(1440);
-  const [threads, setThreads] = useState(2);
+  // Per lane, not shared: videos and photos run at the same time now, so one
+  // number would be a budget split between two batches without saying so.
+  // Photos are cheap and IO-bound, videos are neither, which is why they do
+  // not want the same value.
+  const [threads, setThreads] = useState<Record<MediaKind, number>>({
+    video: 2,
+    photo: 4,
+  });
   const [gpu, setGpu] = useState(true);
   const [deleteOriginal, setDeleteOriginal] = useState(false);
   // null means the default: a "(converted)" folder beside each source folder,
@@ -171,7 +208,7 @@ export function ConvertTab({ active }: { active: boolean }) {
       .then((c) => {
         if (!mounted.current) return;
         setCaps(c);
-        setThreads(c.default_threads);
+        setThreads((prev) => ({ ...prev, video: c.default_threads }));
         // A format this build cannot write must not stay selected; the first
         // one it reports is always something it can produce.
         if (c.video_formats.length > 0 && !c.video_formats.includes("mp4")) {
@@ -335,18 +372,26 @@ export function ConvertTab({ active }: { active: boolean }) {
   const formatNote =
     VIDEO_FORMATS.find((f) => f.value === videoFormat)?.note ?? "";
 
+  /** Everything of the kind this pane is about. */
+  const paneItems = useMemo(() => items.filter((i) => i.kind === pane), [items, pane]);
+
   const chosen = useMemo(
-    () => items.filter((i) => selected.has(i.id) && i.supported),
-    [items, selected],
+    () => paneItems.filter((i) => selected.has(i.id) && i.supported),
+    [paneItems, selected],
   );
 
-  const pageCount = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
+  const pageCount = Math.max(1, Math.ceil(paneItems.length / PAGE_SIZE));
   const currentPage = Math.min(page, pageCount - 1);
   const pageStart = currentPage * PAGE_SIZE;
-  const pageItems = items.slice(pageStart, pageStart + PAGE_SIZE);
+  const pageItems = paneItems.slice(pageStart, pageStart + PAGE_SIZE);
   useEffect(() => {
     if (page !== currentPage) setPage(currentPage);
   }, [page, currentPage]);
+
+  // A page number from the other pane means nothing here.
+  useEffect(() => {
+    setPage(0);
+  }, [pane]);
 
   const allOnPageSelected =
     pageItems.length > 0 && pageItems.every((i) => !i.supported || selected.has(i.id));
@@ -371,7 +416,7 @@ export function ConvertTab({ active }: { active: boolean }) {
       video_height: videoHeight || null,
       fps: fps || null,
       photo_height: photoHeight || null,
-      threads,
+      threads: threads[pane],
       gpu,
       aspect: activePreset?.aspect
         ? { ...activePreset.aspect, fit }
@@ -380,23 +425,26 @@ export function ConvertTab({ active }: { active: boolean }) {
       delete_original: deleteOriginal,
       output_dir: outDir,
     };
-    setRunning(true);
-    // Clear the previous run's rows so a re-run does not show stale ticks.
-    setJobs({});
+    const lane = pane;
+    setLanes((prev) => ({ ...prev, [lane]: true }));
+    // Clear this pane's rows from the previous run, leaving the other pane's
+    // results alone — it may still be running.
+    setJobs((prev) => {
+      const next = { ...prev };
+      for (const item of chosen) delete next[item.id];
+      return next;
+    });
     try {
-      const result = await convertStart(chosen, settings);
+      const result = await convertStart(chosen, settings, lane);
       if (!mounted.current) return;
       if (result.cancelled) {
         toast("info", `Cancelled — ${result.converted} finished before stopping.`);
       } else if (result.failed > 0) {
         toast("error", `${result.converted} converted, ${result.failed} failed.`);
       } else {
-        const skipped = result.skipped
-          ? ` ${result.skipped} already correct.`
-          : "";
         toast(
           "success",
-          `Converted ${result.converted} file${result.converted === 1 ? "" : "s"}.${skipped}`,
+          `Converted ${result.converted} file${result.converted === 1 ? "" : "s"}.`,
         );
       }
     } catch (e) {
@@ -404,9 +452,11 @@ export function ConvertTab({ active }: { active: boolean }) {
       const err = toAuthError(e);
       toast("error", downloadMessage(err.code, err.message));
     } finally {
-      if (mounted.current) setRunning(false);
+      if (mounted.current) setLanes((prev) => ({ ...prev, [lane]: false }));
     }
   }, [
+    pane,
+    threads,
     chosen,
     activePreset,
     fit,
@@ -457,20 +507,122 @@ export function ConvertTab({ active }: { active: boolean }) {
             onChange={(e) => setDeleteOriginal(e.target.checked)}
           />
           <span>
-            <strong>Delete the original after converting</strong>
-            <em>
-              Only ever after a file converts successfully — a failed conversion
-              never removes its source.
-            </em>
+            <strong>Delete original after converting</strong>
+            <em>Only after a file converts — a failure never deletes its source.</em>
           </span>
         </label>
+      </div>
+
+      <div className="tabs tabs--sub" role="tablist">
+        {(["video", "photo"] as MediaKind[]).map((kind) => (
+          <button
+            key={kind}
+            className={`tab ${pane === kind ? "tab--active" : ""}`.trim()}
+            type="button"
+            role="tab"
+            aria-selected={pane === kind}
+            onClick={() => setPane(kind)}
+          >
+            {kind === "video" ? "Videos" : "Photos"}
+            <span className="conv__badge">
+              {items.filter((i) => i.kind === kind).length}
+            </span>
+            {/* A lane that is working says so from the tab you are not on. */}
+            {lanes[kind] && <span className="tab__dot" title="Converting" />}
+          </button>
+        ))}
+      </div>
+
+{/* Above the table, not below it: the button acts on the ticked rows, and
+          a long list otherwise pushed it off-screen just as it was needed. */}
+      <div className="conv__actions">
+        <Button
+          onClick={() => void start()}
+          loading={running}
+          disabled={chosen.length === 0 || caps?.ffmpeg === false}
+          icon={<BoltIcon size={15} />}
+        >
+          {running
+            ? `Converting ${counts.done + 1} of ${chosen.length}…`
+            : chosen.length === 0
+              ? "Convert selected"
+              : `Convert ${chosen.length} selected file${chosen.length === 1 ? "" : "s"}`}
+        </Button>
+        {!running && chosen.length === 0 && paneItems.length > 0 && (
+          <span className="conv__muted">
+            Tick the rows you want — the box in the header takes the whole page.
+          </span>
+        )}
+        {running && (
+          <button
+            className="btn btn--ghost btn--sm"
+            type="button"
+            onClick={() => void convertCancel(pane)}
+          >
+            <StopIcon size={13} />
+            Stop
+          </button>
+        )}
+        {!running && firstOutput && (
+          <button
+            className="btn btn--ghost btn--sm"
+            type="button"
+            onClick={() => void downloadReveal(outDir ?? firstOutput)}
+          >
+            <FolderIcon size={13} />
+            Open output folder
+          </button>
+        )}
+        {/* One control, not four. The row is ~780px wide, and a label plus a
+            full path plus two buttons could not share it with Convert and
+            Open — it wrapped and took its divider with it. This says the same
+            thing in a third of the width. */}
+        <div className="conv__dest">
+          <button
+            className="conv__destbtn"
+            type="button"
+            disabled={running}
+            onClick={() => void chooseOutDir()}
+            title={
+              outDir
+                ? `Saving to ${outDir} — click to change`
+                : "Each folder gets its own “(converted)” folder next to it — click to choose one instead"
+            }
+          >
+            <FolderIcon size={13} />
+            <span className="conv__destbtn__path">
+              {outDir ? shortPath(outDir, 26) : "Saved to"}
+            </span>
+          </button>
+          {outDir && (
+            <button
+              className="conv__destreset"
+              type="button"
+              disabled={running}
+              onClick={() => setOutDir(null)}
+              title="Back to saving beside each source folder"
+              aria-label="Reset output folder"
+            >
+              <XIcon size={12} />
+            </button>
+          )}
+        </div>
+
+        {caps?.ffmpeg === false && (
+          <span className="conv__warn">
+            <AlertIcon size={13} /> FFmpeg isn't installed — set it up from the
+            Home page first.
+          </span>
+        )}
       </div>
 
       <section className="conv__panel">
         <header className="conv__tablehead">
           <h2 className="conv__tabletitle">
-            File table
-            {items.length > 0 && <span className="conv__badge">{items.length}</span>}
+            {pane === "video" ? "Videos" : "Photos"}
+            {paneItems.length > 0 && (
+              <span className="conv__badge">{paneItems.length}</span>
+            )}
           </h2>
           <div className="conv__tableactions">
             {items.length > 0 && (
@@ -479,11 +631,18 @@ export function ConvertTab({ active }: { active: boolean }) {
             <button
               className="btn btn--ghost btn--sm"
               type="button"
-              disabled={items.length === 0 || running}
+              disabled={paneItems.length === 0 || running}
+              // Clears this pane only: the other one may be mid-batch, and
+              // emptying its table under it would be alarming.
               onClick={() => {
-                setItems([]);
-                setSelected(new Set());
-                setJobs({});
+                const gone = new Set(paneItems.map((i) => i.id));
+                setItems((prev) => prev.filter((i) => !gone.has(i.id)));
+                setSelected((prev) => new Set([...prev].filter((id) => !gone.has(id))));
+                setJobs((prev) => {
+                  const next = { ...prev };
+                  for (const id of gone) delete next[id];
+                  return next;
+                });
                 setPage(0);
               }}
             >
@@ -493,10 +652,11 @@ export function ConvertTab({ active }: { active: boolean }) {
           </div>
         </header>
 
-        {items.length === 0 ? (
+        {paneItems.length === 0 ? (
           <p className="conv__empty">
-            Nothing queued yet. Drop a folder above and every video and photo
-            inside it appears here, ready to tick.
+            {items.length === 0
+              ? "Nothing queued yet. Drop a folder above and every video and photo inside it appears here, ready to tick."
+              : `No ${pane === "video" ? "videos" : "photos"} in what you dropped — check the other tab.`}
           </p>
         ) : (
           <>
@@ -534,7 +694,9 @@ export function ConvertTab({ active }: { active: boolean }) {
                     return (
                       <tr
                         key={item.id}
-                        className={`${on ? "conv__row--on" : ""} ${item.supported ? "" : "conv__row--off"}`.trim()}
+                        className={`${on ? "conv__row--on" : ""} ${
+                          item.supported ? "" : "conv__row--off"
+                        } ${job?.status === "converting" ? "conv__row--busy" : ""}`.trim()}
                       >
                         <td className="conv__col-check">
                           <input
@@ -600,7 +762,11 @@ export function ConvertTab({ active }: { active: boolean }) {
       </section>
 
       <div className="conv__settings">
-        <section className="conv__card">
+        {/* Each pane carries only the settings that act on it: a photo batch has
+            nothing to do with frame rate, and a resolution box that does
+            nothing is worse than one that is absent. */}
+        {pane === "video" && (
+          <section className="conv__card">
           <h3 className="conv__cardtitle">Video output</h3>
           <label className="conv__field">
             <span>Preset</span>
@@ -679,18 +845,74 @@ export function ConvertTab({ active }: { active: boolean }) {
               ))}
             </select>
           </label>
+
+          <label className="conv__field">
+            <span>Files at once</span>
+            <input
+              className="input"
+              type="number"
+              min={1}
+              max={caps?.max_threads ?? 16}
+              value={threads.video}
+              disabled={running}
+              onChange={(e) =>
+                setThreads((prev) => ({ ...prev, video: Number(e.target.value) }))
+              }
+            />
+          </label>
+          <label className="conv__toggle">
+            <input
+              type="checkbox"
+              checked={gpu}
+              disabled={running || !caps?.has_hardware || audioOnly || videoFormat === "webm"}
+              onChange={(e) => setGpu(e.target.checked)}
+            />
+            <span>
+              <strong>Hardware acceleration</strong>
+              <em>
+                {!caps
+                  ? "Checking…"
+                  : audioOnly
+                    ? "Not used for audio-only output"
+                    : videoFormat === "webm"
+                      ? "WebM is VP9, which the H.264 hardware encoders can't write — this batch uses the CPU"
+                      : caps.has_hardware
+                        ? `${caps.encoder_label} · ${caps.cpu_threads} CPU threads`
+                        : `Not available in this FFmpeg build — using ${caps.encoder_label}`}
+              </em>
+            </span>
+          </label>
+          <label className="conv__toggle" style={{ marginTop: 12 }}>
+            <input
+              type="checkbox"
+              checked={skipConforming}
+              disabled={running}
+              onChange={(e) => setSkipConforming(e.target.checked)}
+            />
+            <span>
+              <strong>Don't re-encode files already correct</strong>
+              <em>
+                A file that already matches every setting is copied to the
+                output folder as-is, rather than rebuilt into something
+                slightly worse.
+              </em>
+            </span>
+          </label>
           <p className="conv__note">
             {activePreset.aspect
               ? `${FITS.find((f) => f.value === fit)?.note}. `
               : ""}
             {formatNote}
+            {" FFmpeg already spreads one file across cores, so more files at once is not automatically faster — past a handful they compete."}
             {audioOnly
               ? ""
               : " Resolution is a ceiling, never a target — a 720p source stays 720p rather than being upscaled into a bigger file with the same detail."}
           </p>
         </section>
+        )}
 
-        <section className="conv__card">
+        {pane === "photo" && (
+          <section className="conv__card">
           <h3 className="conv__cardtitle">Photo output</h3>
           <label className="conv__field">
             <span>Format</span>
@@ -722,11 +944,28 @@ export function ConvertTab({ active }: { active: boolean }) {
               ))}
             </select>
           </label>
+
+          <label className="conv__field">
+            <span>Files at once</span>
+            <input
+              className="input"
+              type="number"
+              min={1}
+              max={caps?.max_threads ?? 16}
+              value={threads.photo}
+              disabled={running}
+              onChange={(e) =>
+                setThreads((prev) => ({ ...prev, photo: Number(e.target.value) }))
+              }
+            />
+          </label>
           <p className="conv__note">
             Photos are re-saved at high quality — PNG stays lossless, JPG and
-            WebP are near-lossless at these settings.
+            WebP are near-lossless at these settings. They convert quickly, so
+            several at once costs little.
           </p>
         </section>
+        )}
 
         <section className="conv__card">
           <h3 className="conv__cardtitle">Media information</h3>
@@ -760,140 +999,9 @@ export function ConvertTab({ active }: { active: boolean }) {
           </ul>
         </section>
 
-        <section className="conv__card">
-          <h3 className="conv__cardtitle">Save to</h3>
-          <div className="outdir">
-            <div className="outdir__path" title={outDir ?? undefined}>
-              {outDir ?? "Beside each source folder"}
-            </div>
-            <div className="outdir__note">
-              {outDir
-                ? "Everything lands here, whichever folder it came from."
-                : "Each folder gets its own “(converted)” folder next to it."}
-            </div>
-            <div className="outdir__actions">
-              <button
-                className="btn btn--ghost btn--sm"
-                type="button"
-                disabled={running}
-                onClick={() => void chooseOutDir()}
-              >
-                <FolderIcon size={13} />
-                Choose…
-              </button>
-              {outDir && (
-                <button
-                  className="btn btn--ghost btn--sm"
-                  type="button"
-                  disabled={running}
-                  onClick={() => setOutDir(null)}
-                >
-                  Reset
-                </button>
-              )}
-            </div>
-          </div>
-        </section>
 
-        <section className="conv__card">
-          <h3 className="conv__cardtitle">Converter settings</h3>
-          <label className="conv__field">
-            <span>Files at once</span>
-            <input
-              className="input"
-              type="number"
-              min={1}
-              max={caps?.max_threads ?? 16}
-              value={threads}
-              disabled={running}
-              onChange={(e) => setThreads(Number(e.target.value))}
-            />
-          </label>
-          <label className="conv__toggle">
-            <input
-              type="checkbox"
-              checked={gpu}
-              disabled={running || !caps?.has_hardware || audioOnly || videoFormat === "webm"}
-              onChange={(e) => setGpu(e.target.checked)}
-            />
-            <span>
-              <strong>Hardware acceleration</strong>
-              <em>
-                {caps
-                  ? caps.has_hardware
-                    ? `${caps.encoder_label} · ${caps.cpu_threads} CPU threads`
-                    : `Not available in this FFmpeg build — using ${caps.encoder_label}`
-                  : "Checking…"}
-              </em>
-            </span>
-          </label>
-          <label className="conv__toggle" style={{ marginTop: 12 }}>
-            <input
-              type="checkbox"
-              checked={skipConforming}
-              disabled={running}
-              onChange={(e) => setSkipConforming(e.target.checked)}
-            />
-            <span>
-              <strong>Skip files already correct</strong>
-              <em>
-                A file that already matches every setting is left untouched
-                rather than re-encoded into something slightly worse.
-              </em>
-            </span>
-          </label>
-          <p className="conv__note">
-            FFmpeg already spreads one file across cores, so more files at once
-            is not automatically faster — past a handful they compete.
-          </p>
-        </section>
       </div>
 
-      <div className="conv__actions">
-        <Button
-          onClick={() => void start()}
-          loading={running}
-          disabled={chosen.length === 0 || caps?.ffmpeg === false}
-          icon={<BoltIcon size={15} />}
-        >
-          {running
-            ? `Converting ${counts.done + 1} of ${chosen.length}…`
-            : chosen.length === 0
-              ? "Convert selected"
-              : `Convert ${chosen.length} selected file${chosen.length === 1 ? "" : "s"}`}
-        </Button>
-        {!running && chosen.length === 0 && items.length > 0 && (
-          <span className="conv__muted">
-            Tick the rows you want — the box in the header takes the whole page.
-          </span>
-        )}
-        {running && (
-          <button
-            className="btn btn--ghost btn--sm"
-            type="button"
-            onClick={() => void convertCancel()}
-          >
-            <StopIcon size={13} />
-            Stop
-          </button>
-        )}
-        {!running && firstOutput && (
-          <button
-            className="btn btn--ghost btn--sm"
-            type="button"
-            onClick={() => void downloadReveal(outDir ?? firstOutput)}
-          >
-            <FolderIcon size={13} />
-            Open output folder
-          </button>
-        )}
-        {caps?.ffmpeg === false && (
-          <span className="conv__warn">
-            <AlertIcon size={13} /> FFmpeg isn't installed — set it up from the
-            Home page first.
-          </span>
-        )}
-      </div>
     </div>
   );
 }
@@ -907,36 +1015,44 @@ function StatusCell({ item, job }: { item: MediaItem; job?: JobUpdate }) {
 
   if (job.status === "converting") {
     const pct = Math.round(job.percent ?? 0);
+    // A copy has no percentage worth reporting - it finishes in about a second
+    // - so it gets a moving bar rather than a number that jumps 0 to 100.
+    const copying = job.how === "copy";
     return (
-      <div className="conv__bar" title={job.how === "copy" ? "Copying streams" : `${pct}%`}>
-        <div className="conv__barfill" style={{ width: `${pct}%` }} />
-        <span className="conv__barlabel">
-          {job.how === "copy" ? "copying" : `${pct}%`}
+      <div
+        className="conv__prog"
+        title={copying ? "Copying streams — no re-encode" : `${pct}%`}
+      >
+        <span className="conv__prog__label">
+          {copying ? "Copying" : `${pct}%`}
+        </span>
+        <span
+          className={`conv__prog__track ${copying ? "conv__prog__track--indeterminate" : ""}`.trim()}
+        >
+          <span
+            className="conv__prog__fill"
+            style={copying ? undefined : { width: `${pct}%` }}
+          />
         </span>
       </div>
     );
   }
-  // Already correct: nothing was written, and saying so is the point of the
-  // setting that produced it.
-  if (job.status === "skipped") {
-    return (
-      <span className="pill pill--off" title="Already matches every setting">
-        Already OK
-      </span>
-    );
-  }
+
   if (job.status === "done") {
     return (
       <span
         className="pill pill--ok"
         title={
-          job.how === "copy"
-            ? "Streams copied — no re-encode, no quality loss"
-            : "Re-encoded"
+          job.how === "clone"
+            ? "Already matched every setting — copied across untouched"
+            : job.how === "copy"
+              ? "Streams copied into the new container — no re-encode, no quality loss"
+              : "Re-encoded"
         }
       >
         <CheckIcon size={11} />
-        {job.how === "copy" ? "Copied" : ""}
+        {job.how === "clone" && <span className="pill__how">Copied</span>}
+        {job.how === "copy" && <span className="pill__how">Remuxed</span>}
         {job.output_bytes ? formatBytes(job.output_bytes) : "Done"}
       </span>
     );

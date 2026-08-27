@@ -23,6 +23,144 @@ fn cookie_value<'a>(cookies: &'a [StoredCookie], name: &str) -> Option<&'a str> 
         .map(|c| c.value.as_str())
 }
 
+/// What asking the platform about a session concluded.
+///
+/// Three states, not two, and the third is the important one. A request that
+/// fails for a reason of its own - no network, a blocked datacentre IP, an
+/// endpoint that moved - says nothing about whether the cookies work. Reporting
+/// that as "invalid" sends people off to re-export cookies that were fine.
+pub enum SessionCheck {
+    /// The platform answered as the signed-in account.
+    SignedIn(SessionProfile),
+    /// The platform answered, and refused these cookies.
+    Rejected,
+    /// No usable answer. The cookies may well be fine.
+    Unknown,
+}
+
+/// Ask the platform whether a stored session still works.
+pub async fn check(kind: SessionKind, cookies: &[StoredCookie]) -> SessionCheck {
+    match kind {
+        SessionKind::Instagram => check_instagram(cookies).await,
+        SessionKind::Facebook => check_facebook(cookies).await,
+        // Neither exposes a cheap cookie-only endpoint that distinguishes a
+        // dead session from a blocked request, and guessing between them is
+        // exactly what this type exists to avoid.
+        SessionKind::TikTok | SessionKind::X => SessionCheck::Unknown,
+    }
+}
+
+/// Instagram, asked the way a browser session is entitled to ask.
+///
+/// `ds_user_id` is the account's own id, so the profile endpoint for that id is
+/// a direct "does this session still speak for this account". The previous
+/// check used `accounts/current_user/`, which is a *mobile app* endpoint: it
+/// refuses ordinary web cookies whatever their state, so a perfectly good
+/// session was reported dead.
+async fn check_instagram(cookies: &[StoredCookie]) -> SessionCheck {
+    let Some(user_id) = cookie_value(cookies, "ds_user_id") else {
+        // Without it there is no account to ask about; the session cookie
+        // alone cannot say who it belongs to.
+        return SessionCheck::Unknown;
+    };
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!(
+            "https://www.instagram.com/api/v1/users/{user_id}/info/"
+        ))
+        .header("Cookie", cookie_header(cookies))
+        .header("X-IG-App-ID", "936619743392459")
+        .header("User-Agent", WEB_UA)
+        .header("Referer", "https://www.instagram.com/")
+        .send()
+        .await;
+
+    let Ok(resp) = resp else {
+        return SessionCheck::Unknown;
+    };
+
+    // 401 and 403 are Instagram saying these cookies are not a session; a 5xx
+    // or a redirect to a checkpoint is Instagram having a moment.
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+        || resp.status() == reqwest::StatusCode::FORBIDDEN
+    {
+        return SessionCheck::Rejected;
+    }
+    if !resp.status().is_success() {
+        return SessionCheck::Unknown;
+    }
+
+    let Ok(v) = resp.json::<serde_json::Value>().await else {
+        return SessionCheck::Unknown;
+    };
+    let Some(user) = v.get("user") else {
+        return SessionCheck::Unknown;
+    };
+
+    SessionCheck::SignedIn(SessionProfile {
+        display_name: user
+            .get("full_name")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| user.get("username").and_then(|x| x.as_str()))
+            .map(str::to_string),
+        avatar_url: user
+            .get("profile_pic_url")
+            .and_then(|x| x.as_str())
+            .map(str::to_string),
+    })
+}
+
+/// Facebook, asked whether it still knows who this is.
+///
+/// Redirects are deliberately not followed: a live session answers `/me/` with
+/// a redirect to the profile, a dead one with a redirect to `login.php`, and
+/// following either would turn both into a 200 that proves nothing. The old
+/// check only read the `c_user` cookie and built an avatar URL from it, which
+/// succeeds whether or not the session is alive.
+async fn check_facebook(cookies: &[StoredCookie]) -> SessionCheck {
+    let Ok(client) = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    else {
+        return SessionCheck::Unknown;
+    };
+
+    let resp = client
+        .get("https://www.facebook.com/me/")
+        .header("Cookie", cookie_header(cookies))
+        .header("User-Agent", WEB_UA)
+        .send()
+        .await;
+
+    let Ok(resp) = resp else {
+        return SessionCheck::Unknown;
+    };
+
+    let location = resp
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    if location.contains("login") || location.contains("checkpoint") {
+        return SessionCheck::Rejected;
+    }
+    if resp.status().is_redirection() || resp.status().is_success() {
+        return SessionCheck::SignedIn(
+            fetch_facebook(cookies).await.unwrap_or_default(),
+        );
+    }
+    SessionCheck::Unknown
+}
+
+/// One user agent for every probe: a desktop browser, which is what these web
+/// cookies were issued to.
+const WEB_UA: &str =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
+
 /// Fetch the profile for a just-captured session. Returns `None` on any
 /// failure, which the caller treats as "connected, no profile".
 pub async fn fetch(kind: SessionKind, cookies: &[StoredCookie]) -> Option<SessionProfile> {
@@ -43,7 +181,7 @@ async fn fetch_instagram(cookies: &[StoredCookie]) -> Option<SessionProfile> {
     // Instagram's public web app id header.
     let client = reqwest::Client::new();
     let resp = client
-        .get("https://i.instagram.com/api/v1/accounts/current_user/")
+        .get("https://www.instagram.com/api/v1/accounts/current_user/")
         .header("Cookie", cookie_header(cookies))
         .header("X-IG-App-ID", "936619743392459")
         .header(
