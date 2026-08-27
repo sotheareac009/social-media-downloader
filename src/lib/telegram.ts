@@ -478,3 +478,375 @@ function asLoginError(e: unknown, fallback: string): TelegramLoginError {
     detail ? `${fallback} (${detail})` : fallback,
   );
 }
+
+// --------------------------------------------------------- message lookup
+
+/**
+ * One formatting span from Telegram's own entity list.
+ *
+ * Offsets are UTF-16 code units, which is exactly how JavaScript indexes a
+ * string — so they can be used directly, with no conversion. That is not true
+ * of every language, and it is the reason this is worth stating.
+ */
+export interface TelegramSpan {
+  type:
+    | "bold"
+    | "italic"
+    | "underline"
+    | "strike"
+    | "code"
+    | "pre"
+    | "link"
+    | "mention"
+    | "hashtag"
+    | "spoiler";
+  offset: number;
+  length: number;
+  /** Present for links; a text-link's target, or the URL itself. */
+  url?: string;
+}
+
+export interface TelegramMediaItem {
+  /** The message this piece of media belongs to — an album spans several. */
+  messageId: number;
+  kind: "photo" | "video" | "document";
+  /** Object URL for the preview, or null when no thumbnail could be read. */
+  thumbUrl: string | null;
+  width: number | null;
+  height: number | null;
+  /** Seconds, for video. */
+  duration: number | null;
+  sizeBytes: number | null;
+  fileName: string | null;
+  /** Telegram's own "tap to reveal" flag. */
+  hasSpoiler: boolean;
+}
+
+export interface TelegramMessageView {
+  chatId: string;
+  chatTitle: string;
+  chatUsername: string | null;
+  avatarUrl: string | null;
+  messageId: number;
+  /** Unix seconds. */
+  date: number;
+  text: string;
+  spans: TelegramSpan[];
+  views: number | null;
+  /** One entry for a single post; several when the post is an album. */
+  media: TelegramMediaItem[];
+  link: string;
+}
+
+/** What a t.me link points at. */
+export interface TelegramLinkTarget {
+  /** A public @username, or null for a private channel link. */
+  username: string | null;
+  /** The internal channel id from a `/c/<id>/` link. */
+  channelId: string | null;
+  messageId: number;
+}
+
+/**
+ * Read a message link.
+ *
+ * Three shapes exist and all are common:
+ *
+ *   t.me/name/123        a public channel or group
+ *   t.me/c/1234567/123   a private one, by internal id
+ *   t.me/s/name/123      the web preview of a public channel
+ *
+ * A thread link carries a second number (`/name/45/123`), where the last one
+ * is the message itself — taking the first would silently open the wrong post.
+ */
+export function parseTelegramMessageLink(raw: string): TelegramLinkTarget | null {
+  const trimmed = raw.trim();
+  if (trimmed === "") return null;
+
+  let url: URL;
+  try {
+    url = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`);
+  } catch {
+    return null;
+  }
+
+  const host = url.hostname.toLowerCase().replace(/^www\./, "");
+  if (host !== "t.me" && host !== "telegram.me" && host !== "telegram.dog") {
+    return null;
+  }
+
+  let parts = url.pathname.split("/").filter((p) => p !== "");
+  // `/s/name/123` is the same channel, viewed on the web.
+  if (parts[0] === "s") parts = parts.slice(1);
+
+  if (parts[0] === "c") {
+    const [, channelId, ...rest] = parts;
+    const messageId = Number(rest[rest.length - 1]);
+    if (!channelId || !Number.isFinite(messageId)) return null;
+    return { username: null, channelId, messageId };
+  }
+
+  const username = parts[0];
+  const messageId = Number(parts[parts.length - 1]);
+  if (!username || parts.length < 2 || !Number.isFinite(messageId)) return null;
+  return { username, channelId: null, messageId };
+}
+
+/** Telegram's entity classes, mapped to the handful of spans worth rendering. */
+function spanOf(entity: Api.TypeMessageEntity, text: string): TelegramSpan | null {
+  const base = { offset: entity.offset, length: entity.length };
+  if (entity instanceof Api.MessageEntityBold) return { ...base, type: "bold" };
+  if (entity instanceof Api.MessageEntityItalic) return { ...base, type: "italic" };
+  if (entity instanceof Api.MessageEntityUnderline) return { ...base, type: "underline" };
+  if (entity instanceof Api.MessageEntityStrike) return { ...base, type: "strike" };
+  if (entity instanceof Api.MessageEntityCode) return { ...base, type: "code" };
+  if (entity instanceof Api.MessageEntityPre) return { ...base, type: "pre" };
+  if (entity instanceof Api.MessageEntitySpoiler) return { ...base, type: "spoiler" };
+  if (entity instanceof Api.MessageEntityHashtag) return { ...base, type: "hashtag" };
+  if (entity instanceof Api.MessageEntityMention) return { ...base, type: "mention" };
+  if (entity instanceof Api.MessageEntityTextUrl) {
+    return { ...base, type: "link", url: entity.url };
+  }
+  if (entity instanceof Api.MessageEntityUrl) {
+    return { ...base, type: "link", url: text.substr(entity.offset, entity.length) };
+  }
+  return null;
+}
+
+/** Largest available thumbnail for a document, or null. */
+function largestThumb(doc: Api.Document): Api.TypePhotoSize | null {
+  const thumbs = (doc.thumbs ?? []).filter(
+    (t): t is Api.PhotoSize => t instanceof Api.PhotoSize,
+  );
+  if (thumbs.length === 0) return null;
+  return thumbs.reduce((best, t) => (t.size > best.size ? t : best), thumbs[0]);
+}
+
+/** Read one message's media into a preview-ready shape. */
+async function mediaOf(
+  client: TelegramClient,
+  message: Api.Message,
+): Promise<TelegramMediaItem | null> {
+  const photo = message.photo instanceof Api.Photo ? message.photo : null;
+  const doc = message.document instanceof Api.Document ? message.document : null;
+  if (!photo && !doc) return null;
+
+  const video = doc?.attributes.find(
+    (a): a is Api.DocumentAttributeVideo => a instanceof Api.DocumentAttributeVideo,
+  );
+  const fileName = doc?.attributes.find(
+    (a): a is Api.DocumentAttributeFilename => a instanceof Api.DocumentAttributeFilename,
+  )?.fileName;
+
+  let thumbUrl: string | null = null;
+  try {
+    // A photo's own file is small enough to be the preview; a video's is not,
+    // so its poster frame is fetched instead.
+    const bytes = photo
+      ? await client.downloadMedia(message, {})
+      : await (async () => {
+          const thumb = doc ? largestThumb(doc) : null;
+          return thumb ? client.downloadMedia(message, { thumb }) : null;
+        })();
+    if (bytes && typeof bytes !== "string" && bytes.length > 0) {
+      thumbUrl = URL.createObjectURL(
+        new Blob([new Uint8Array(bytes)], { type: "image/jpeg" }),
+      );
+    }
+  } catch {
+    // A preview that cannot be read is not a failure worth aborting for; the
+    // tile falls back to a placeholder and the media still downloads.
+  }
+
+  const largestPhotoSize = photo?.sizes
+    ?.filter((s): s is Api.PhotoSize => s instanceof Api.PhotoSize)
+    .reduce<Api.PhotoSize | null>((best, s) => (!best || s.size > best.size ? s : best), null);
+
+  return {
+    messageId: message.id,
+    kind: photo ? "photo" : video ? "video" : "document",
+    thumbUrl,
+    width: video?.w ?? largestPhotoSize?.w ?? null,
+    height: video?.h ?? largestPhotoSize?.h ?? null,
+    duration: video?.duration ?? null,
+    sizeBytes: doc ? Number(doc.size) : (largestPhotoSize?.size ?? null),
+    fileName: fileName ?? null,
+    hasSpoiler:
+      message.media instanceof Api.MessageMediaPhoto ||
+      message.media instanceof Api.MessageMediaDocument
+        ? message.media.spoiler === true
+        : false,
+  };
+}
+
+/**
+ * Fetch the message a t.me link points at, with its album siblings.
+ *
+ * An album is not one message: Telegram sends each photo as its own message
+ * sharing a `groupedId`, and a link points at only one of them. Fetching the
+ * neighbouring ids and keeping those with the same group is how the post is
+ * reassembled — an album is at most ten items, so a window of ten either side
+ * always covers it.
+ */
+export async function telegramFetchMessage(link: string): Promise<TelegramMessageView> {
+  const target = parseTelegramMessageLink(link);
+  if (!target) {
+    throw new Error(
+      "That isn't a Telegram message link. It should look like https://t.me/channel/123",
+    );
+  }
+
+  const client = await connectedClient();
+
+  // A private link carries only the internal id, which has to be marked as a
+  // channel before Telegram will resolve it.
+  const peer: string | Api.TypeEntityLike = target.username
+    ? target.username
+    : (`-100${target.channelId}` as unknown as Api.TypeEntityLike);
+
+  let entity;
+  try {
+    entity = await client.getEntity(peer as never);
+  } catch {
+    throw new Error(
+      target.username
+        ? `Couldn't open @${target.username}. If it's private, you have to be a member.`
+        : "Couldn't open that channel. Private links only work for channels you're in.",
+    );
+  }
+
+  const found = await client.getMessages(entity, { ids: [target.messageId] });
+  const message = found?.[0];
+  if (!message || !(message instanceof Api.Message)) {
+    throw new Error("That message doesn't exist, or was deleted.");
+  }
+
+  // Album siblings, when this post is part of one.
+  let group: Api.Message[] = [message];
+  if (message.groupedId) {
+    const window = Array.from({ length: 21 }, (_, i) => target.messageId - 10 + i).filter(
+      (id) => id > 0,
+    );
+    try {
+      const near = await client.getMessages(entity, { ids: window });
+      const siblings = (near ?? []).filter(
+        (m): m is Api.Message =>
+          m instanceof Api.Message &&
+          m.groupedId != null &&
+          String(m.groupedId) === String(message.groupedId),
+      );
+      if (siblings.length > 0) {
+        group = siblings.sort((a, b) => a.id - b.id);
+      }
+    } catch {
+      // A window that cannot be read leaves the single message, which is still
+      // the message that was asked for.
+    }
+  }
+
+  const media: TelegramMediaItem[] = [];
+  for (const m of group) {
+    const item = await mediaOf(client, m);
+    if (item) media.push(item);
+  }
+
+  // The caption lives on whichever message in the album carries one.
+  const captioned = group.find((m) => (m.message ?? "").trim() !== "") ?? message;
+  const text = captioned.message ?? "";
+  const spans = (captioned.entities ?? [])
+    .map((e) => spanOf(e, text))
+    .filter((s): s is TelegramSpan => s !== null);
+
+  const chat = entity as { title?: string; username?: string; firstName?: string };
+  const chatId = String((entity as { id?: unknown }).id ?? "");
+
+  return {
+    chatId,
+    chatTitle: chat.title ?? chat.firstName ?? target.username ?? "Telegram",
+    chatUsername: chat.username ?? target.username,
+    avatarUrl: await telegramChatAvatar(chatId).catch(() => null),
+    messageId: message.id,
+    date: message.date,
+    text,
+    spans,
+    views: message.views ?? null,
+    media,
+    link,
+  };
+}
+
+/**
+ * Download one piece of media in full, for the preview overlay.
+ *
+ * Returns an object URL. The caller owns it and must revoke it — a video held
+ * in memory is tens of megabytes, and leaking one per preview would show up
+ * as the app slowly eating RAM.
+ */
+export async function telegramDownloadMedia(
+  chatId: string,
+  messageId: number,
+  onProgress?: (received: number, total: number | null) => void,
+): Promise<{ url: string; mime: string }> {
+  const client = await connectedClient();
+  const found = await client.getMessages(chatId, { ids: [messageId] });
+  const message = found?.[0];
+  if (!message || !(message instanceof Api.Message)) {
+    throw new Error("That message is no longer available.");
+  }
+
+  const doc = message.document instanceof Api.Document ? message.document : null;
+  const total = doc ? Number(doc.size) : null;
+
+  const bytes = await client.downloadMedia(message, {
+    progressCallback: (received) => {
+      onProgress?.(Number(received), total);
+    },
+  });
+  if (!bytes || typeof bytes === "string" || bytes.length === 0) {
+    throw new Error("Nothing could be downloaded from that message.");
+  }
+
+  const mime = doc?.mimeType ?? "image/jpeg";
+  return {
+    url: URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: mime })),
+    mime,
+  };
+}
+
+/**
+ * Save bytes to a file the user picks.
+ *
+ * A webview cannot download a blob: an `<a download>` pointing at an object
+ * URL does nothing at all inside a Tauri window, silently. So the bytes go to
+ * Rust, which opens the OS save dialog and writes the file.
+ *
+ * Sent as a `Uint8Array` rather than an array of numbers, which puts them on
+ * the raw IPC body instead of through JSON — a 40 MB video encodes to roughly
+ * 200 MB as JSON, which is enough to stall the channel.
+ *
+ * Resolves to the path written, or null when the dialog was dismissed.
+ */
+export async function telegramSaveMedia(
+  bytes: Uint8Array,
+  fileName: string,
+  /**
+   * A folder to write into. Given one, no dialog appears — which is what makes
+   * saving a ten-item album one decision instead of ten.
+   */
+  directory?: string,
+): Promise<string | null> {
+  return invoke<string | null>("telegram_save_media", bytes, {
+    // Headers are ASCII; a Telegram filename very often is not.
+    headers: {
+      "x-file-name": encodeURIComponent(fileName),
+      ...(directory ? { "x-dir": encodeURIComponent(directory) } : {}),
+    },
+  });
+}
+
+/** A sensible filename for one media item, when Telegram gave none. */
+export function telegramMediaFileName(item: TelegramMediaItem): string {
+  if (item.fileName) return item.fileName;
+  const ext = item.kind === "video" ? "mp4" : "jpg";
+  return `telegram-${item.messageId}.${ext}`;
+}

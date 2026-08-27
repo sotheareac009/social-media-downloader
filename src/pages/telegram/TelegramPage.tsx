@@ -10,6 +10,7 @@ import {
   type TelegramStatus,
 } from "@/lib/telegram";
 import { Button } from "@/components/ui/Button";
+import { MessageLookup } from "@/components/telegram/MessageLookup";
 import { useToast } from "@/components/ui/Toast";
 import { AlertIcon, ArrowLeftIcon, CheckIcon, ShieldIcon, TelegramIcon, XIcon } from "@/components/ui/icons";
 
@@ -329,6 +330,9 @@ function Connected({
           Disconnect
         </Button>
       </div>
+
+      {/* Only useful once signed in: opening a message needs the session. */}
+      <MessageLookup />
     </div>
   );
 }

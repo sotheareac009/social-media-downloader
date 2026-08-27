@@ -120,6 +120,13 @@ export const GripIcon = ({ size = 16, className }: P) => (
   </svg>
 );
 
+/** Play triangle, for a video tile. */
+export const PlayIcon = ({ size = 16, className }: P) => (
+  <svg {...base(size)} className={className}>
+    <path d="M7 4.5v15l13-7.5Z" fill="currentColor" stroke="none" />
+  </svg>
+);
+
 export const FolderIcon = ({ size = 16, className }: P) => (
   <svg {...base(size)} className={className}>
     <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
