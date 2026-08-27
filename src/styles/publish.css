@@ -1302,3 +1302,24 @@
 .scrollctl__loading { font-size: 11px; color: var(--text-tertiary); }
 
 .scrolllist__end { display: inline-flex; align-items: center; gap: 8px; }
+
+/* Which app build this is, shown while choosing rather than after a job
+   stops — a device with both Facebook and Facebook Lite offers two rows that
+   are otherwise indistinguishable. */
+.foundrow__tag {
+  margin-left: 7px;
+  padding: 1px 7px;
+  border-radius: var(--r-full);
+  background: var(--surface-3);
+  border: 1px solid var(--border-subtle);
+  font-size: 10px;
+  font-weight: 560;
+  color: var(--text-tertiary);
+  vertical-align: middle;
+}
+
+.foundrow__tag--auto {
+  background: var(--success-soft);
+  border-color: var(--success-border);
+  color: var(--success);
+}

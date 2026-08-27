@@ -27,7 +27,17 @@ import { Button } from "@/components/ui/Button";
 import { useToast } from "@/components/ui/Toast";
 import { AlertIcon, CheckIcon, UploadIcon, XIcon } from "@/components/ui/icons";
 import { SourceLogo, SOURCE_COLOR, type SourceId } from "@/components/home/SourceLogo";
+import { QueuePager } from "@/components/downloads/QueuePager";
 import { isUploadTargetHidden } from "@/lib/flags";
+
+/**
+ * Items per page.
+ *
+ * Small, because each row is a card with a thumbnail, a title and a
+ * description box - twenty of them is a page nobody can read, and every one
+ * holds a live thumbnail.
+ */
+const UPLOAD_PAGE_SIZE = 8;
 
 type ItemStatus = "pending" | "uploading" | "done" | "failed";
 interface Item {
@@ -92,6 +102,7 @@ export function UploadPage() {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<UploadResult | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
+  const [page, setPage] = useState(0);
 
   const mounted = useRef(true);
   const ytPreselected = useRef(false);
@@ -278,11 +289,26 @@ export function UploadPage() {
     setItems((prev) => prev.map((i) => (i.path === path ? { ...i, ...patch } : i)));
   }, []);
 
-  const publish = useCallback(async () => {
-    if (chosen.length === 0 || items.length === 0) return;
+  /**
+   * Upload `only` those items, or everything when it is omitted.
+   *
+   * The subset is what makes retry meaningful: re-running the whole list after
+   * two failures would re-upload every video that already succeeded, which on
+   * YouTube means duplicates nobody asked for.
+   */
+  const publish = useCallback(async (only?: Item[]) => {
+    const queue = only ?? items;
+    if (chosen.length === 0 || queue.length === 0) return;
     setBusy(true);
     setResult(null);
-    setItems((prev) => prev.map((i) => ({ ...i, status: "pending", error: undefined })));
+    // Only the items about to run are reset; the rest keep the outcome they
+    // already earned.
+    const retrying = new Set(queue.map((i) => i.path));
+    setItems((prev) =>
+      prev.map((i) =>
+        retrying.has(i.path) ? { ...i, status: "pending", error: undefined } : i,
+      ),
+    );
 
     // Per-platform tally: how many videos succeeded / failed on each.
     const tally: Record<string, PlatformResult> = {};
@@ -296,7 +322,7 @@ export function UploadPage() {
     };
 
     let ok = 0;
-    for (const item of items) {
+    for (const item of queue) {
       setItems((prev) =>
         prev.map((i) => (i.path === item.path ? { ...i, status: "uploading" } : i)),
       );
@@ -366,15 +392,57 @@ export function UploadPage() {
     if (mounted.current) {
       setBusy(false);
       setResult({
-        totalVideos: items.length,
+        totalVideos: queue.length,
         videosOk: ok,
         platforms: Object.values(tally),
       });
     }
-    const failed = items.length - ok;
+    const failed = queue.length - ok;
     if (failed === 0) toast("success", `Uploaded ${ok} video${ok === 1 ? "" : "s"}.`);
     else toast(ok > 0 ? "info" : "error", `${ok} done, ${failed} with errors.`);
   }, [chosen, items, privacy, tgSelected, ytSelected, ytAccounts, toast]);
+
+  /**
+   * What has happened so far, recomputed from the items themselves.
+   *
+   * Derived rather than counted alongside the upload loop: one source of truth
+   * means the strip can never disagree with the rows underneath it, which is
+   * the usual way a progress summary goes wrong.
+   */
+  const tally = useMemo(() => {
+    let done = 0;
+    let failed = 0;
+    let uploading = 0;
+    for (const i of items) {
+      if (i.status === "done") done++;
+      else if (i.status === "failed") failed++;
+      else if (i.status === "uploading") uploading++;
+    }
+    return { done, failed, uploading, settled: done + failed };
+  }, [items]);
+
+  const failedItems = useMemo(
+    () => items.filter((i) => i.status === "failed"),
+    [items],
+  );
+
+  const pageCount = Math.max(1, Math.ceil(items.length / UPLOAD_PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount - 1);
+  const pageStart = currentPage * UPLOAD_PAGE_SIZE;
+  const pageItems = items.slice(pageStart, pageStart + UPLOAD_PAGE_SIZE);
+  useEffect(() => {
+    if (page !== currentPage) setPage(currentPage);
+  }, [page, currentPage]);
+
+  // Follow the upload: watching a run from the wrong page shows nothing
+  // happening at all.
+  useEffect(() => {
+    if (!busy) return;
+    const at = items.findIndex((i) => i.status === "uploading");
+    if (at < 0) return;
+    const wanted = Math.floor(at / UPLOAD_PAGE_SIZE);
+    setPage((prev) => (prev === wanted ? prev : wanted));
+  }, [busy, items]);
 
   const canPublish = chosen.length > 0 && items.length > 0 && !busy;
 
@@ -703,6 +771,16 @@ export function UploadPage() {
             {items.length > 0 && <span className="up-count"> ({items.length})</span>}
           </label>
           <div className="up-files-actions">
+            {failedItems.length > 0 && !busy && (
+              <button
+                className="btn btn--ghost btn--sm"
+                type="button"
+                onClick={() => void publish(failedItems)}
+                title="Upload only the ones that failed"
+              >
+                Retry {failedItems.length} failed
+              </button>
+            )}
             {items.length > 0 && !busy && (
               <button className="btn btn--ghost btn--sm" type="button" onClick={() => setItems([])}>
                 Clear all
@@ -714,11 +792,42 @@ export function UploadPage() {
           </div>
         </div>
 
+        {/* Live, not a summary printed at the end: during a long run the only
+            question is how it is going, and the rows alone do not answer it
+            once the list is longer than a screen. */}
+        {(busy || tally.settled > 0) && (
+          <div className="up-tally">
+            <div className="up-tally__counts">
+              <span className="up-tally__ok">
+                <CheckIcon size={12} /> {tally.done} uploaded
+              </span>
+              {tally.failed > 0 && (
+                <span className="up-tally__bad">
+                  <AlertIcon size={12} /> {tally.failed} failed
+                </span>
+              )}
+              <span className="up-tally__rest">
+                {busy
+                  ? `${tally.settled} of ${items.length} done`
+                  : `${items.length} total`}
+              </span>
+            </div>
+            <span className="up-tally__track">
+              <span
+                className="up-tally__fill"
+                style={{
+                  width: `${items.length === 0 ? 0 : (tally.settled / items.length) * 100}%`,
+                }}
+              />
+            </span>
+          </div>
+        )}
+
         {items.length === 0 ? (
           <p className="up-empty">No files added yet. Click “Add files” to choose one or more.</p>
         ) : (
           <ul className="up-list">
-            {items.map((item, i) => (
+            {pageItems.map((item, i) => (
               <li
                 key={item.path}
                 className={`up-item up-item--${item.status}`}
@@ -779,6 +888,17 @@ export function UploadPage() {
               </li>
             ))}
           </ul>
+        )}
+
+        {pageCount > 1 && (
+          <QueuePager
+            page={currentPage}
+            pageCount={pageCount}
+            from={pageStart + 1}
+            to={pageStart + pageItems.length}
+            total={items.length}
+            onPage={setPage}
+          />
         )}
 
         {youtubeChosen && (

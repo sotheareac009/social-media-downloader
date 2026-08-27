@@ -946,6 +946,25 @@ impl Adb {
         Ok(())
     }
 
+    /// Screen size in pixels, for computing a scroll gesture.
+    pub async fn screen_size(&self, serial: &str) -> Option<(i32, i32)> {
+        let out = self.shell(serial, "wm size").await.ok()?;
+        // "Physical size: 1080x2148" — the override line wins when present.
+        let line = out.lines().last()?;
+        let dims = line.rsplit(' ').next()?;
+        let (w, h) = dims.split_once('x')?;
+        Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+    }
+
+    /// Scroll the feed down by roughly one screen.
+    pub async fn scroll_down(&self, serial: &str) -> Result<()> {
+        let (w, h) = self.screen_size(serial).await.unwrap_or((1080, 1920));
+        let x = w / 2;
+        // Two thirds of the screen, well inside the edges: starting at the very
+        // bottom triggers the gesture-navigation bar instead of a scroll.
+        self.swipe(serial, (x, (h * 3) / 4), (x, h / 4), 600).await
+    }
+
     /// Grab the framebuffer as PNG bytes.
     ///
     /// `exec-out` (not `shell`) matters: plain `adb shell` mangles binary

@@ -189,6 +189,9 @@ pub async fn merge(
     let total: f64 = items.iter().filter_map(|i| i.duration_seconds).sum();
     let canvas = common_canvas(items, shape, height_cap);
     let copying = can_copy(items, format, canvas);
+    // Only asked when it matters, and once: an FFmpeg without the filter still
+    // merges, just without the timestamp rebase.
+    let setts = copying && has_setts(&ffmpeg).await;
     let how = if copying { "copy" } else { "encode" };
 
     if let Some(parent) = output.parent() {
@@ -207,7 +210,9 @@ pub async fn merge(
         std::fs::write(&path, list)
             .map_err(|e| AppError::MergeInput(format!("could not stage the clip list: {e}")))?;
         cmd.args(["-f", "concat", "-safe", "0"]).arg("-i").arg(&path);
-        cmd.args(["-c", "copy"]);
+        for arg in copy_args(format, setts) {
+            cmd.arg(arg);
+        }
         Some(path)
     } else {
         for item in items {
@@ -317,6 +322,51 @@ pub async fn merge(
         duration_seconds: total,
         how: how.to_string(),
     })
+}
+
+/// Whether this FFmpeg carries the `setts` bitstream filter.
+///
+/// Added in FFmpeg 5.1. A build without it still merges - the file just keeps
+/// the offset start that some players dislike - so this decides an argument
+/// rather than gating the feature.
+async fn has_setts(ffmpeg: &Path) -> bool {
+    crate::process::command(ffmpeg)
+        .args(["-hide_banner", "-bsfs"])
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map(|out| String::from_utf8_lossy(&out.stdout).contains("setts"))
+        .unwrap_or(false)
+}
+
+/// The output arguments for a stream-copy merge.
+///
+/// TWO THINGS THE OBVIOUS `-c copy` GETS WRONG, both invisible on a desktop
+/// player and fatal on a phone:
+///
+///   * **The audio is rebuilt, not copied.** Concatenating two clips leaves the
+///     audio DTS going backwards at the join; FFmpeg patches it and warns.
+///     Desktop players shrug, Android's decoder stops - which looks exactly
+///     like a video that plays one frame. Re-encoding the audio regenerates
+///     clean timestamps and costs seconds, while the video - the expensive part
+///     - is still copied untouched.
+///
+///   * **The video timestamps are rebased to zero.** The concat output starts a
+///     fraction of a second late, which MP4 records as an edit list. Android
+///     handles edit lists badly, with the same one-frame result. `setts` shifts
+///     the stream back to zero without re-encoding it.
+fn copy_args(format: VideoFormat, setts: bool) -> Vec<&'static str> {
+    if format.is_audio_only() {
+        // No video track to copy or rebase.
+        return format.audio_args().to_vec();
+    }
+
+    let mut args = vec!["-c:v", "copy"];
+    if setts {
+        args.extend_from_slice(&["-bsf:v", "setts=ts=PTS-STARTPTS"]);
+    }
+    args.extend_from_slice(format.audio_args());
+    args
 }
 
 /// The concat demuxer's input file.
@@ -459,6 +509,28 @@ mod tests {
         // One clip can technically be copied, but `merge` refuses it earlier
         // with a message rather than writing a duplicate of the input.
         assert!(can_copy(&items, VideoFormat::Mp4, (1920, 1080)));
+    }
+
+    #[test]
+    fn a_copy_merge_rebuilds_the_audio_and_rebases_the_video() {
+        // Both fixes exist because a `-c copy` merge plays fine on a laptop and
+        // shows a single frame on Android.
+        let args = copy_args(VideoFormat::Mp4, true).join(" ");
+        assert!(args.contains("-c:v copy"), "{args}");
+        assert!(args.contains("setts=ts=PTS-STARTPTS"), "{args}");
+        assert!(args.contains("aac"), "audio must be re-encoded: {args}");
+        assert!(!args.contains("-c copy"), "video-and-audio copy is the bug");
+
+        // An FFmpeg without the filter still merges, minus the rebase.
+        let older = copy_args(VideoFormat::Mp4, false).join(" ");
+        assert!(older.contains("-c:v copy"), "{older}");
+        assert!(!older.contains("setts"), "{older}");
+        assert!(older.contains("aac"), "{older}");
+
+        // Audio-only output has no video track to rebase.
+        let audio = copy_args(VideoFormat::Mp3, true).join(" ");
+        assert!(audio.contains("-vn"), "{audio}");
+        assert!(!audio.contains("setts"), "{audio}");
     }
 
     #[test]

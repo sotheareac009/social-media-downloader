@@ -27,6 +27,10 @@ import {
   type MergeShape,
 } from "@/lib/convert";
 import { downloadReveal, formatBytes, downloadMessage } from "@/lib/download";
+import {
+  DevicePicker,
+  useDeviceTargets,
+} from "@/components/convert/DeviceTargets";
 import { toAuthError } from "@/lib/auth";
 
 /**
@@ -55,6 +59,9 @@ export function MergeTab({ active }: { active: boolean }) {
   const [shape, setShape] = useState<MergeShape>("first");
   const [fit, setFit] = useState<Fit>("pad");
   const [outDir, setOutDir] = useState<string | null>(null);
+  // The merged file often exists to be posted from a phone, so it can go there
+  // directly rather than via Finder.
+  const deviceTargets = useDeviceTargets(active);
 
   const mounted = useRef(true);
   useEffect(() => {
@@ -259,6 +266,10 @@ export function MergeTab({ active }: { active: boolean }) {
           ? "Joined without re-encoding — no quality lost."
           : "Merged.",
       );
+      // Only after the file exists: copying a failed merge would send nothing.
+      if (deviceTargets.selected.size > 0) {
+        await deviceTargets.send([merged.path]);
+      }
     } catch (e) {
       if (!mounted.current) return;
       const err = toAuthError(e);
@@ -269,7 +280,7 @@ export function MergeTab({ active }: { active: boolean }) {
         setPercent(0);
       }
     }
-  }, [canMerge, clips, folder, name, shape, fit, toast]);
+  }, [canMerge, clips, folder, name, shape, fit, deviceTargets, toast]);
 
   return (
     <div className="conv">
@@ -514,6 +525,12 @@ export function MergeTab({ active }: { active: boolean }) {
               )}
             </div>
           </div>
+
+          <DevicePicker
+            targets={deviceTargets}
+            disabled={busy}
+            idleNote="Leave none selected to keep the merged file on this computer only."
+          />
 
           <p className="conv__note">
             {clips.length < 2

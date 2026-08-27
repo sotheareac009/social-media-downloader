@@ -23,6 +23,10 @@ import {
   type VideoProbe,
 } from "@/lib/convert";
 import { downloadReveal, formatBytes, downloadMessage } from "@/lib/download";
+import {
+  DevicePicker,
+  useDeviceTargets,
+} from "@/components/convert/DeviceTargets";
 import { toAuthError } from "@/lib/auth";
 
 /** Where the parts input starts. Two is the smallest split that means anything. */
@@ -80,6 +84,9 @@ export function SplitTab({ active }: { active: boolean }) {
   // folder beside the video, so a split never scatters files into whatever
   // folder the source happened to sit in.
   const [outDir, setOutDir] = useState<string | null>(null);
+  // Sending the parts straight to a phone or emulator, so they can be posted
+  // from the app that lives there without a trip through Finder.
+  const deviceTargets = useDeviceTargets(active);
   const [dragging, setDragging] = useState(false);
 
   const mounted = useRef(true);
@@ -252,6 +259,11 @@ export function SplitTab({ active }: { active: boolean }) {
       if (!mounted.current) return;
       setClips(result.clips);
       setOutputDir(result.output_dir);
+      // Only after the parts exist on disk: a device copy of a failed split
+      // would be a folder of nothing.
+      if (deviceTargets.selected.size > 0) {
+        await deviceTargets.send(result.clips.map((c) => c.path));
+      }
       toast("success", `Cut into ${result.clips.length} parts.`);
     } catch (e) {
       if (!mounted.current) return;
@@ -263,7 +275,18 @@ export function SplitTab({ active }: { active: boolean }) {
         setProgress(null);
       }
     }
-  }, [probe, parts, byCount, eachSeconds, canSplit, total, exact, outDir, toast]);
+  }, [
+    probe,
+    parts,
+    byCount,
+    eachSeconds,
+    canSplit,
+    total,
+    exact,
+    outDir,
+    deviceTargets,
+    toast,
+  ]);
 
   return (
     <div className="conv">
@@ -465,6 +488,12 @@ export function SplitTab({ active }: { active: boolean }) {
               )}
             </div>
           </div>
+
+          <DevicePicker
+            targets={deviceTargets}
+            disabled={busy}
+            idleNote="Leave none selected to keep the parts on this computer only."
+          />
 
           <label className="checkline">
             <input

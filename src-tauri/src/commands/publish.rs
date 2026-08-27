@@ -19,6 +19,12 @@ pub struct DiscoveredApp {
     pub platform: Platform,
     pub package: String,
     pub label: String,
+    /// Whether "Tap Post automatically" can work against this build.
+    ///
+    /// Surfaced at the moment of choosing, because a device with both the full
+    /// app and the Lite one offers two identical-looking "Facebook" rows, and
+    /// picking the wrong one is only discovered when a job stops.
+    pub supports_auto_post: bool,
 }
 
 /// Platform metadata the UI renders (names, packages), so the list of
@@ -65,6 +71,7 @@ pub async fn publish_discover_accounts(
         .map(|(platform, package)| DiscoveredApp {
             platform,
             label: platform.label().to_string(),
+            supports_auto_post: Platform::supports_auto_post(&package),
             package,
         })
         .collect())

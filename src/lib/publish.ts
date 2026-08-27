@@ -108,6 +108,8 @@ export interface DiscoveredApp {
   platform: Platform;
   package: string;
   label: string;
+  /** False for "Lite"/"Go" builds, which expose no labels to automate. */
+  supports_auto_post: boolean;
 }
 
 export interface PlatformInfo {

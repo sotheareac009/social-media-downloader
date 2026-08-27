@@ -5919,3 +5919,98 @@
   background: var(--surface-2);
   color: var(--text-primary);
 }
+
+/* ------------------------------------------------- upload: live progress */
+
+.up-tally {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+
+.up-tally__counts {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.up-tally__ok,
+.up-tally__bad {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+}
+
+.up-tally__ok {
+  color: var(--success);
+}
+
+.up-tally__bad {
+  color: var(--danger);
+}
+
+/* Pushed to the end: it is the count you check, not the one you watch. */
+.up-tally__rest {
+  margin-left: auto;
+  color: var(--text-tertiary);
+}
+
+.up-tally__track {
+  display: block;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--border-subtle);
+  overflow: hidden;
+}
+
+.up-tally__fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-hover));
+  transition: width 0.3s ease;
+}
+
+/* ------------------------------------------------ split: device selection */
+
+.devicepick {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+
+.devicepick__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.devicepick__actions {
+  display: flex;
+  gap: 6px;
+}
+
+.devicepick__none,
+.devicepick__note {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+
+.devicepick__none {
+  margin-top: 0;
+}

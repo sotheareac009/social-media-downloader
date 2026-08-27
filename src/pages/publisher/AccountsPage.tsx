@@ -415,7 +415,18 @@ function DeviceCard({
             <div key={app.package} className="foundrow">
               <PlatformMark platform={app.platform} size={22} />
               <div className="foundrow__text">
-                <div className="foundrow__label">{app.label}</div>
+                <div className="foundrow__label">
+                  {app.label}
+                  {/* Two "Facebook" rows look identical otherwise, and the
+                      difference only shows up when a job stops. */}
+                  {app.supports_auto_post ? (
+                    <span className="foundrow__tag foundrow__tag--auto">
+                      auto-post works
+                    </span>
+                  ) : (
+                    <span className="foundrow__tag">manual post only</span>
+                  )}
+                </div>
                 <code className="foundrow__pkg">{app.package}</code>
               </div>
               {alreadyAdded(app.package) ? (
