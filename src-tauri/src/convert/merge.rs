@@ -452,6 +452,7 @@ mod tests {
             vcodec: Some(v.into()),
             acodec: a.map(str::to_string),
             supported: true,
+        unsupported_reason: None,
         }
     }
 

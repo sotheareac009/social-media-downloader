@@ -137,8 +137,11 @@ export function SplitTab({ active }: { active: boolean }) {
   const tooShort = each !== null && each < 1;
   const tooMany = total !== null && total > MAX_PARTS;
   const tooFew = total !== null && total < 2;
+  // Said while the file is being chosen, not after a part count is set.
+  const overLimit = probe?.limit_reason ?? null;
   const canSplit =
     probe !== null &&
+    overLimit === null &&
     total !== null &&
     each !== null &&
     !tooShort &&
@@ -310,6 +313,13 @@ export function SplitTab({ active }: { active: boolean }) {
                   : ""}
                 {` · ${formatBytes(probe.size_bytes)}`}
               </div>
+              {/* The reason sits on the file, where the decision is, rather
+                  than appearing once Split is pressed. */}
+              {overLimit && (
+                <div className="dropzone__limit">
+                  This video is {overLimit}, so it can&rsquo;t be split.
+                </div>
+              )}
             </div>
             <button
               className="btn btn--ghost btn--sm"

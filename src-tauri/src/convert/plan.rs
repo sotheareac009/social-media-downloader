@@ -242,6 +242,7 @@ mod tests {
             vcodec: Some(v.into()),
             acodec: Some(a.into()),
             supported: true,
+        unsupported_reason: None,
         }
     }
 

@@ -248,6 +248,28 @@ pub async fn run_batch(
                 return Outcome::Cancelled;
             }
 
+            // The limits again, on the way in. The table already refuses to
+            // select an oversized row, but the item list comes back from the
+            // frontend, so trusting it to have enforced that would put the
+            // only guard on the far side of the IPC boundary.
+            let over = crate::convert::scan::size_limit_reason(item.size_bytes)
+                .or_else(|| crate::convert::scan::duration_limit_reason(item.duration_seconds));
+            if let Some(reason) = over {
+                emit(
+                    &app,
+                    JobUpdate {
+                        id: item.id.clone(),
+                        status: "failed".into(),
+                        how: None,
+                        percent: None,
+                        output_path: None,
+                        output_bytes: None,
+                        error: Some(format!("This file is {reason}, so it wasn't converted.")),
+                    },
+                );
+                return Outcome::Failed;
+            }
+
             // How much work this file needs is decided before a process
             // starts: most files need far less than a full re-encode, and
             // some need none at all.
@@ -286,7 +308,40 @@ pub async fn run_batch(
                 // would cost minutes and hand back a slightly worse file.
                 copy_across(&item, &settings)
             } else {
-                convert_one(&app, &ffmpeg, &item, &settings, encoder, &lane, work).await
+                let first =
+                    convert_one(&app, &ffmpeg, &item, &settings, encoder, &lane, work, false)
+                        .await;
+
+                // A stream copy into MP4 has to rewrite AAC headers as it goes,
+                // and one malformed frame anywhere in a recording aborts the
+                // whole muxing — typically leaving a fraction of the file. A
+                // recorded `.ts` off a stream is exactly where that happens.
+                //
+                // Re-encoding the audio steps around it: the decoder logs the
+                // bad frames and carries on, where the copy could only stop.
+                // Tried automatically because the alternative is handing the
+                // user an ffmpeg bitstream error and no way forward.
+                match first {
+                    Err(AppError::ConvertFailed(detail))
+                        if work == Work::Remux && is_audio_stream_fault(&detail) =>
+                    {
+                        emit(
+                            &app,
+                            JobUpdate {
+                                id: item.id.clone(),
+                                status: "converting".into(),
+                                how: Some("rebuilding the audio".into()),
+                                percent: Some(0.0),
+                                output_path: None,
+                                output_bytes: None,
+                                error: None,
+                            },
+                        );
+                        convert_one(&app, &ffmpeg, &item, &settings, encoder, &lane, work, true)
+                            .await
+                    }
+                    other => other,
+                }
             };
 
             match outcome {
@@ -415,6 +470,20 @@ fn copy_across(item: &MediaItem, settings: &ConvertSettings) -> Result<PathBuf> 
     Ok(out)
 }
 
+/// Whether an FFmpeg failure looks like a damaged audio stream that copying
+/// cannot survive but re-encoding can.
+///
+/// Matched on FFmpeg's own wording. Deliberately narrow: a retry costs a full
+/// re-encode of the audio, so it must not fire for a missing file, a full disk
+/// or an unsupported codec — those fail again identically, just slower.
+fn is_audio_stream_fault(detail: &str) -> bool {
+    let d = detail.to_lowercase();
+    // `aac_adtstoasc` is the bitstream filter FFmpeg inserts when copying AAC
+    // out of MPEG-TS into MP4, and it is what fails on a malformed ADTS header.
+    (d.contains("adtstoasc") || d.contains("adts"))
+        || (d.contains("bitstream filter") && d.contains("invalid data"))
+}
+
 /// Convert one file and return where it landed.
 async fn convert_one(
     app: &AppHandle,
@@ -425,6 +494,9 @@ async fn convert_one(
     lane: &Lane,
     // Decided by the caller, before any process starts: a copy, or an encode.
     work: Work,
+    // Re-encode the audio instead of copying it. Only set on a retry — see
+    // `is_audio_stream_fault` for what makes that retry worth doing.
+    recode_audio: bool,
 ) -> Result<PathBuf> {
     let source = PathBuf::from(&item.path);
     let out_dir = match settings.output_dir.as_deref().map(str::trim) {
@@ -451,7 +523,14 @@ async fn convert_one(
             // The streams already suit the target container, so this is a
             // copy: no decode, no quality change, and an hour of video in
             // about a second.
-            cmd.args(["-c", "copy"]);
+            if recode_audio {
+                // Video is still copied — it was never the problem — so this
+                // stays fast and lossless for the picture. Only the audio is
+                // rebuilt, which is what drops the malformed frames.
+                cmd.args(["-c:v", "copy", "-c:a", "aac"]);
+            } else {
+                cmd.args(["-c", "copy"]);
+            }
             if settings.video_format.is_audio_only() {
                 cmd.arg("-vn");
             }
@@ -682,6 +761,41 @@ fn unique_path(desired: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+
+
+    /// Captured verbatim from FFmpeg failing on a 35-minute Telegram `.ts`
+    /// recording: one malformed ADTS frame aborts the whole remux after
+    /// writing 29 MB of a 341 MB file.
+    #[test]
+    fn a_damaged_aac_stream_is_recognised_as_worth_retrying() {
+        for detail in [
+            "[aac_adtstoasc @ 0x1] Error parsing ADTS frame header!",
+            "Error applying bitstream filters to an output packet for stream #1: Invalid data found when processing input",
+        ] {
+            assert!(
+                is_audio_stream_fault(detail),
+                "{detail:?} should trigger the audio rebuild"
+            );
+        }
+    }
+
+    /// The retry costs a full audio re-encode, so it must not fire for
+    /// failures that will fail again the same way.
+    #[test]
+    fn ordinary_failures_do_not_trigger_a_pointless_retry() {
+        for detail in [
+            "No such file or directory",
+            "No space left on device",
+            "Unknown encoder 'libx265'",
+            "Invalid data found when processing input",
+            "Permission denied",
+        ] {
+            assert!(
+                !is_audio_stream_fault(detail),
+                "{detail:?} would fail again identically, just slower"
+            );
+        }
+    }
     use super::*;
 
     #[test]

@@ -52,6 +52,10 @@ pub struct VideoProbe {
     pub size_bytes: u64,
     /// False for an audio-only file, which cannot be split into video clips.
     pub has_video: bool,
+    /// Why this file is past a limit, when it is. Reported here so the Split
+    /// page can say so while the file is being chosen, rather than after
+    /// someone has picked a part count.
+    pub limit_reason: Option<String>,
 }
 
 /// One finished part.
@@ -251,6 +255,28 @@ pub async fn convert_merge(
     shape: Option<crate::convert::merge::Shape>,
     fit: Option<crate::convert::Fit>,
 ) -> Result<crate::convert::merge::MergeResult> {
+    // Every input, then the thing they add up to. Both matter: a single
+    // oversized clip is refused for the same reason as in the table, and five
+    // acceptable ones can still merge into a file past the ceiling.
+    for item in &items {
+        if let Some(reason) = crate::convert::scan::size_limit_reason(item.size_bytes)
+            .or_else(|| crate::convert::scan::duration_limit_reason(item.duration_seconds))
+        {
+            return Err(AppError::MediaLimit(format!(
+                "{} is {reason}.",
+                item.file_name
+            )));
+        }
+    }
+    let total_bytes: u64 = items.iter().map(|i| i.size_bytes).sum();
+    let total_seconds: f64 = items.iter().filter_map(|i| i.duration_seconds).sum();
+    if let Some(reason) = crate::convert::scan::combined_limit_reason(total_bytes, total_seconds) {
+        return Err(AppError::MediaLimit(format!(
+            "{}. Merge fewer clips, or split them into more than one file.",
+            capitalise(&reason)
+        )));
+    }
+
     let format = format.unwrap_or_default();
     // Its own lane: merging is heavy, but it should not refuse a photo batch
     // running beside it, nor be refused by one.
@@ -391,6 +417,8 @@ pub async fn convert_probe(path: String) -> Result<VideoProbe> {
             .map(|n| n as u32)
     };
 
+    let size_bytes = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+
     Ok(VideoProbe {
         file_name: file
             .file_name()
@@ -399,10 +427,23 @@ pub async fn convert_probe(path: String) -> Result<VideoProbe> {
         duration_seconds: duration,
         width: dim("width"),
         height: dim("height"),
-        size_bytes: std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0),
+        size_bytes,
         has_video: stream.is_some(),
+        limit_reason: crate::convert::scan::size_limit_reason(size_bytes).or_else(|| {
+            crate::convert::scan::duration_limit_reason(Some(duration))
+        }),
         path,
     })
+}
+
+/// Upper-case the first letter, so a reason written to sit mid-sentence can
+/// also start one.
+fn capitalise(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
 }
 
 /// Cut `path` into `parts` equal pieces.
@@ -428,6 +469,12 @@ pub async fn convert_split(
     let probe = convert_probe(path.clone()).await?;
     if !probe.has_video {
         return Err(AppError::NotAVideo);
+    }
+    // The same ceilings the Convert table applies. Checked here rather than
+    // trusted from the UI: the path comes across the IPC boundary as a string,
+    // so this is the only place that can actually enforce it.
+    if let Some(reason) = probe.limit_reason.clone() {
+        return Err(AppError::MediaLimit(format!("This video is {reason}.")));
     }
 
     let plan = match (parts, part_seconds) {

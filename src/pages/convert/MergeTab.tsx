@@ -44,6 +44,11 @@ import { toAuthError } from "@/lib/auth";
  * match, so that verdict is shown before you press anything rather than
  * discovered afterwards.
  */
+/** Mirrors the ceilings the Rust side enforces; kept in sync by hand because
+ *  the value is a product decision, not something the backend advertises. */
+const MAX_MERGE_BYTES = 2 * 1024 ** 3;
+const MAX_MERGE_SECONDS = 2 * 60 * 60;
+
 export function MergeTab({ active }: { active: boolean }) {
   const toast = useToast();
   const [clips, setClips] = useState<MediaItem[]>([]);
@@ -248,7 +253,21 @@ export function MergeTab({ active }: { active: boolean }) {
 
   const totalSeconds = clips.reduce((sum, c) => sum + (c.duration_seconds ?? 0), 0);
   const folder = outDir ?? clips[0]?.directory ?? "";
-  const canMerge = clips.length >= 2 && name.trim().length > 0 && folder.length > 0;
+  // Each clip can be within the limits and their merge still not be, so the
+  // total is what decides — and it is shown before Merge is pressed.
+  const totalBytes = clips.reduce((sum, c) => sum + (c.size_bytes ?? 0), 0);
+  const overLimit =
+    totalBytes > MAX_MERGE_BYTES
+      ? `about ${(totalBytes / 1024 ** 3).toFixed(1)} GB — over the 2 GB limit`
+      : totalSeconds > MAX_MERGE_SECONDS
+        ? `${formatLength(totalSeconds)} — over the 2 hour limit`
+        : null;
+
+  const canMerge =
+    clips.length >= 2 &&
+    overLimit === null &&
+    name.trim().length > 0 &&
+    folder.length > 0;
 
   const run = useCallback(async () => {
     if (!canMerge) return;
@@ -321,8 +340,15 @@ export function MergeTab({ active }: { active: boolean }) {
               Clips<span className="conv__badge">{clips.length}</span>
             </h2>
             <div className="conv__tableactions">
-              <span className="conv__selected">
-                {formatLength(totalSeconds)} total
+              {/* Named where the clips are, so it is obvious which way to fix
+                  it — remove clips, or merge in two passes. */}
+              {overLimit && (
+                <span className="conv__limitnote">
+                  Merged file would be {overLimit}
+                </span>
+              )}
+              <span className={`conv__selected ${overLimit ? "conv__bad" : ""}`.trim()}>
+                {formatLength(totalSeconds)} · {formatBytes(totalBytes)} total
               </span>
               <button
                 className="btn btn--ghost btn--sm"
@@ -545,6 +571,7 @@ export function MergeTab({ active }: { active: boolean }) {
               onClick={() => void run()}
               loading={busy}
               disabled={!canMerge}
+              title={overLimit ? `The merged file would be ${overLimit}` : undefined}
               icon={<BoltIcon size={15} />}
             >
               {busy ? "Merging…" : `Merge ${clips.length} clips`}

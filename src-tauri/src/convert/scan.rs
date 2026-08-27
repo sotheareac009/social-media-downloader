@@ -57,6 +57,17 @@ const MAX_DEPTH: usize = 6;
 /// A cap on rows, so one careless drop cannot lock the UI up for minutes.
 const MAX_ITEMS: usize = 5_000;
 
+/// Largest file the converter accepts, in bytes (2 GiB).
+///
+/// A limit rather than a warning: a conversion at this scale takes long enough
+/// that discovering it was never going to work — because the machine ran out of
+/// disk, or the job outlived the app — wastes far more of someone's time than
+/// being told up front.
+pub const MAX_SIZE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Longest video the converter accepts, in seconds (2 hours).
+pub const MAX_DURATION_SECONDS: f64 = 2.0 * 60.0 * 60.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MediaKind {
@@ -90,9 +101,16 @@ pub struct MediaItem {
     /// by rewriting the container, with the streams copied untouched.
     pub vcodec: Option<String>,
     pub acodec: Option<String>,
-    /// False when nothing could be read from the file. Kept in the table with
-    /// a reason rather than hidden, so the totals still account for it.
+    /// False when nothing could be read from the file, or it is past a limit.
+    /// Kept in the table with a reason rather than hidden, so the totals still
+    /// account for it.
     pub supported: bool,
+    /// Why it cannot be converted, when it cannot.
+    ///
+    /// Present for every `supported: false` row. "Unsupported" with no reason
+    /// is the kind of dead end that sends people looking at the wrong thing —
+    /// a file over the size limit and a corrupt one need different responses.
+    pub unsupported_reason: Option<String>,
 }
 
 /// Walk everything that was dropped and probe what it finds.
@@ -218,7 +236,16 @@ async fn probe_one(path: &Path, ffprobe: Option<&Path>, explicit: bool) -> Optio
         // Without ffprobe the file is still listed and still convertible; only
         // its details are unknown, so it is not marked unsupported.
         supported: true,
+        unsupported_reason: None,
     };
+
+    // Size is known without probing, so an oversized file is refused before
+    // spending an ffprobe on it.
+    if let Some(reason) = size_limit_reason(size) {
+        item.supported = false;
+        item.unsupported_reason = Some(reason);
+        return known.map(|_| item);
+    }
 
     let Some(ffprobe) = ffprobe else {
         // No prober: a recognised extension is taken on trust, an unknown one
@@ -245,11 +272,13 @@ async fn probe_one(path: &Path, ffprobe: Option<&Path>, explicit: bool) -> Optio
 
     if !out.status.success() {
         item.supported = false;
+        item.unsupported_reason = Some("FFmpeg could not read this file".into());
         return known.map(|_| item);
     }
 
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
         item.supported = false;
+        item.unsupported_reason = Some("FFmpeg returned nothing readable about this file".into());
         return known.map(|_| item);
     };
 
@@ -278,6 +307,7 @@ async fn probe_one(path: &Path, ffprobe: Option<&Path>, explicit: bool) -> Optio
         // corrupt download. A file only guessed at by its being dropped is
         // left out entirely rather than listed as broken.
         item.supported = false;
+        item.unsupported_reason = Some("no video stream in this file".into());
         return known.map(|_| item);
     }
 
@@ -306,9 +336,77 @@ async fn probe_one(path: &Path, ffprobe: Option<&Path>, explicit: bool) -> Optio
             .and_then(|s| s.get("r_frame_rate"))
             .and_then(|r| r.as_str())
             .and_then(parse_frame_rate);
+
+        // Duration is only knowable after probing, so this is the first point
+        // the limit can be applied.
+        if let Some(reason) = duration_limit_reason(item.duration_seconds) {
+            item.supported = false;
+            item.unsupported_reason = Some(reason);
+        }
     }
 
     Some(item)
+}
+
+/// Why a file of this size is refused, or `None` when it is fine.
+pub fn size_limit_reason(size: u64) -> Option<String> {
+    (size > MAX_SIZE_BYTES).then(|| {
+        format!(
+            "{:.1} GB — over the {} GB limit",
+            size as f64 / 1024.0 / 1024.0 / 1024.0,
+            MAX_SIZE_BYTES / 1024 / 1024 / 1024
+        )
+    })
+}
+
+/// Why a video of this length is refused.
+///
+/// An unknown duration is allowed through: FFmpeg cannot always read one, and
+/// refusing every file it could not measure would reject perfectly ordinary
+/// clips.
+pub fn duration_limit_reason(duration: Option<f64>) -> Option<String> {
+    let d = duration?;
+    (d > MAX_DURATION_SECONDS).then(|| {
+        format!(
+            "{} — over the {} hour limit",
+            human_duration(d),
+            (MAX_DURATION_SECONDS / 3600.0) as u64
+        )
+    })
+}
+
+/// The combined limits for a set of files that will become ONE output.
+///
+/// Merging is the case this exists for: five 500 MB clips are each well within
+/// the limit and their merge is not, and the output is what has to be written,
+/// played and uploaded.
+pub fn combined_limit_reason(total_bytes: u64, total_seconds: f64) -> Option<String> {
+    if total_bytes > MAX_SIZE_BYTES {
+        return Some(format!(
+            "the merged file would be about {:.1} GB — over the {} GB limit",
+            total_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
+            MAX_SIZE_BYTES / 1024 / 1024 / 1024
+        ));
+    }
+    if total_seconds > MAX_DURATION_SECONDS {
+        return Some(format!(
+            "the merged video would be {} — over the {} hour limit",
+            human_duration(total_seconds),
+            (MAX_DURATION_SECONDS / 3600.0) as u64
+        ));
+    }
+    None
+}
+
+/// "2h 14m", the way a person would say it.
+pub(crate) fn human_duration(seconds: f64) -> String {
+    let total = seconds.round() as u64;
+    let (h, m) = (total / 3600, (total % 3600) / 60);
+    if h > 0 {
+        format!("{h}h {m:02}m")
+    } else {
+        format!("{m}m")
+    }
 }
 
 /// ffprobe reports frame rate as a fraction: "30000/1001", not "29.97".
@@ -325,6 +423,78 @@ fn parse_frame_rate(raw: &str) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn files_at_or_under_two_gigabytes_are_accepted() {
+        assert!(size_limit_reason(MAX_SIZE_BYTES).is_none(), "exactly 2 GB is allowed");
+        assert!(size_limit_reason(MAX_SIZE_BYTES - 1).is_none());
+        assert!(size_limit_reason(0).is_none());
+    }
+
+    #[test]
+    fn oversized_files_say_how_big_they_are() {
+        let reason = size_limit_reason(MAX_SIZE_BYTES + 1).expect("must be refused");
+        assert!(reason.contains("2.0 GB"), "{reason}");
+        assert!(reason.contains("limit"), "{reason}");
+
+        // A number the user can act on, not just "too big".
+        let huge = size_limit_reason(5 * 1024 * 1024 * 1024).unwrap();
+        assert!(huge.contains("5.0 GB"), "{huge}");
+    }
+
+    #[test]
+    fn videos_at_or_under_two_hours_are_accepted() {
+        assert!(duration_limit_reason(Some(MAX_DURATION_SECONDS)).is_none(), "exactly 2h is allowed");
+        assert!(duration_limit_reason(Some(3600.0)).is_none());
+        assert!(duration_limit_reason(Some(0.5)).is_none());
+    }
+
+    #[test]
+    fn longer_videos_say_how_long_they_are() {
+        let reason = duration_limit_reason(Some(2.5 * 3600.0)).expect("must be refused");
+        assert!(reason.contains("2h 30m"), "{reason}");
+        assert!(reason.contains("2 hour limit"), "{reason}");
+    }
+
+    /// FFmpeg cannot always read a duration. Refusing everything it could not
+    /// measure would reject ordinary clips for a fault of the prober.
+    #[test]
+    fn an_unknown_duration_is_not_a_refusal() {
+        assert!(duration_limit_reason(None).is_none());
+    }
+
+    /// Merging is where this bites: each clip passes, the result does not.
+    #[test]
+    fn a_merge_is_judged_on_what_it_would_produce() {
+        let five_hundred_mb = 500 * 1024 * 1024;
+        assert!(
+            size_limit_reason(five_hundred_mb).is_none(),
+            "each clip is fine on its own"
+        );
+        let reason = combined_limit_reason(five_hundred_mb * 5, 600.0)
+            .expect("five of them are not");
+        assert!(reason.contains("2.4 GB"), "{reason}");
+        assert!(reason.contains("merged"), "{reason}");
+    }
+
+    #[test]
+    fn a_merge_over_two_hours_is_refused_on_duration() {
+        let reason = combined_limit_reason(1024, 2.5 * 3600.0).expect("must be refused");
+        assert!(reason.contains("2h 30m"), "{reason}");
+        assert!(reason.contains("2 hour limit"), "{reason}");
+    }
+
+    #[test]
+    fn a_merge_inside_both_limits_is_allowed() {
+        assert!(combined_limit_reason(MAX_SIZE_BYTES, MAX_DURATION_SECONDS).is_none());
+    }
+
+    #[test]
+    fn durations_read_the_way_people_say_them() {
+        assert_eq!(human_duration(2095.0), "34m");
+        assert_eq!(human_duration(3600.0), "1h 00m");
+        assert_eq!(human_duration(9000.0), "2h 30m");
+    }
     use super::*;
 
     #[test]

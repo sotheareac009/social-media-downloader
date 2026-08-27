@@ -720,8 +720,18 @@ export function ConvertTab({ active }: { active: boolean }) {
                         <td className="conv__col-status">
                           <StatusCell item={item} job={job} />
                         </td>
-                        <td className="conv__name" title={item.file_name}>
+                        <td
+                          className="conv__name"
+                          title={item.unsupported_reason ?? item.file_name}
+                        >
                           {item.file_name}
+                          {/* Why this row is greyed out, on the row itself. A
+                              bare "unsupported" sends people looking at the
+                              wrong thing — over a limit and corrupt need
+                              different responses. */}
+                          {!item.supported && item.unsupported_reason && (
+                            <span className="conv__why">{item.unsupported_reason}</span>
+                          )}
                         </td>
                         <td className="conv__col-type">
                           <span className={`conv__kind conv__kind--${item.kind}`}>

@@ -10,6 +10,8 @@ export interface VideoProbe {
   height: number | null;
   size_bytes: number;
   has_video: boolean;
+  /** Why the file is past a size/duration limit, when it is. */
+  limit_reason: string | null;
 }
 
 export interface Clip {
@@ -121,6 +123,8 @@ export interface MediaItem {
   acodec: string | null;
   /** False when FFmpeg could read nothing from the file. */
   supported: boolean;
+  /** Why it can't be converted — over a limit, unreadable, no video stream. */
+  unsupported_reason: string | null;
 }
 
 /** Containers the converter can write. Any source format reaches any of these. */

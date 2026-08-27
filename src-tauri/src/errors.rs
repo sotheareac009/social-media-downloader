@@ -282,6 +282,12 @@ pub enum AppError {
     #[error("choose at least one video or photo to publish")]
     NoMediaSelected,
 
+    /// Past the size or duration ceiling the converter accepts. Carries the
+    /// measurement, not just a verdict — "3.4 GB, over the 2 GB limit" tells
+    /// someone what to do next; "too large" does not.
+    #[error("{0}")]
+    MediaLimit(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -357,6 +363,7 @@ impl AppError {
             Self::JobNotRetryable(_) => "job_not_retryable",
             Self::NoAccountsSelected => "no_accounts_selected",
             Self::NoMediaSelected => "no_media_selected",
+            Self::MediaLimit(_) => "media_limit",
             Self::Internal(_) => "internal",
         }
     }
