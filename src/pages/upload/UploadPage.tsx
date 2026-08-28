@@ -60,6 +60,38 @@ interface UploadResult {
   platforms: PlatformResult[];
 }
 
+
+/** One destination for one file: the unit that succeeds, fails, and retries. */
+type UploadJobStatus = "queued" | "uploading" | "done" | "failed";
+
+/**
+ * A single upload.
+ *
+ * One job per (file × destination) rather than per file. That granularity is
+ * what makes retry honest: when a video reaches TikTok but not one of three
+ * YouTube channels, retrying the *file* would re-post it to TikTok and to the
+ * two channels that already have it. Retrying the job that failed posts it
+ * exactly once, where it is missing.
+ */
+interface UploadJob {
+  /** Stable across retries, so a re-run updates its row instead of adding one. */
+  id: string;
+  path: string;
+  fileName: string;
+  targetId: string;
+  targetName: string;
+  /** Set for destinations that fan out: one YouTube channel, one Telegram chat. */
+  subId?: string;
+  subLabel?: string;
+  title: string;
+  description: string;
+  status: UploadJobStatus;
+  error?: string;
+  finishedAt?: number;
+}
+
+type JobTab = "all" | "active" | "done" | "failed";
+
 /** Read a local file's bytes through the asset protocol. */
 async function readFileBytes(path: string): Promise<Uint8Array> {
   const res = await fetch(convertFileSrc(path));
@@ -101,6 +133,11 @@ export function UploadPage() {
   const [tgSearch, setTgSearch] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<UploadResult | null>(null);
+  // Every destination attempted this session, newest run last. Kept across
+  // runs so a retry updates the row that failed rather than starting a fresh
+  // list and hiding what already worked.
+  const [jobs, setJobs] = useState<UploadJob[]>([]);
+  const [jobTab, setJobTab] = useState<JobTab>("all");
   const [preview, setPreview] = useState<string | null>(null);
   const [page, setPage] = useState(0);
 
@@ -296,111 +333,271 @@ export function UploadPage() {
    * two failures would re-upload every video that already succeeded, which on
    * YouTube means duplicates nobody asked for.
    */
-  const publish = useCallback(async (only?: Item[]) => {
-    const queue = only ?? items;
-    if (chosen.length === 0 || queue.length === 0) return;
-    setBusy(true);
-    setResult(null);
-    // Only the items about to run are reset; the rest keep the outcome they
-    // already earned.
-    const retrying = new Set(queue.map((i) => i.path));
-    setItems((prev) =>
-      prev.map((i) =>
-        retrying.has(i.path) ? { ...i, status: "pending", error: undefined } : i,
-      ),
-    );
-
-    // Per-platform tally: how many videos succeeded / failed on each.
-    const tally: Record<string, PlatformResult> = {};
-    const bump = (t: UploadTarget, okResult: boolean, err?: string) => {
-      const r = (tally[t.id] ??= { name: t.name, ok: 0, fail: 0 });
-      if (okResult) r.ok += 1;
-      else {
-        r.fail += 1;
-        if (!r.error && err) r.error = err;
-      }
-    };
-
-    let ok = 0;
-    for (const item of queue) {
-      setItems((prev) =>
-        prev.map((i) => (i.path === item.path ? { ...i, status: "uploading" } : i)),
-      );
-      const perTitle = item.title.trim() || baseName(item.path);
-      const failures: string[] = [];
-
-      // Send this file to every chosen platform.
-      let bytes: Uint8Array | null = null; // read once, reused across chats
-      for (const t of chosen) {
-        try {
+  /** Expand the chosen files and destinations into one job per pairing. */
+  const buildJobs = useCallback(
+    (queue: Item[]): UploadJob[] => {
+      const out: UploadJob[] = [];
+      for (const item of queue) {
+        const title = item.title.trim() || baseName(item.path);
+        const base = {
+          path: item.path,
+          fileName: baseName(item.path),
+          title,
+          description: item.description,
+          status: "queued" as UploadJobStatus,
+        };
+        for (const t of chosen) {
           if (t.id === "youtube") {
-            // YouTube is optional: if no account is ticked, just skip it rather
-            // than failing the whole upload.
-            if (ytSelected.size === 0) continue;
-            const errs: string[] = [];
+            // No channel ticked is a skip, not a failure — the same rule the
+            // single-shot version used.
             for (const accountId of ytSelected) {
-              try {
-                await youtubeAccountUpload(accountId, item.path, perTitle, item.description, privacy);
-              } catch (e) {
-                const acct = (ytAccounts ?? []).find((a) => a.id === accountId);
-                errs.push(`${acct?.channel_title ?? acct?.display_name ?? "account"}: ${messageOf(e)}`);
-              }
+              const acct = (ytAccounts ?? []).find((a) => a.id === accountId);
+              out.push({
+                ...base,
+                id: `${item.path}::youtube::${accountId}`,
+                targetId: t.id,
+                targetName: t.name,
+                subId: accountId,
+                subLabel: acct?.channel_title ?? acct?.display_name ?? "channel",
+              });
             }
-            if (errs.length > 0) throw new Error(errs.join(" · "));
-          } else if (t.id === "tiktok") {
-            // Rust reads the file and handles TikTok's chunking rules; sending
-            // the bytes through the webview would copy a large video twice for
-            // no benefit.
-            await uploadTiktok(item.path);
-          } else if (t.id === "x") {
-            // Rust uploads the media and creates the post; caption is the
-            // description, falling back to the title.
-            await uploadX(item.path, item.description.trim() || perTitle);
           } else if (t.id === "telegram") {
-            if (tgSelected.size === 0) throw new Error("pick at least one chat");
-            if (!bytes) bytes = await readFileBytes(item.path);
-            const fileName = item.path.split("/").pop() ?? "video.mp4";
-            // Dimensions/duration so Telegram keeps the correct aspect ratio.
-            const meta = await uploadVideoMeta(item.path).catch(() => null);
             for (const chatId of tgSelected) {
-              await telegramSendFile(chatId, bytes, fileName, item.description || perTitle, meta);
+              const chat = Array.isArray(tgChats)
+                ? tgChats.find((c) => String(c.id) === chatId)
+                : undefined;
+              out.push({
+                ...base,
+                id: `${item.path}::telegram::${chatId}`,
+                targetId: t.id,
+                targetName: t.name,
+                subId: chatId,
+                subLabel: chat?.title ?? "chat",
+              });
             }
           } else {
-            throw new Error(`${t.name} upload isn't available yet.`);
+            out.push({
+              ...base,
+              id: `${item.path}::${t.id}`,
+              targetId: t.id,
+              targetName: t.name,
+            });
           }
-          bump(t, true);
+        }
+      }
+      return out;
+    },
+    [chosen, tgChats, tgSelected, ytAccounts, ytSelected],
+  );
+
+  /**
+   * Send one file to one destination. Throws on failure; the caller records it.
+   *
+   * `bytesCache` exists because Telegram uploads go through the webview, so the
+   * file has to be read into JS. Three chats for one video is one read, not
+   * three — a 300 MB clip read per chat is a visible stall.
+   */
+  const executeJob = useCallback(
+    async (job: UploadJob, bytesCache: Map<string, Uint8Array>) => {
+      if (job.targetId === "youtube") {
+        await youtubeAccountUpload(
+          job.subId!,
+          job.path,
+          job.title,
+          job.description,
+          privacy,
+        );
+      } else if (job.targetId === "tiktok") {
+        // Rust reads the file and handles TikTok's chunking rules; sending the
+        // bytes through the webview would copy a large video twice for nothing.
+        await uploadTiktok(job.path);
+      } else if (job.targetId === "x") {
+        await uploadX(job.path, job.description.trim() || job.title);
+      } else if (job.targetId === "telegram") {
+        let bytes = bytesCache.get(job.path);
+        if (!bytes) {
+          bytes = await readFileBytes(job.path);
+          bytesCache.set(job.path, bytes);
+        }
+        const fileName = job.path.split(/[\\/]/).pop() ?? "video.mp4";
+        // Dimensions/duration so Telegram keeps the correct aspect ratio.
+        const meta = await uploadVideoMeta(job.path).catch(() => null);
+        await telegramSendFile(
+          job.subId!,
+          bytes,
+          fileName,
+          job.description || job.title,
+          meta,
+        );
+      } else {
+        throw new Error(`${job.targetName} upload isn't available yet.`);
+      }
+    },
+    [privacy],
+  );
+
+  /**
+   * Run a set of jobs one at a time, publishing each result as it lands.
+   *
+   * Sequential on purpose: these are large uploads over one connection, and
+   * running them at once makes every one slower while making the progress
+   * meaningless.
+   */
+  const runJobs = useCallback(
+    async (list: UploadJob[]) => {
+      if (list.length === 0) return;
+      setBusy(true);
+      setResult(null);
+
+      const queued = list.map((j) => ({
+        ...j,
+        status: "queued" as UploadJobStatus,
+        error: undefined,
+        finishedAt: undefined,
+      }));
+      // Re-running a job replaces its row rather than appending a second one.
+      setJobs((prev) => {
+        const byId = new Map(prev.map((j) => [j.id, j]));
+        for (const j of queued) byId.set(j.id, j);
+        return [...byId.values()];
+      });
+
+      const touched = new Set(list.map((j) => j.path));
+      setItems((prev) =>
+        prev.map((i) =>
+          touched.has(i.path) ? { ...i, status: "uploading", error: undefined } : i,
+        ),
+      );
+
+      const patch = (id: string, next: Partial<UploadJob>) =>
+        setJobs((prev) => prev.map((j) => (j.id === id ? { ...j, ...next } : j)));
+
+      const bytesCache = new Map<string, Uint8Array>();
+      const outcomes: UploadJob[] = [];
+
+      for (const job of queued) {
+        if (!mounted.current) return;
+        patch(job.id, { status: "uploading" });
+        try {
+          await executeJob(job, bytesCache);
+          const done = { ...job, status: "done" as UploadJobStatus, finishedAt: Date.now() };
+          outcomes.push(done);
+          patch(job.id, done);
         } catch (e) {
-          failures.push(`${t.name}: ${messageOf(e)}`);
-          bump(t, false, messageOf(e));
+          const failed = {
+            ...job,
+            status: "failed" as UploadJobStatus,
+            error: messageOf(e),
+            finishedAt: Date.now(),
+          };
+          outcomes.push(failed);
+          patch(job.id, failed);
         }
       }
 
-      if (failures.length === 0) {
-        ok += 1;
-        setItems((prev) =>
-          prev.map((i) => (i.path === item.path ? { ...i, status: "done" } : i)),
-        );
-      } else {
-        setItems((prev) =>
-          prev.map((i) =>
-            i.path === item.path ? { ...i, status: "failed", error: failures.join(" · ") } : i,
-          ),
-        );
-      }
-    }
+      if (!mounted.current) return;
 
-    if (mounted.current) {
+      // A file is done only when every destination it was sent to accepted it.
+      setItems((prev) =>
+        prev.map((i) => {
+          const mine = outcomes.filter((j) => j.path === i.path);
+          if (mine.length === 0) return i;
+          const bad = mine.filter((j) => j.status === "failed");
+          return bad.length === 0
+            ? { ...i, status: "done", error: undefined }
+            : {
+                ...i,
+                status: "failed",
+                error: bad.map((j) => `${j.targetName}: ${j.error}`).join(" · "),
+              };
+        }),
+      );
+
+      const okJobs = outcomes.filter((j) => j.status === "done").length;
+      const failedJobs = outcomes.length - okJobs;
+
+      const tally: Record<string, PlatformResult> = {};
+      for (const j of outcomes) {
+        const r = (tally[j.targetId] ??= { name: j.targetName, ok: 0, fail: 0 });
+        if (j.status === "done") r.ok += 1;
+        else {
+          r.fail += 1;
+          if (!r.error && j.error) r.error = j.error;
+        }
+      }
+      const files = new Set(outcomes.map((j) => j.path));
+      const filesOk = [...files].filter((p) =>
+        outcomes.filter((j) => j.path === p).every((j) => j.status === "done"),
+      ).length;
+
       setBusy(false);
       setResult({
-        totalVideos: queue.length,
-        videosOk: ok,
+        totalVideos: files.size,
+        videosOk: filesOk,
         platforms: Object.values(tally),
       });
+
+      if (failedJobs === 0) {
+        toast("success", `Uploaded ${okJobs} destination${okJobs === 1 ? "" : "s"}.`);
+      } else {
+        // Failures land in their own tab, so the toast points at it rather
+        // than trying to spell out what went wrong.
+        setJobTab("failed");
+        toast(
+          okJobs > 0 ? "info" : "error",
+          `${okJobs} done, ${failedJobs} failed — see the Failed tab.`,
+        );
+      }
+    },
+    [executeJob, toast],
+  );
+
+  /**
+   * Upload `only` those items, or everything when it is omitted.
+   */
+  const publish = useCallback(
+    async (only?: Item[]) => {
+      const queue = only ?? items;
+      if (chosen.length === 0 || queue.length === 0) return;
+      await runJobs(buildJobs(queue));
+    },
+    [buildJobs, chosen, items, runJobs],
+  );
+
+  /**
+   * How the run is going, derived from the jobs themselves.
+   *
+   * Derived rather than counted alongside the loop: one source of truth means
+   * the tab badges can never disagree with the rows under them, which is the
+   * usual way a progress summary goes wrong.
+   */
+  const jobCounts = useMemo(() => {
+    let active = 0;
+    let done = 0;
+    let failed = 0;
+    for (const j of jobs) {
+      if (j.status === "done") done += 1;
+      else if (j.status === "failed") failed += 1;
+      else active += 1;
     }
-    const failed = queue.length - ok;
-    if (failed === 0) toast("success", `Uploaded ${ok} video${ok === 1 ? "" : "s"}.`);
-    else toast(ok > 0 ? "info" : "error", `${ok} done, ${failed} with errors.`);
-  }, [chosen, items, privacy, tgSelected, ytSelected, ytAccounts, toast]);
+    return { all: jobs.length, active, done, failed };
+  }, [jobs]);
+
+  const visibleJobs = useMemo(() => {
+    if (jobTab === "all") return jobs;
+    if (jobTab === "done") return jobs.filter((j) => j.status === "done");
+    if (jobTab === "failed") return jobs.filter((j) => j.status === "failed");
+    return jobs.filter((j) => j.status === "queued" || j.status === "uploading");
+  }, [jobTab, jobs]);
+
+  /** Re-run specific jobs — the failed ones, or a single row. */
+  const retryJobs = useCallback(
+    async (ids: string[]) => {
+      const again = jobs.filter((j) => ids.includes(j.id));
+      if (again.length > 0) await runJobs(again);
+    },
+    [jobs, runJobs],
+  );
 
   /**
    * What has happened so far, recomputed from the items themselves.
@@ -723,6 +920,95 @@ export function UploadPage() {
         </div>
 
         {/* Files */}
+        {jobs.length > 0 && (
+          <section className="upjobs">
+            <div className="upjobs__head">
+              <div className="upjobs__tabs" role="tablist">
+                {(
+                  [
+                    ["all", "All", jobCounts.all],
+                    ["active", "In progress", jobCounts.active],
+                    ["done", "Uploaded", jobCounts.done],
+                    ["failed", "Failed", jobCounts.failed],
+                  ] as [JobTab, string, number][]
+                ).map(([id, label, count]) => (
+                  <button
+                    key={id}
+                    role="tab"
+                    aria-selected={jobTab === id}
+                    className={`upjobs__tab ${jobTab === id ? "upjobs__tab--on" : ""} ${
+                      id === "failed" && count > 0 ? "upjobs__tab--bad" : ""
+                    }`.trim()}
+                    type="button"
+                    onClick={() => setJobTab(id)}
+                  >
+                    {label}
+                    <span className="upjobs__count">{count}</span>
+                  </button>
+                ))}
+              </div>
+              {/* Only offered when there is something to retry, and never
+                  mid-run: re-sending a job that is still uploading is how a
+                  video gets posted twice. */}
+              {jobCounts.failed > 0 && (
+                <Button
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() =>
+                    void retryJobs(
+                      jobs.filter((j) => j.status === "failed").map((j) => j.id),
+                    )
+                  }
+                >
+                  Retry all failed ({jobCounts.failed})
+                </Button>
+              )}
+            </div>
+
+            <div className="upjobs__list">
+              {visibleJobs.length === 0 ? (
+                <div className="upjobs__empty">Nothing here yet.</div>
+              ) : (
+                visibleJobs.map((job) => (
+                  <div key={job.id} className={`upjob upjob--${job.status}`}>
+                    <span className="upjob__dot" aria-hidden />
+                    <div className="upjob__text">
+                      <div className="upjob__where">
+                        {job.targetName}
+                        {job.subLabel && (
+                          <span className="upjob__sub"> · {job.subLabel}</span>
+                        )}
+                      </div>
+                      <div className="upjob__file" title={job.path}>
+                        {job.fileName}
+                      </div>
+                      {job.error && <div className="upjob__error">{job.error}</div>}
+                    </div>
+                    <span className="upjob__status">
+                      {job.status === "uploading"
+                        ? "Uploading…"
+                        : job.status === "queued"
+                          ? "Queued"
+                          : job.status === "done"
+                            ? "Uploaded"
+                            : "Failed"}
+                    </span>
+                    {job.status === "failed" && (
+                      <Button
+                        variant="ghost"
+                        disabled={busy}
+                        onClick={() => void retryJobs([job.id])}
+                      >
+                        Retry
+                      </Button>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </section>
+        )}
+
         {result && (
           <section className="summary up-summary">
             <div className="summary__row">

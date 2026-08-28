@@ -1,6 +1,6 @@
 [package]
 name = "media-downloader"
-version = "0.0.3"
+version = "0.0.4"
 description = "SocialSync"
 authors = ["you"]
 edition = "2021"

@@ -114,7 +114,9 @@ const PRESETS: {
   fps: number;
   aspect: { w: number; h: number } | null;
 }[] = [
-  { id: "custom", label: "Custom", format: "mp4", height: 1080, fps: 30, aspect: null },
+  // Never applied — `applyPreset` returns early for "custom" — but kept
+  // truthful so it does not describe a default the page no longer has.
+  { id: "custom", label: "Custom", format: "mp4", height: 0, fps: 0, aspect: null },
   { id: "tiktok", label: "TikTok / Reels — 9:16", format: "mp4", height: 1920, fps: 30, aspect: { w: 9, h: 16 } },
   { id: "shorts", label: "YouTube Shorts — 9:16", format: "mp4", height: 1920, fps: 30, aspect: { w: 9, h: 16 } },
   { id: "square", label: "Instagram feed — 1:1", format: "mp4", height: 1080, fps: 30, aspect: { w: 1, h: 1 } },
@@ -169,9 +171,16 @@ export function ConvertTab({ active }: { active: boolean }) {
   const [skipConforming, setSkipConforming] = useState(true);
   const [videoFormat, setVideoFormat] = useState<VideoFormat>("mp4");
   const [photoFormat, setPhotoFormat] = useState<PhotoFormat>("jpg");
-  const [videoHeight, setVideoHeight] = useState(1080);
-  const [fps, setFps] = useState(30);
-  const [photoHeight, setPhotoHeight] = useState(1440);
+  // Keep the source's resolution and frame rate unless asked otherwise.
+  //
+  // 0 means "Keep original", which the Rust side receives as `None`. Defaulting
+  // to a cap silently degraded every file that was already fine: a 4K clip came
+  // back at 1080p, and a 60 fps one at 30 — losses nobody chose and nothing
+  // undoes. It also forced a full re-encode where a container rewrite would
+  // have done, so the safe default is the fast one too.
+  const [videoHeight, setVideoHeight] = useState(0);
+  const [fps, setFps] = useState(0);
+  const [photoHeight, setPhotoHeight] = useState(0);
   // Per lane, not shared: videos and photos run at the same time now, so one
   // number would be a budget split between two batches without saying so.
   // Photos are cheap and IO-bound, videos are neither, which is why they do
