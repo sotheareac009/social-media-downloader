@@ -17,6 +17,10 @@ on:
         description: "Hide the Publishing section"
         type: boolean
         default: false
+      hide_autoscroll:
+        description: "Hide the Auto-scroll section"
+        type: boolean
+        default: false
       upload_hidden_targets:
         description: "Upload destinations to hide (comma-separated: youtube,facebook,tiktok,x,telegram)"
         type: string
@@ -145,6 +149,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           VITE_HIDE_UPLOAD: ${{ inputs.hide_upload }}
           VITE_HIDE_PUBLISHING: ${{ inputs.hide_publishing }}
+          VITE_HIDE_AUTOSCROLL: ${{ inputs.hide_autoscroll }}
           VITE_UPLOAD_HIDDEN_TARGETS: ${{ inputs.upload_hidden_targets }}
           LICENSE_DISABLED: ${{ inputs.license_disabled }}
         run: npm run build:windows

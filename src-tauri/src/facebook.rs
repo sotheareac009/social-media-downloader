@@ -153,6 +153,152 @@ pub async fn upload_photo(
         .ok_or(AppError::MalformedProviderResponse)
 }
 
+/// Publish a video to a Page. Returns the new video id.
+///
+/// Uses Graph's resumable upload (start → transfer → finish) on the video
+/// host rather than one multipart POST: Facebook names each chunk's byte range,
+/// so only one chunk is in memory at a time however large the file is.
+pub async fn upload_video(
+    http: &reqwest::Client,
+    user_token: &str,
+    page_id: &str,
+    file_path: &std::path::Path,
+    title: &str,
+    description: &str,
+) -> Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let token = page_token(http, user_token, page_id).await?;
+    let endpoint = format!("https://graph-video.facebook.com/{GRAPH_VERSION}/{page_id}/videos");
+
+    let mut file = std::fs::File::open(file_path)
+        .map_err(|e| AppError::DownloadPath(format!("could not read the video: {e}")))?;
+    let size = file
+        .metadata()
+        .map_err(|e| AppError::DownloadPath(format!("could not read the video: {e}")))?
+        .len();
+
+    // Offsets come back as strings in every phase.
+    #[derive(serde::Deserialize)]
+    struct Start {
+        upload_session_id: String,
+        video_id: String,
+        start_offset: String,
+        end_offset: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Transfer {
+        start_offset: String,
+        end_offset: String,
+    }
+    let offset = |s: &str| s.parse::<u64>().map_err(|_| AppError::MalformedProviderResponse);
+
+    let resp = http
+        .post(&endpoint)
+        .form(&[
+            ("access_token", token.as_str()),
+            ("upload_phase", "start"),
+            ("file_size", &size.to_string()),
+        ])
+        .send()
+        .await
+        .map_err(|_| AppError::Network)?;
+    if !resp.status().is_success() {
+        return Err(graph_error(resp).await);
+    }
+    let start: Start = resp.json().await.map_err(|_| AppError::MalformedProviderResponse)?;
+
+    let file_name = file_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "video.mp4".into());
+    let (mut from, mut to) = (offset(&start.start_offset)?, offset(&start.end_offset)?);
+
+    // Facebook signals completion by returning equal offsets.
+    while from < to {
+        let mut chunk = vec![0u8; (to - from) as usize];
+        file.seek(SeekFrom::Start(from))
+            .and_then(|_| file.read_exact(&mut chunk))
+            .map_err(|e| AppError::DownloadPath(format!("could not read the video: {e}")))?;
+
+        let form = reqwest::multipart::Form::new()
+            .text("access_token", token.clone())
+            .text("upload_phase", "transfer")
+            .text("upload_session_id", start.upload_session_id.clone())
+            .text("start_offset", from.to_string())
+            .part(
+                "video_file_chunk",
+                reqwest::multipart::Part::bytes(chunk).file_name(file_name.clone()),
+            );
+        let resp = http
+            .post(&endpoint)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|_| AppError::Network)?;
+        if !resp.status().is_success() {
+            return Err(graph_error(resp).await);
+        }
+        let next: Transfer = resp.json().await.map_err(|_| AppError::MalformedProviderResponse)?;
+        (from, to) = (offset(&next.start_offset)?, offset(&next.end_offset)?);
+    }
+
+    let mut finish = vec![
+        ("access_token", token.as_str()),
+        ("upload_phase", "finish"),
+        ("upload_session_id", start.upload_session_id.as_str()),
+        ("published", "true"),
+    ];
+    if !title.trim().is_empty() {
+        finish.push(("title", title.trim()));
+    }
+    if !description.trim().is_empty() {
+        finish.push(("description", description.trim()));
+    }
+    let resp = http
+        .post(&endpoint)
+        .form(&finish)
+        .send()
+        .await
+        .map_err(|_| AppError::Network)?;
+    if !resp.status().is_success() {
+        return Err(graph_error(resp).await);
+    }
+    Ok(start.video_id)
+}
+
+/// Publish a text-only status to a Page's feed. Returns the new post id.
+pub async fn post_status(
+    http: &reqwest::Client,
+    user_token: &str,
+    page_id: &str,
+    message: &str,
+) -> Result<String> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Err(AppError::ProviderDenied("a status needs some text".into()));
+    }
+    let token = page_token(http, user_token, page_id).await?;
+
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        id: String,
+    }
+
+    let resp = http
+        .post(format!("https://graph.facebook.com/{GRAPH_VERSION}/{page_id}/feed"))
+        .form(&[("access_token", token.as_str()), ("message", message)])
+        .send()
+        .await
+        .map_err(|_| AppError::Network)?;
+
+    if !resp.status().is_success() {
+        return Err(graph_error(resp).await);
+    }
+    let parsed: Resp = resp.json().await.map_err(|_| AppError::MalformedProviderResponse)?;
+    Ok(parsed.id)
+}
+
 /// Turn a Graph API error body into a user-safe message. Graph errors carry a
 /// human-readable `message`, which is safe to surface (it names the problem,
 /// not the token).

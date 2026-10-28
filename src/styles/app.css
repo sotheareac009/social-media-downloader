@@ -2509,7 +2509,7 @@
 
 .up-targets {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 10px;
 }
 
@@ -3154,32 +3154,74 @@
 }
 
 
-/* --- telegram container card --------------------------------------------- */
+/* --- per-platform settings panels ---------------------------------------- */
 
-.up-target--box {
+/* Tiles above only toggle; each chosen platform's choices (channels, Pages,
+   chats) get a panel here, so selecting never reflows the tile row. */
+.up-panels {
+  display: flex;
   flex-direction: column;
-  align-items: stretch;
-  gap: 0;
-  padding: 0;
-  cursor: default;
+  gap: 10px;
+  margin-top: 12px;
 }
 
-.up-target--wide { grid-column: 1 / -1; }
+.up-panel {
+  position: relative;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--brand);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-xs);
+  animation: up-enter var(--t-slow) var(--ease-out) both;
+}
 
-.up-target__head {
+.up-panel__head {
   display: flex;
   align-items: center;
-  gap: 11px;
-  width: 100%;
-  padding: 12px 13px;
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-  border-radius: var(--r-lg);
+  gap: 9px;
+  padding: 11px 13px 9px;
 }
 
-.up-target__head:disabled { cursor: default; }
+.up-panel__head .logo {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  flex: none;
+}
+
+.up-panel__title {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.up-panel__hint {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+}
+
+.up-panel__status {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.up-panel__optional {
+  margin-left: 6px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.up-panel__action { align-self: flex-end; }
+
+@media (max-width: 520px) {
+  .up-panel__hint { display: none; }
+}
 
 .up-tg {
   padding: 0 13px 13px;
@@ -3450,6 +3492,7 @@
 .fbpost__actions .btn:not(:disabled):active { transform: scale(0.98); }
 
 @media (prefers-reduced-motion: reduce) {
+  .up-panel,
   .up-tg,
   .up-tg__drop,
   .up-menu,

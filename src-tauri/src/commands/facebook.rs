@@ -71,6 +71,38 @@ pub async fn facebook_upload_photo(
     .await
 }
 
+/// Publish a video to a Page. Returns the new video id.
+#[tauri::command]
+pub async fn facebook_upload_video(
+    manager: State<'_, AuthManager>,
+    page_id: String,
+    file_path: String,
+    title: String,
+    description: String,
+) -> Result<String> {
+    let token = user_token(&manager).await?;
+    facebook::upload_video(
+        &http(),
+        &token,
+        &page_id,
+        std::path::Path::new(&file_path),
+        &title,
+        &description,
+    )
+    .await
+}
+
+/// Publish a text-only status to a Page. Returns the new post id.
+#[tauri::command]
+pub async fn facebook_post_status(
+    manager: State<'_, AuthManager>,
+    page_id: String,
+    message: String,
+) -> Result<String> {
+    let token = user_token(&manager).await?;
+    facebook::post_status(&http(), &token, &page_id, &message).await
+}
+
 /// The most recently downloaded files, offered as a source to upload from.
 #[tauri::command]
 pub async fn facebook_recent_downloads(

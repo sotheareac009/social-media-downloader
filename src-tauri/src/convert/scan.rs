@@ -57,13 +57,13 @@ const MAX_DEPTH: usize = 6;
 /// A cap on rows, so one careless drop cannot lock the UI up for minutes.
 const MAX_ITEMS: usize = 5_000;
 
-/// Largest file the converter accepts, in bytes (2 GiB).
+/// Largest file the converter accepts, in bytes (6 GiB).
 ///
 /// A limit rather than a warning: a conversion at this scale takes long enough
 /// that discovering it was never going to work — because the machine ran out of
 /// disk, or the job outlived the app — wastes far more of someone's time than
 /// being told up front.
-pub const MAX_SIZE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub const MAX_SIZE_BYTES: u64 = 6 * 1024 * 1024 * 1024;
 
 /// Longest video the converter accepts, in seconds (2 hours).
 pub const MAX_DURATION_SECONDS: f64 = 2.0 * 60.0 * 60.0;
@@ -425,8 +425,8 @@ fn parse_frame_rate(raw: &str) -> Option<f64> {
 mod tests {
 
     #[test]
-    fn files_at_or_under_two_gigabytes_are_accepted() {
-        assert!(size_limit_reason(MAX_SIZE_BYTES).is_none(), "exactly 2 GB is allowed");
+    fn files_at_or_under_six_gigabytes_are_accepted() {
+        assert!(size_limit_reason(MAX_SIZE_BYTES).is_none(), "exactly 6 GB is allowed");
         assert!(size_limit_reason(MAX_SIZE_BYTES - 1).is_none());
         assert!(size_limit_reason(0).is_none());
     }
@@ -434,12 +434,12 @@ mod tests {
     #[test]
     fn oversized_files_say_how_big_they_are() {
         let reason = size_limit_reason(MAX_SIZE_BYTES + 1).expect("must be refused");
-        assert!(reason.contains("2.0 GB"), "{reason}");
+        assert!(reason.contains("6.0 GB"), "{reason}");
         assert!(reason.contains("limit"), "{reason}");
 
         // A number the user can act on, not just "too big".
-        let huge = size_limit_reason(5 * 1024 * 1024 * 1024).unwrap();
-        assert!(huge.contains("5.0 GB"), "{huge}");
+        let huge = size_limit_reason(9 * 1024 * 1024 * 1024).unwrap();
+        assert!(huge.contains("9.0 GB"), "{huge}");
     }
 
     #[test]
@@ -471,9 +471,9 @@ mod tests {
             size_limit_reason(five_hundred_mb).is_none(),
             "each clip is fine on its own"
         );
-        let reason = combined_limit_reason(five_hundred_mb * 5, 600.0)
-            .expect("five of them are not");
-        assert!(reason.contains("2.4 GB"), "{reason}");
+        let reason = combined_limit_reason(five_hundred_mb * 15, 600.0)
+            .expect("fifteen of them are not");
+        assert!(reason.contains("7.3 GB"), "{reason}");
         assert!(reason.contains("merged"), "{reason}");
     }
 

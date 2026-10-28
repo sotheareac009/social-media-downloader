@@ -1,9 +1,9 @@
 //! Unified upload: one command surface behind a single "Upload" screen.
 //!
 //! The frontend picks a file, fills a form, and chooses a target platform; the
-//! matching upload runs in Rust with that platform's stored credential. Only
-//! YouTube is implemented so far; the others report why they aren't ready, so
-//! the selector can show the whole set honestly.
+//! matching upload runs in Rust with that platform's stored credential. Targets
+//! that can't be used yet report why, so the selector can show the whole set
+//! honestly.
 
 use tauri::{AppHandle, Manager, State};
 
@@ -59,6 +59,15 @@ pub async fn upload_targets(
         .as_ref()
         .is_some_and(|c| c.scopes.iter().any(|s| s == "tweet.write"));
 
+    // Facebook posts as a Page, which needs `pages_manage_posts` on the OAuth
+    // login. In Development mode that works for Pages you admin; publishing
+    // for other people still needs App Review + Business Verification.
+    let fb_cred = manager.access_token(ProviderId::Facebook).await.ok();
+    let fb_connected = fb_cred.is_some();
+    let fb_can_post = fb_cred
+        .as_ref()
+        .is_some_and(|c| c.scopes.iter().any(|s| s == "pages_manage_posts"));
+
     let tiktok = manager.access_token(ProviderId::TikTok).await.ok();
     let tiktok_connected = tiktok.is_some();
     let tiktok_can_post = tiktok
@@ -84,9 +93,19 @@ pub async fn upload_targets(
         UploadTarget {
             id: "facebook".into(),
             name: "Facebook Page".into(),
-            accepts: "photo".into(),
-            ready: false,
-            reason: Some("Needs Facebook Business Verification before publishing.".into()),
+            accepts: "video,photo".into(),
+            ready: fb_can_post,
+            reason: if fb_can_post {
+                None
+            } else if fb_connected {
+                Some(
+                    "Connected, but this login can't post to Pages. Reconnect Facebook on the \
+                     Accounts page and grant Page permissions."
+                        .into(),
+                )
+            } else {
+                Some("Connect Facebook on the Accounts page.".into())
+            },
         },
         UploadTarget {
             id: "tiktok".into(),

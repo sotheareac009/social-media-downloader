@@ -46,7 +46,7 @@ import { toAuthError } from "@/lib/auth";
  */
 /** Mirrors the ceilings the Rust side enforces; kept in sync by hand because
  *  the value is a product decision, not something the backend advertises. */
-const MAX_MERGE_BYTES = 2 * 1024 ** 3;
+const MAX_MERGE_BYTES = 6 * 1024 ** 3;
 const MAX_MERGE_SECONDS = 2 * 60 * 60;
 
 export function MergeTab({ active }: { active: boolean }) {
@@ -258,7 +258,7 @@ export function MergeTab({ active }: { active: boolean }) {
   const totalBytes = clips.reduce((sum, c) => sum + (c.size_bytes ?? 0), 0);
   const overLimit =
     totalBytes > MAX_MERGE_BYTES
-      ? `about ${(totalBytes / 1024 ** 3).toFixed(1)} GB — over the 2 GB limit`
+      ? `about ${(totalBytes / 1024 ** 3).toFixed(1)} GB — over the 6 GB limit`
       : totalSeconds > MAX_MERGE_SECONDS
         ? `${formatLength(totalSeconds)} — over the 2 hour limit`
         : null;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   telegramChatAvatar,
@@ -29,6 +29,13 @@ import { AlertIcon, CheckIcon, UploadIcon, XIcon } from "@/components/ui/icons";
 import { SourceLogo, SOURCE_COLOR, type SourceId } from "@/components/home/SourceLogo";
 import { QueuePager } from "@/components/downloads/QueuePager";
 import { isUploadTargetHidden } from "@/lib/flags";
+import {
+  facebookListPages,
+  facebookPostStatus,
+  facebookUploadPhoto,
+  facebookUploadVideo,
+  type Page as FbPage,
+} from "@/lib/facebook";
 
 /**
  * Items per page.
@@ -110,6 +117,11 @@ function visibleTargets(list: UploadTarget[]): UploadTarget[] {
   return list.filter((t) => !isUploadTargetHidden(t.id));
 }
 
+/** Photos go to Graph `/{page}/photos`; anything else is sent as a video. */
+function isImagePath(path: string): boolean {
+  return /\.(jpe?g|png|gif|webp)$/i.test(path);
+}
+
 /** Filename without its extension, used as each video's default title. */
 function baseName(path: string): string {
   const name = path.split("/").pop() ?? path;
@@ -126,11 +138,16 @@ export function UploadPage() {
   const [ytAccounts, setYtAccounts] = useState<YoutubeAccount[] | null>(null);
   const [ytSelected, setYtSelected] = useState<Set<string>>(new Set());
   const [ytAdding, setYtAdding] = useState(false);
+  // YouTube's panel is open: chosen channels, or the user is adding one.
+  const [ytOpen, setYtOpen] = useState(false);
   // Which platform's destination dropdown is open (null = none).
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [tgChats, setTgChats] = useState<TelegramChat[] | null | "error">(null);
   const [tgSelected, setTgSelected] = useState<Set<string>>(new Set());
   const [tgSearch, setTgSearch] = useState("");
+  const [fbPages, setFbPages] = useState<FbPage[] | null | "error">(null);
+  const [fbSelected, setFbSelected] = useState<Set<string>>(new Set());
+  const [fbStatus, setFbStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<UploadResult | null>(null);
   // Every destination attempted this session, newest run last. Kept across
@@ -197,10 +214,14 @@ export function UploadPage() {
   );
   const youtubeChosen = ytSelected.size > 0;
   const telegramChosen = chosen.some((t) => t.id === "telegram");
+  const facebookChosen = chosen.some((t) => t.id === "facebook");
   // Keep the "youtube" platform in the selected set in lockstep with whether
   // any account is checked, so the rest of the flow (publish, summary) treats
   // it like the other platforms.
   useEffect(() => {
+    // Once open, the panel stays until the tile closes it, so unticking the
+    // last channel doesn't yank the list out from under the cursor.
+    if (youtubeChosen) setYtOpen(true);
     setSelected((prev) => {
       const has = prev.has("youtube");
       if (youtubeChosen && !has) {
@@ -257,10 +278,15 @@ export function UploadPage() {
     [loadYtAccounts, toast],
   );
   // File kind: video if any chosen platform takes video, else photo.
-  const accepts =
-    chosen.length === 0 || chosen.some((t) => t.accepts.includes("video"))
-      ? "video"
-      : "photo";
+  // Both kinds when every chosen platform takes both (Facebook, X, Telegram),
+  // so a photo can still be picked alongside a video target.
+  const accepts: "video" | "photo" | "any" =
+    chosen.length > 0 &&
+    chosen.every((t) => t.accepts.includes("video") && t.accepts.includes("photo"))
+      ? "any"
+      : chosen.length === 0 || chosen.some((t) => t.accepts.includes("video"))
+        ? "video"
+        : "photo";
 
   const toggleTarget = useCallback((t: UploadTarget) => {
     if (!t.ready) return; // can't select a platform that isn't usable yet
@@ -271,6 +297,19 @@ export function UploadPage() {
       return next;
     });
   }, []);
+
+  // YouTube has no on/off of its own: it is "on" while a channel is ticked.
+  // The tile opens the panel (pre-ticking the first channel) or clears it.
+  const toggleYoutube = useCallback(() => {
+    if (youtubeChosen || ytOpen) {
+      setYtSelected(new Set());
+      setYtOpen(false);
+      return;
+    }
+    setYtOpen(true);
+    const first = (ytAccounts ?? [])[0];
+    if (first) setYtSelected(new Set([first.id]));
+  }, [youtubeChosen, ytOpen, ytAccounts]);
 
   const [tgRefreshing, setTgRefreshing] = useState(false);
   const loadTgChats = useCallback(async (showLoading: boolean) => {
@@ -292,6 +331,22 @@ export function UploadPage() {
     if (telegramChosen) void loadTgChats(true);
   }, [telegramChosen, loadTgChats]);
 
+  // Load the Pages this Facebook login can post to when Facebook is chosen.
+  // A single Page is pre-ticked so the common case needs no extra click.
+  useEffect(() => {
+    if (!facebookChosen || fbPages !== null) return;
+    void (async () => {
+      try {
+        const pages = await facebookListPages();
+        if (!mounted.current) return;
+        setFbPages(pages);
+        if (pages.length === 1) setFbSelected(new Set([pages[0].id]));
+      } catch {
+        if (mounted.current) setFbPages("error");
+      }
+    })();
+  }, [facebookChosen, fbPages]);
+
   // Refresh whenever the picker opens, so a group created since shows up.
   useEffect(() => {
     if (openMenu === "telegram") void loadTgChats(false);
@@ -299,7 +354,7 @@ export function UploadPage() {
 
   const addFiles = useCallback(async () => {
     try {
-      const paths = await uploadPickFiles(accepts as "video" | "photo");
+      const paths = await uploadPickFiles(accepts);
       if (paths.length === 0) return;
       setItems((prev) => {
         const seen = new Set(prev.map((i) => i.path));
@@ -375,6 +430,20 @@ export function UploadPage() {
                 subLabel: chat?.title ?? "chat",
               });
             }
+          } else if (t.id === "facebook") {
+            for (const pageId of fbSelected) {
+              const pg = Array.isArray(fbPages)
+                ? fbPages.find((p) => p.id === pageId)
+                : undefined;
+              out.push({
+                ...base,
+                id: `${item.path}::facebook::${pageId}`,
+                targetId: t.id,
+                targetName: t.name,
+                subId: pageId,
+                subLabel: pg?.name ?? "Page",
+              });
+            }
           } else {
             out.push({
               ...base,
@@ -387,7 +456,7 @@ export function UploadPage() {
       }
       return out;
     },
-    [chosen, tgChats, tgSelected, ytAccounts, ytSelected],
+    [chosen, fbPages, fbSelected, tgChats, tgSelected, ytAccounts, ytSelected],
   );
 
   /**
@@ -413,6 +482,17 @@ export function UploadPage() {
         await uploadTiktok(job.path);
       } else if (job.targetId === "x") {
         await uploadX(job.path, job.description.trim() || job.title);
+      } else if (job.targetId === "facebook" && job.path === "") {
+        // A text-only status: no file, the text rides in `description`.
+        await facebookPostStatus(job.subId!, job.description);
+      } else if (job.targetId === "facebook") {
+        // Photos post with a caption; videos go through Rust's chunked
+        // upload, which reads the file itself rather than through the webview.
+        if (isImagePath(job.path)) {
+          await facebookUploadPhoto(job.subId!, job.path, job.description.trim() || job.title);
+        } else {
+          await facebookUploadVideo(job.subId!, job.path, job.title, job.description);
+        }
       } else if (job.targetId === "telegram") {
         let bytes = bytesCache.get(job.path);
         if (!bytes) {
@@ -590,6 +670,37 @@ export function UploadPage() {
     return jobs.filter((j) => j.status === "queued" || j.status === "uploading");
   }, [jobTab, jobs]);
 
+  /**
+   * Post the status text to every ticked Page, one job per Page.
+   *
+   * Jobs with an empty `path` are statuses; they match no file item, so the
+   * file list is left alone. Each post gets its own id, so posting the same
+   * text twice is two posts rather than a retry of the first.
+   */
+  const postFbStatus = useCallback(async () => {
+    const text = fbStatus.trim();
+    const fb = chosen.find((t) => t.id === "facebook");
+    if (!fb || !text || fbSelected.size === 0) return;
+    const stamp = Date.now();
+    const list: UploadJob[] = [...fbSelected].map((pageId) => {
+      const pg = Array.isArray(fbPages) ? fbPages.find((p) => p.id === pageId) : undefined;
+      return {
+        id: `status::${stamp}::facebook::${pageId}`,
+        path: "",
+        fileName: "Status",
+        targetId: fb.id,
+        targetName: fb.name,
+        subId: pageId,
+        subLabel: pg?.name ?? "Page",
+        title: text.slice(0, 60),
+        description: text,
+        status: "queued",
+      };
+    });
+    await runJobs(list);
+    if (mounted.current) setFbStatus("");
+  }, [chosen, fbPages, fbSelected, fbStatus, runJobs]);
+
   /** Re-run specific jobs — the failed ones, or a single row. */
   const retryJobs = useCallback(
     async (ids: string[]) => {
@@ -660,46 +771,208 @@ export function UploadPage() {
 
       <div className="fbpost rise" style={{ maxWidth: 640 }}>
         <label className="tg-field__label">Post to</label>
+        {/* Platform tiles: one fixed size each, so choosing a platform never
+            reflows the row. Per-platform choices live in panels below. */}
         <div className="up-targets">
           {(targets ?? []).map((t) => {
             const brand = SOURCE_COLOR[t.id as SourceId] ?? "var(--accent)";
-            const isSel = selected.has(t.id) && t.ready;
+            const isYt = t.id === "youtube";
+            const accounts = ytAccounts ?? [];
+            // YouTube is usable once an uploader account exists, or to add one.
+            const usable = isYt || t.ready;
+            const isSel = isYt ? youtubeChosen || ytOpen : selected.has(t.id) && t.ready;
+            const ok = isYt ? accounts.length > 0 : t.ready;
 
-            // Telegram is a container card: the header toggles the platform,
-            // while a dropdown + chosen-chat chips live inside it.
-            if (t.id === "telegram") {
-              return (
-                <div
-                  key={t.id}
-                  className={`up-target up-target--box ${isSel ? "up-target--active up-target--wide" : ""} ${t.ready ? "" : "up-target--off"}`.trim()}
-                  style={{ ["--brand" as string]: brand }}
-                >
-                  <span className="up-target__edge" />
-                  <button
-                    type="button"
-                    className="up-target__head"
-                    onClick={() => toggleTarget(t)}
-                    disabled={!t.ready}
-                  >
-                    <SourceLogo source="telegram" />
-                    <span className="up-target__text">
-                      <span className="up-target__name">Telegram</span>
-                      <span className={`up-target__pill ${t.ready ? "up-target__pill--ok" : "up-target__pill--off"}`}>
-                        {t.ready
-                          ? tgSelected.size === 0
-                            ? (<><CheckIcon size={10} /> Ready</>)
-                            : `${tgSelected.size} chat${tgSelected.size === 1 ? "" : "s"}`
-                          : "Not ready"}
-                      </span>
-                    </span>
-                    {t.ready && (
-                      <span className={`up-target__mark ${isSel ? "up-target__mark--on" : ""}`.trim()}>
-                        {isSel && <CheckIcon size={12} />}
-                      </span>
-                    )}
-                  </button>
+            let pill: ReactNode = ok ? (<><CheckIcon size={10} /> Ready</>) : "Not ready";
+            if (isYt && ytSelected.size > 0) pill = `${ytSelected.size} account${ytSelected.size === 1 ? "" : "s"}`;
+            else if (isYt && accounts.length === 0) pill = "Add account";
+            else if (t.id === "telegram" && isSel && tgSelected.size > 0) pill = `${tgSelected.size} chat${tgSelected.size === 1 ? "" : "s"}`;
+            else if (t.id === "facebook" && isSel && fbSelected.size > 0) pill = `${fbSelected.size} Page${fbSelected.size === 1 ? "" : "s"}`;
 
-                  {isSel && (
+            return (
+              <button
+                key={t.id}
+                type="button"
+                className={`up-target ${isSel ? "up-target--active" : ""} ${usable ? "" : "up-target--off"}`.trim()}
+                style={{ ["--brand" as string]: brand }}
+                onClick={() => (isYt ? toggleYoutube() : toggleTarget(t))}
+                title={usable ? undefined : t.reason ?? undefined}
+                aria-pressed={isSel}
+              >
+                <span className="up-target__edge" />
+                <SourceLogo source={t.id as SourceId} />
+                <span className="up-target__text">
+                  <span className="up-target__name">{isYt ? "YouTube" : t.name}</span>
+                  <span className={`up-target__pill ${ok ? "up-target__pill--ok" : "up-target__pill--off"}`}>
+                    {pill}
+                  </span>
+                </span>
+                {usable && (
+                  <span className={`up-target__mark ${isSel ? "up-target__mark--on" : ""}`.trim()}>
+                    {isSel && <CheckIcon size={12} />}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Settings for each chosen platform, in the same order as the tiles. */}
+        {(targets ?? []).some(
+          (t) =>
+            (t.id === "youtube" && (youtubeChosen || ytOpen)) ||
+            ((t.id === "telegram" || t.id === "facebook") && selected.has(t.id) && t.ready),
+        ) && (
+          <div className="up-panels">
+            {(targets ?? []).map((t) => {
+              const brand = SOURCE_COLOR[t.id as SourceId] ?? "var(--accent)";
+
+              if (t.id === "youtube" && (youtubeChosen || ytOpen)) {
+                const accounts = ytAccounts ?? [];
+                return (
+                  <section key={t.id} className="up-panel" style={{ ["--brand" as string]: brand }}>
+                    <header className="up-panel__head">
+                      <SourceLogo source="youtube" />
+                      <span className="up-panel__title">YouTube</span>
+                      <span className="up-panel__hint">Choose the channels to upload to</span>
+                    </header>
+                    <div className="up-tg">
+                      {accounts.length > 0 && (
+                        <div className="up-tg__list" style={{ maxHeight: 220 }}>
+                          {accounts.map((a) => {
+                            const on = ytSelected.has(a.id);
+                            return (
+                              <div key={a.id} className={`up-tg__item ${on ? "up-tg__item--on" : ""}`.trim()}>
+                                <button
+                                  type="button"
+                                  className="up-yt__pick"
+                                  onClick={() =>
+                                    setYtSelected((prev) => {
+                                      const n = new Set(prev);
+                                      if (n.has(a.id)) n.delete(a.id);
+                                      else n.add(a.id);
+                                      return n;
+                                    })
+                                  }
+                                >
+                                  <span className={`tg-picker__check ${on ? "tg-picker__check--on" : ""}`}>{on && <CheckIcon size={12} />}</span>
+                                  {a.channel_avatar || a.avatar_url ? (
+                                    <img className="tg-av" src={(a.channel_avatar || a.avatar_url)!} alt="" referrerPolicy="no-referrer" style={{ width: 26, height: 26 }} />
+                                  ) : (
+                                    <span className="tg-av tg-av--ph" style={{ width: 26, height: 26, fontSize: 13 }}>▶</span>
+                                  )}
+                                  <span className="up-yt__meta">
+                                    <span className="tg-picker__name">{a.channel_title ?? a.display_name}</span>
+                                    {a.email && <span className="up-yt__sub">{a.email}</span>}
+                                  </span>
+                                </button>
+                                <button
+                                  type="button"
+                                  className="up-tg__chipx"
+                                  aria-label="Remove account"
+                                  title="Remove account"
+                                  onClick={() => void removeYtAccount(a.id)}
+                                >
+                                  <XIcon size={12} />
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        className="btn btn--ghost btn--sm up-yt__add"
+                        disabled={ytAdding}
+                        onClick={() => void addYtAccount()}
+                      >
+                        {ytAdding ? "Opening Google…" : accounts.length > 0 ? "+ Add another account" : "+ Add a YouTube account"}
+                      </button>
+                    </div>
+                  </section>
+                );
+              }
+
+              if (t.id === "facebook" && selected.has(t.id) && t.ready) {
+                return (
+                  <section key={t.id} className="up-panel" style={{ ["--brand" as string]: brand }}>
+                    <header className="up-panel__head">
+                      <SourceLogo source="facebook" />
+                      <span className="up-panel__title">Facebook</span>
+                      <span className="up-panel__hint">Choose the Pages to post to</span>
+                    </header>
+                    <div className="up-tg">
+                      <div className="up-tg__list" style={{ maxHeight: 220 }}>
+                        {fbPages === null && <div className="up-menu__note">Loading your Pages…</div>}
+                        {fbPages === "error" && <div className="up-menu__note">Couldn't load Pages. Reconnect Facebook on the Accounts page.</div>}
+                        {Array.isArray(fbPages) && fbPages.length === 0 && (
+                          <div className="up-menu__note">No Pages found. Reconnect Facebook and tick your Page when asked.</div>
+                        )}
+                        {Array.isArray(fbPages) &&
+                          fbPages.map((p) => {
+                            const on = fbSelected.has(p.id);
+                            return (
+                              <button
+                                key={p.id}
+                                type="button"
+                                className={`up-tg__item ${on ? "up-tg__item--on" : ""}`.trim()}
+                                onClick={() =>
+                                  setFbSelected((prev) => {
+                                    const n = new Set(prev);
+                                    if (n.has(p.id)) n.delete(p.id);
+                                    else n.add(p.id);
+                                    return n;
+                                  })
+                                }
+                              >
+                                <span className={`tg-picker__check ${on ? "tg-picker__check--on" : ""}`}>{on && <CheckIcon size={12} />}</span>
+                                {p.avatar_url ? (
+                                  <img className="tg-av" src={p.avatar_url} alt="" referrerPolicy="no-referrer" style={{ width: 26, height: 26 }} />
+                                ) : (
+                                  <span className="tg-av tg-av--ph" style={{ width: 26, height: 26, fontSize: 13 }}>f</span>
+                                )}
+                                <span className="tg-picker__name">{p.name}</span>
+                              </button>
+                            );
+                          })}
+                      </div>
+
+                      <div className="up-panel__status">
+                        <label className="tg-field__label" style={{ margin: 0 }}>
+                          Text-only status <span className="up-panel__optional">optional, no file needed</span>
+                        </label>
+                        <textarea
+                          className="tg-field__input"
+                          rows={3}
+                          placeholder="Write something to post to the ticked Pages…"
+                          value={fbStatus}
+                          onChange={(e) => setFbStatus(e.target.value)}
+                          style={{ width: "100%", resize: "vertical" }}
+                        />
+                        <Button
+                          className="btn--sm up-panel__action"
+                          loading={busy}
+                          disabled={!fbStatus.trim() || fbSelected.size === 0}
+                          onClick={() => void postFbStatus()}
+                        >
+                          {fbSelected.size === 0
+                            ? "Tick a Page to post"
+                            : `Post status to ${fbSelected.size} Page${fbSelected.size === 1 ? "" : "s"}`}
+                        </Button>
+                      </div>
+                    </div>
+                  </section>
+                );
+              }
+
+              if (t.id === "telegram" && selected.has(t.id) && t.ready) {
+                return (
+                  <section key={t.id} className="up-panel" style={{ ["--brand" as string]: brand }}>
+                    <header className="up-panel__head">
+                      <SourceLogo source="telegram" />
+                      <span className="up-panel__title">Telegram</span>
+                      <span className="up-panel__hint">Choose the groups &amp; channels to send to</span>
+                    </header>
                     <div className="up-tg">
                       <button
                         type="button"
@@ -798,126 +1071,14 @@ export function UploadPage() {
                         </div>
                       )}
                     </div>
-                  )}
-                </div>
-              );
-            }
+                  </section>
+                );
+              }
 
-            // YouTube is a container card holding one or more uploader accounts,
-            // each independently selectable; "Add account" runs a Google login.
-            if (t.id === "youtube") {
-              const accounts = ytAccounts ?? [];
-              return (
-                <div
-                  key={t.id}
-                  className={`up-target up-target--box ${youtubeChosen ? "up-target--active up-target--wide" : ""}`.trim()}
-                  style={{ ["--brand" as string]: brand }}
-                >
-                  <span className="up-target__edge" />
-                  <div className="up-target__head" style={{ cursor: "default" }}>
-                    <SourceLogo source="youtube" />
-                    <span className="up-target__text">
-                      <span className="up-target__name">YouTube</span>
-                      <span className={`up-target__pill ${accounts.length > 0 ? "up-target__pill--ok" : "up-target__pill--off"}`}>
-                        {ytSelected.size > 0
-                          ? `${ytSelected.size} account${ytSelected.size === 1 ? "" : "s"}`
-                          : accounts.length > 0
-                            ? (<><CheckIcon size={10} /> Pick account(s)</>)
-                            : "No account yet"}
-                      </span>
-                    </span>
-                    {youtubeChosen && (
-                      <span className="up-target__mark up-target__mark--on">
-                        <CheckIcon size={12} />
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="up-tg">
-                    {accounts.length > 0 && (
-                      <div className="up-tg__list" style={{ maxHeight: 220 }}>
-                        {accounts.map((a) => {
-                          const on = ytSelected.has(a.id);
-                          return (
-                            <div key={a.id} className={`up-tg__item ${on ? "up-tg__item--on" : ""}`.trim()}>
-                              <button
-                                type="button"
-                                className="up-yt__pick"
-                                onClick={() =>
-                                  setYtSelected((prev) => {
-                                    const n = new Set(prev);
-                                    if (n.has(a.id)) n.delete(a.id);
-                                    else n.add(a.id);
-                                    return n;
-                                  })
-                                }
-                              >
-                                <span className={`tg-picker__check ${on ? "tg-picker__check--on" : ""}`}>{on && <CheckIcon size={12} />}</span>
-                                {a.channel_avatar || a.avatar_url ? (
-                                  <img className="tg-av" src={(a.channel_avatar || a.avatar_url)!} alt="" referrerPolicy="no-referrer" style={{ width: 26, height: 26 }} />
-                                ) : (
-                                  <span className="tg-av tg-av--ph" style={{ width: 26, height: 26, fontSize: 13 }}>▶</span>
-                                )}
-                                <span className="up-yt__meta">
-                                  <span className="tg-picker__name">{a.channel_title ?? a.display_name}</span>
-                                  {a.email && <span className="up-yt__sub">{a.email}</span>}
-                                </span>
-                              </button>
-                              <button
-                                type="button"
-                                className="up-tg__chipx"
-                                aria-label="Remove account"
-                                title="Remove account"
-                                onClick={() => void removeYtAccount(a.id)}
-                              >
-                                <XIcon size={12} />
-                              </button>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                    <button
-                      type="button"
-                      className="btn btn--ghost btn--sm up-yt__add"
-                      disabled={ytAdding}
-                      onClick={() => void addYtAccount()}
-                    >
-                      {ytAdding ? "Opening Google…" : accounts.length > 0 ? "+ Add another account" : "+ Add a YouTube account"}
-                    </button>
-                  </div>
-                </div>
-              );
-            }
-
-            // Other platforms: single-select button cards.
-            return (
-              <button
-                key={t.id}
-                type="button"
-                className={`up-target ${isSel ? "up-target--active" : ""} ${t.ready ? "" : "up-target--off"}`.trim()}
-                style={{ ["--brand" as string]: brand }}
-                onClick={() => toggleTarget(t)}
-                title={t.reason ?? undefined}
-                aria-pressed={isSel}
-              >
-                <span className="up-target__edge" />
-                <SourceLogo source={t.id as SourceId} />
-                <span className="up-target__text">
-                  <span className="up-target__name">{t.name}</span>
-                  <span className={`up-target__pill ${t.ready ? "up-target__pill--ok" : "up-target__pill--off"}`}>
-                    {t.ready ? (<><CheckIcon size={10} /> Ready</>) : "Not ready"}
-                  </span>
-                </span>
-                {t.ready && (
-                  <span className={`up-target__mark ${isSel ? "up-target__mark--on" : ""}`.trim()}>
-                    {isSel && <CheckIcon size={12} />}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
+              return null;
+            })}
+          </div>
+        )}
 
         {/* Files */}
         {jobs.length > 0 && (
@@ -1053,7 +1214,7 @@ export function UploadPage() {
         )}
         <div className="up-files-head">
           <label className="tg-field__label" style={{ margin: 0 }}>
-            {accepts === "video" ? "Videos" : "Photos"}
+            {accepts === "video" ? "Videos" : accepts === "photo" ? "Photos" : "Files"}
             {items.length > 0 && <span className="up-count"> ({items.length})</span>}
           </label>
           <div className="up-files-actions">
@@ -1126,7 +1287,7 @@ export function UploadPage() {
                   title="Preview"
                   aria-label="Preview"
                 >
-                  <MediaThumb path={item.path} kind={accepts as "video" | "photo"} />
+                  <MediaThumb path={item.path} kind={isImagePath(item.path) ? "photo" : "video"} />
                   <span className="up-item__play">▶</span>
                 </button>
                 <div className="up-item__body">
@@ -1240,7 +1401,7 @@ export function UploadPage() {
             >
               <XIcon size={18} />
             </button>
-            {accepts === "video" ? (
+            {!isImagePath(preview) ? (
               <video src={convertFileSrc(preview)} controls autoPlay playsInline />
             ) : (
               <img src={convertFileSrc(preview)} alt="Preview" />

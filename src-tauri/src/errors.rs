@@ -297,7 +297,7 @@ pub enum AppError {
     NoMediaSelected,
 
     /// Past the size or duration ceiling the converter accepts. Carries the
-    /// measurement, not just a verdict — "3.4 GB, over the 2 GB limit" tells
+    /// measurement, not just a verdict — "7.4 GB, over the 6 GB limit" tells
     /// someone what to do next; "too large" does not.
     #[error("{0}")]
     MediaLimit(String),

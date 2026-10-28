@@ -187,6 +187,8 @@ pub fn run() {
             commands::facebook::facebook_list_pages,
             commands::facebook::facebook_pick_photo,
             commands::facebook::facebook_upload_photo,
+            commands::facebook::facebook_post_status,
+            commands::facebook::facebook_upload_video,
             commands::facebook::facebook_recent_downloads,
             commands::upload::upload_targets,
             commands::upload::upload_pick_files,
